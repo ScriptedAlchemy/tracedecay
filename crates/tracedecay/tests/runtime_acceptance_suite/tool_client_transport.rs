@@ -201,11 +201,9 @@ fn files_response(
     scope: ResolvedScope,
     result: FilesResultV1,
 ) -> Vec<u8> {
-    let response = DaemonInvocationResponse {
-        protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
-        revision: DAEMON_INVOCATION_REVISION,
-        request_id: request.request_id.clone(),
-        outcome: DaemonInvocationOutcome::GraphTool {
+    let response = DaemonInvocationResponse::with_outcome(
+        request.request_id.clone(),
+        DaemonInvocationOutcome::GraphTool {
             scope,
             completion: GraphToolCompletionV1 {
                 result: GraphToolResultV1::Files(result),
@@ -215,7 +213,7 @@ fn files_response(
                 cost: None,
             },
         },
-    };
+    );
     let mut bytes = serde_json::to_vec(&response).expect("encode canonical response");
     bytes.push(b'\n');
     bytes
@@ -641,16 +639,14 @@ fn answer_publication(mut stream: UnixStream, request: &DaemonInvocationRequest)
         panic!("expected a publish invocation");
     };
     let created_at = observed_at.0.div_euclid(1_000_000);
-    let response = DaemonInvocationResponse {
-        protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
-        revision: DAEMON_INVOCATION_REVISION,
-        request_id: request.request_id.clone(),
-        outcome: DaemonInvocationOutcome::ResponseHandlePublished {
+    let response = DaemonInvocationResponse::with_outcome(
+        request.request_id.clone(),
+        DaemonInvocationOutcome::ResponseHandlePublished {
             handle: tracedecay_global_db::response_handle_for(content),
             created_at,
             expires_at: created_at + tracedecay_global_db::RESPONSE_HANDLE_TTL_SECS,
         },
-    };
+    );
     let mut bytes = serde_json::to_vec(&response).expect("encode publication");
     bytes.push(b'\n');
     stream.write_all(&bytes).expect("write publication");

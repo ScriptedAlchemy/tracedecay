@@ -448,6 +448,68 @@ pub async fn resolve_configuration(
     Ok(TypeScriptConfiguration { report, references })
 }
 
+/// Asks `compiler` which files `tsconfig`'s program holds, before any check
+/// runs: one absolute path per line, its `--listFilesOnly` report.
+///
+/// This is the compiler's own answer to "what would you read now", so it is
+/// the only evidence that can say a previous check's program is still the
+/// program. The `--showConfig` report cannot: typescript@5 leaves the root
+/// files out when an absolute `include` names them, and no configuration
+/// report names what the roots import.
+///
+/// It runs with `--noEmit`, as the check does, so it lists the program the
+/// check reads: asked to lay out output, typescript@7 refuses a project whose
+/// `outDir` disagrees with its common source directory, which the check never
+/// asks. The run reads and writes nothing but this list; it takes no
+/// build-info, so it never touches the file a check's incremental state lives
+/// in.
+#[tracing::instrument(
+    name = "compile_diagnostics.typescript.list_program_files",
+    level = "trace",
+    skip_all
+)]
+pub async fn list_program_files(
+    admission: &TypeScriptCompilerAdmission,
+    compiler: &Path,
+    project_root: &Path,
+    tsconfig: &Path,
+) -> Result<Vec<PathBuf>> {
+    let output = run_admitted(
+        admission,
+        compiler,
+        project_root,
+        [
+            OsStr::new("-p"),
+            tsconfig.as_os_str(),
+            OsStr::new("--listFilesOnly"),
+            OsStr::new("--noEmit"),
+        ],
+        None,
+        CHECK_LIMITS,
+    )
+    .await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Some(global) = global_error(&stdout) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "`{}` could not list the files of `{}`: {global}",
+                compiler.display(),
+                tsconfig.display()
+            ),
+        });
+    }
+    if !output.status.success() {
+        return Err(exited(compiler, &output, "listing the files of", tsconfig));
+    }
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(Path::new)
+        .map(normalize)
+        .collect())
+}
+
 /// What `compiler`'s `--build --dry` reports about `references`: `None` when
 /// it would build none of them, otherwise its own statement of each project
 /// it would build. tsc checks a referencing project against the declarations

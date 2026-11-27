@@ -21,10 +21,10 @@ From a ChatGPT conversation or the plugin's global entrypoint you can:
 - Follow deep links into a specific symbol view and toggle fullscreen.
 
 The shared MCP App (`ui://tracedecay/code-explorer`,
-`text/html;profile=mcp-app`) renders loading, empty, stale, warming, partial,
-denied, not-found, disconnected, and unavailable states truthfully. Wrong or
-unregistered project ids return the daemon's typed
-not-found-or-not-authorized problem rather than an empty success.
+`text/html;profile=mcp-app`) distinguishes loading, empty, stale, warming,
+partial, denied, not-found, disconnected, and unavailable states. For an
+incorrect or unregistered project ID, the daemon returns a typed
+not-found-or-not-authorized problem instead of an empty success.
 
 ## Architecture
 

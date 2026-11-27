@@ -121,6 +121,9 @@ pub(crate) struct GraphQlStackRepositoryV1 {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GraphQlSelectedStackPullRequestV1 {
     pub(crate) stack_entry: Option<GraphQlStackPositionV1>,
+    // Explicit null proves absence; an omitted requested field is malformed
+    // evidence and must not settle an existing drift interval.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) stack: Option<GraphQlPullRequestStackV1>,
 }
 

@@ -647,9 +647,9 @@ class Run:
 
     def stop_daemon(self) -> None:
         if self.daemon is not None:
-            # The launcher may have exited while its graph/build descendants
-            # still own this private run directory. Reap the entire session,
-            # not just the daemon leader, before deleting its storage.
+            # Graph and build processes may still use the run directory after
+            # the launcher exits. Reap the entire session before deleting the
+            # directory.
             stop_owned_process(self.daemon, 30)
 
     def execute(self) -> None:

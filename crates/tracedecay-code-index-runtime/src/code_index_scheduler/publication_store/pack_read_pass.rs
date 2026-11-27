@@ -6,7 +6,8 @@ use std::{
 };
 
 use tracedecay_code_index::production::{
-    CodeIndexProductionErrorV1, SealedGenerationSegmentIdentityV1, SealedGenerationSegmentReadV1,
+    CodeIndexProductionErrorV1, MAX_SEALED_GENERATION_CONTENT_PACKS_V1,
+    SealedGenerationSegmentIdentityV1, SealedGenerationSegmentReadV1,
 };
 use tracedecay_domain::sha256_hex_suffix;
 
@@ -76,14 +77,21 @@ impl PinnedPackV1 {
     }
 }
 
+/// One generation addresses at most its bounded content packs plus evidence.
+pub(super) const MAX_PACK_READ_PASS_HANDLES_V1: usize = MAX_SEALED_GENERATION_CONTENT_PACKS_V1 + 1;
+
 /// The caller retains the generation or preparation lease for this pass.
 /// No store lock, manifest map, or idle reader cache is retained here.
 pub(super) struct GenerationPackReadPassV1 {
-    packs: [Option<PinnedPackV1>; 2],
+    packs: Vec<PinnedPackV1>,
     failed: bool,
 }
 
 impl GenerationPackReadPassV1 {
+    pub(super) fn handle_storage_bytes(packs: usize) -> usize {
+        std::mem::size_of::<PinnedPackV1>().saturating_mul(packs)
+    }
+
     /// The ordinary path/string allowance is already admitted by the caller.
     /// Add both native lease bounds before either ancestor vector or UTF-16
     /// buffer is allocated. The first retained owner can coexist with the
@@ -96,7 +104,7 @@ impl GenerationPackReadPassV1 {
         #[cfg(windows)]
         {
             let mut workspace = 0_usize;
-            for identity in Self::unique_identities(identities)?.into_iter().flatten() {
+            for identity in Self::unique_identities(identities)? {
                 let suffix = sha256_hex_suffix(identity.digest.as_str()).ok_or_else(|| {
                     CodeIndexProductionErrorV1::Contract(
                         "sealed pack digest is not sha256".to_owned(),
@@ -130,10 +138,10 @@ impl GenerationPackReadPassV1 {
     ) -> Result<Self, CodeIndexProductionErrorV1> {
         let unique = Self::unique_identities(identities)?;
         let mut pass = Self {
-            packs: [None, None],
+            packs: Vec::with_capacity(unique.len()),
             failed: false,
         };
-        for (slot, identity) in pass.packs.iter_mut().zip(unique.into_iter().flatten()) {
+        for identity in unique {
             let suffix = sha256_hex_suffix(identity.digest.as_str()).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract("sealed pack digest is not sha256".to_owned())
             })?;
@@ -154,30 +162,25 @@ impl GenerationPackReadPassV1 {
             )?;
             #[cfg(windows)]
             let segment = Self::open_immutable_pack(path, identity, open_attempts)?;
-            let pinned = PinnedPackV1 {
+            pass.packs.push(PinnedPackV1 {
                 segment,
                 path: path.clone(),
-            };
-            *slot = Some(pinned);
+            });
         }
         Ok(pass)
     }
 
     fn unique_identities(
         identities: &[SealedGenerationSegmentIdentityV1],
-    ) -> Result<[Option<&SealedGenerationSegmentIdentityV1>; 2], CodeIndexProductionErrorV1> {
-        let mut unique: [Option<&SealedGenerationSegmentIdentityV1>; 2] = [None, None];
+    ) -> Result<Vec<&SealedGenerationSegmentIdentityV1>, CodeIndexProductionErrorV1> {
+        let mut unique: Vec<&SealedGenerationSegmentIdentityV1> = Vec::new();
         for identity in identities {
             if sha256_hex_suffix(identity.digest.as_str()).is_none() {
                 return Err(CodeIndexProductionErrorV1::Contract(
                     "sealed pack digest is not sha256".to_owned(),
                 ));
             }
-            if let Some(known) = unique
-                .iter()
-                .flatten()
-                .find(|known| known.digest == identity.digest)
-            {
+            if let Some(known) = unique.iter().find(|known| known.digest == identity.digest) {
                 if known.size_bytes != identity.size_bytes {
                     return Err(CodeIndexProductionErrorV1::Contract(
                         "sealed pack has conflicting manifest sizes".to_owned(),
@@ -185,15 +188,13 @@ impl GenerationPackReadPassV1 {
                 }
                 continue;
             }
-            let slot = unique
-                .iter_mut()
-                .find(|slot| slot.is_none())
-                .ok_or_else(|| {
-                    CodeIndexProductionErrorV1::Contract(
-                        "sealed generation requires more than two physical packs".to_owned(),
-                    )
-                })?;
-            *slot = Some(identity);
+            if unique.len() == MAX_PACK_READ_PASS_HANDLES_V1 {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "sealed generation requires more physical packs than one pass admits"
+                        .to_owned(),
+                ));
+            }
+            unique.push(identity);
         }
 
         Ok(unique)
@@ -253,17 +254,33 @@ impl GenerationPackReadPassV1 {
         self.failed
     }
 
+    /// A bound parent's identity must remain unchanged even when a successor
+    /// inherits its extents without reading them during preparation.
+    pub(super) fn revalidate(&self) -> Result<(), CodeIndexProductionErrorV1> {
+        if self.failed {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation pack read pass was invalidated".to_owned(),
+            ));
+        }
+        self.packs
+            .iter()
+            .try_for_each(PinnedPackV1::require_unchanged)
+    }
+
     pub(super) fn retained_heap_bytes(&self) -> usize {
-        self.packs.iter().flatten().fold(0_usize, |bytes, pack| {
-            #[cfg(windows)]
-            let bytes = bytes.saturating_add(match &pack.segment.file {
-                PinnedGenerationFileV1::Shared(_) => 0,
-                PinnedGenerationFileV1::Immutable(owner) => owner.retained_heap_bytes(),
-            });
-            bytes
-                .saturating_add(pack.segment.digest.capacity())
-                .saturating_add(pack.path.capacity())
-        })
+        self.packs.iter().fold(
+            Self::handle_storage_bytes(self.packs.capacity()),
+            |bytes, pack| {
+                #[cfg(windows)]
+                let bytes = bytes.saturating_add(match &pack.segment.file {
+                    PinnedGenerationFileV1::Shared(_) => 0,
+                    PinnedGenerationFileV1::Immutable(owner) => owner.retained_heap_bytes(),
+                });
+                bytes
+                    .saturating_add(pack.segment.digest.capacity())
+                    .saturating_add(pack.path.capacity())
+            },
+        )
     }
 
     pub(super) fn read(
@@ -282,7 +299,7 @@ impl GenerationPackReadPassV1 {
         let result = self.read_inner(index, request, into);
         if result.is_err() {
             into.clear();
-            self.packs = [None, None];
+            self.packs.clear();
             self.failed = true;
         }
         result
@@ -307,7 +324,6 @@ impl GenerationPackReadPassV1 {
             .packs
             .iter()
             .enumerate()
-            .filter_map(|(index, pack)| pack.as_ref().map(|pack| (index, pack)))
             .find(|(_, pinned)| pinned.segment.digest == digest.as_str())
             .ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract(
@@ -337,7 +353,7 @@ impl GenerationPackReadPassV1 {
         request: SealedGenerationSegmentReadV1<'_>,
         into: &mut Vec<u8>,
     ) -> Result<(), CodeIndexProductionErrorV1> {
-        let pinned = self.packs[index].as_mut().ok_or_else(|| {
+        let pinned = self.packs.get_mut(index).ok_or_else(|| {
             CodeIndexProductionErrorV1::Contract(
                 "sealed generation read pass lost an admitted pack".to_owned(),
             )
@@ -368,8 +384,8 @@ mod tests {
     use tracedecay_domain::{ManifestDigest, sha256_hex_suffix};
 
     use super::{
-        DaemonCodeIndexPublicationStoreV1, GenerationPackReadPassV1, PackReadOpenAttemptsV1,
-        PinnedPackV1,
+        DaemonCodeIndexPublicationStoreV1, GenerationPackReadPassV1, MAX_PACK_READ_PASS_HANDLES_V1,
+        PackReadOpenAttemptsV1, PinnedPackV1,
     };
 
     fn identity(bytes: &[u8]) -> SealedGenerationSegmentIdentityV1 {
@@ -511,10 +527,28 @@ mod tests {
         );
         let second = write_pack(root.path(), b"second");
         let third = write_pack(root.path(), b"third");
+        // A generation may address its bounded content packs plus evidence.
+        let mut bounded = vec![pack, second, third];
+        for index in 3..MAX_PACK_READ_PASS_HANDLES_V1 {
+            bounded.push(write_pack(
+                root.path(),
+                format!("bounded pack {index}").as_bytes(),
+            ));
+        }
         assert!(
             GenerationPackReadPassV1::open(
                 root.path(),
-                &[pack, second, third],
+                &bounded,
+                Some(&pending),
+                &mut PackReadOpenAttemptsV1::default(),
+            )
+            .is_ok()
+        );
+        bounded.push(write_pack(root.path(), b"one pack over the bound"));
+        assert!(
+            GenerationPackReadPassV1::open(
+                root.path(),
+                &bounded,
                 Some(&pending),
                 &mut PackReadOpenAttemptsV1::default()
             )

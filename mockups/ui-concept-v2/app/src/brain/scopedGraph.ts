@@ -62,10 +62,9 @@ function trimLabel(s: string, max = 26) {
 }
 
 /**
- * WHAT TRACEDECAY KNOWS, bound to the slim profile pack only: enrolled
- * sessions, message spine (kinds, models, tools), observation kinds,
- * real checkouts. Facts/index are unsealed in the pack, so they surface
- * as typed absence, never as invented node counts.
+ * Read enrolled sessions, message kinds, models, tools, observation kinds,
+ * and checkouts from the slim profile pack. The pack does not seal facts or
+ * index data. Report their typed absence instead of inventing node counts.
  */
 function tracedecayGraph(): { nodes: GraphNode[]; edges: GraphEdge[]; absences: string[] } {
   const nodes: GraphNode[] = [];

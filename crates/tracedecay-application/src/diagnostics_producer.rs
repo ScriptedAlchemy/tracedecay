@@ -10,12 +10,15 @@
 //! A monorepo is many TypeScript projects (one tsconfig per package). Every
 //! generation carries one snapshot of all their merged findings, but a project
 //! is rechecked only when its installed compiler, the configuration that
-//! compiler resolves, or a file its last check's program read could have
-//! changed what tsc reports for it; the rest republish their previous result.
-//! Which files a project holds is never read from its configuration: it is the
-//! program the compiler recorded checking. A project that references others
-//! is checked only while the compiler's own dry build finds their outputs
-//! current, because tsc checks it against those outputs.
+//! compiler resolves, the files it lists for the program, or a file its last
+//! check read could have changed what tsc reports for it; the rest republish
+//! their previous result. Which files a project holds is never read from its
+//! configuration: it is the program the compiler lists and recorded checking.
+//! The listing matters because the sealed digests alone cannot say what the
+//! compiler reads: a source the index does not seal enters a program without
+//! changing any digest. A project that references others is checked only
+//! while the compiler's own dry build finds their outputs current, because
+//! tsc checks it against those outputs.
 //!
 //! Each run's outcome is published to the owning project's status handle with
 //! every tsconfig's check and program, so a read can name the real state of
@@ -35,9 +38,9 @@ use sha2::{Digest, Sha256};
 use tracedecay_domain::{ContentDigest, UtcMicros};
 use tracedecay_lsp::{
     TypeScriptCompilerAdmission, TypeScriptConfiguration, TypeScriptProgram, TypeScriptProject,
-    is_typescript_package_manifest, resolve_typescript_configuration, run_typescript_compiler,
-    typescript_build_info_program, typescript_install_command, typescript_project,
-    typescript_referenced_projects_out_of_date,
+    is_typescript_package_manifest, list_typescript_program_files,
+    resolve_typescript_configuration, run_typescript_compiler, typescript_build_info_program,
+    typescript_install_command, typescript_project, typescript_referenced_projects_out_of_date,
 };
 use tracedecay_runtime_core::native_runtime;
 
@@ -127,6 +130,11 @@ enum ProjectOutcome {
         /// The program the check recorded; `None` when its build-info could
         /// not be read or named none of its roots inside the project root.
         membership: Option<TypeScriptProgramMembershipV1>,
+        /// The files the compiler listed for the tsconfig when this result was
+        /// established. A later generation reuses the result only while the
+        /// compiler lists the same files: a source the index does not seal
+        /// enters the program without changing any sealed digest.
+        listed: Vec<PathBuf>,
         /// Whether the sealed index or compiler digest covers every recorded input.
         inputs_covered: bool,
     },
@@ -148,6 +156,9 @@ impl ProjectResult {
         }
     }
 
+    /// The membership of a check whose every input the sealed index or
+    /// compiler digest covers; `None` for any other result, which cannot rule
+    /// out a change.
     fn reusable_membership(&self) -> Option<&TypeScriptProgramMembershipV1> {
         match &self.outcome {
             ProjectOutcome::Checked {
@@ -156,6 +167,14 @@ impl ProjectResult {
                 ..
             } => Some(membership),
             _ => None,
+        }
+    }
+
+    /// The files the compiler listed when a checked result was established.
+    fn listed(&self) -> Option<&[PathBuf]> {
+        match &self.outcome {
+            ProjectOutcome::Checked { listed, .. } => Some(listed),
+            ProjectOutcome::Failed { .. } => None,
         }
     }
 }
@@ -436,11 +455,11 @@ fn bind_build_info(build_info: &Path, compiler_revision: Option<[u8; 32]>) -> st
 ///
 /// `projects` are the tsconfigs found under the root; the compiler adds the
 /// ones they reference. Each is rechecked, incrementally against its
-/// build-info in `build_info_dir`, unless its installed compiler and the
-/// configuration that compiler resolves are those of its previous result and
-/// `identity` changed nothing its previous program, its references' programs
-/// or its package manifests could have read; every other project republishes
-/// its previous result. The outcome, each tsconfig's check and the program it
+/// build-info in `build_info_dir`, unless its installed compiler, the
+/// configuration that compiler resolves and the files it lists for the
+/// program are those of its previous result, and `identity` changed nothing
+/// that program, its references' programs or its package manifests could have
+/// read; every other project republishes its previous result. The outcome, each tsconfig's check and the program it
 /// recorded are published to the status handle `state` was built with, which
 /// [`typescript_diagnostics_availability`] reads.
 ///
@@ -486,18 +505,25 @@ pub async fn run_typescript_producer_v1(
                 continue;
             }
         };
+        // A program the compiler could not list is unknown, not unchanged.
+        let Ok(program) = &project.program else {
+            stale.push(StaleProject {
+                tsconfig: tsconfig.clone(),
+                compiler: project.compiler.clone(),
+                revision: project.revision.clone(),
+                configuration: configuration.clone(),
+                listed: Vec::new(),
+            });
+            continue;
+        };
         match (state.projects.get(tsconfig), &changes) {
             (Some(previous), Some(changes))
-                if revision.is_some()
-                    && previous.compiler_revision == revision
-                    && previous.configuration.as_ref() == Some(configuration)
-                    && !changes.affect(
-                        project_root,
-                        tsconfig,
-                        previous,
-                        configuration,
-                        &state.projects,
-                    ) =>
+                if !changes.affect(
+                    project_root,
+                    tsconfig,
+                    &state.projects,
+                    &resolved.checkable,
+                ) =>
             {
                 results.insert(tsconfig.clone(), previous.clone());
             }
@@ -506,6 +532,7 @@ pub async fn run_typescript_producer_v1(
                 compiler: project.compiler.clone(),
                 revision: project.revision.clone(),
                 configuration: configuration.clone(),
+                listed: program.clone(),
             }),
         }
     }
@@ -700,12 +727,18 @@ struct CheckableProject {
     revision: Option<InstalledCompilerRevision>,
     /// How the compiler resolved the tsconfig, or why it could not.
     configuration: Result<TypeScriptConfiguration, String>,
+    /// The files the compiler would read for the tsconfig now, or why it
+    /// could not list them. A project whose program cannot be listed is
+    /// never reused, since nothing then says which files it holds.
+    program: Result<Vec<PathBuf>, String>,
 }
 
-/// Asks each project's compiler how it resolves its tsconfig, following the
-/// references it reports to projects under the root. Refresh this evidence
-/// even for identical indexed files: an inherited configuration can live
-/// in an installed package outside the indexed file set.
+/// Asks each project's compiler how it resolves its tsconfig and which files
+/// its program holds, following the references it reports to projects under
+/// the root. Refresh this evidence even for identical indexed files: an
+/// inherited configuration can live in an installed package outside the
+/// indexed file set, and a source the index does not seal can enter the
+/// program without changing any sealed digest.
 #[tracing::instrument(
     name = "usecases.diagnostics.typescript_prepare",
     level = "trace",
@@ -752,12 +785,17 @@ async fn resolve_projects(
                     resolve_typescript_configuration(admission, &compiler, project_root, &tsconfig)
                         .await
                         .map_err(|error| error.to_string());
+                let program =
+                    list_typescript_program_files(admission, &compiler, project_root, &tsconfig)
+                        .await
+                        .map_err(|error| error.to_string());
                 (
                     tsconfig,
                     CheckableProject {
                         compiler,
                         revision,
                         configuration,
+                        program,
                     },
                 )
             })
@@ -797,15 +835,7 @@ async fn resolve_projects(
 struct GenerationChanges {
     /// Added, edited and removed files.
     changed: BTreeSet<String>,
-    /// Whether a file was added that tsc could take as a source or resolve an
-    /// import to. tsc resolves modules and expands `include` only to these
-    /// extensions and package manifests, so another file can neither enter a
-    /// program nor redirect one of its imports.
-    added_module_candidate: bool,
 }
-
-/// Every extension tsc reads as a source, declaration or importable module.
-const MODULE_EXTENSIONS: [&str; 9] = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "json"];
 
 impl GenerationChanges {
     fn between(
@@ -813,18 +843,10 @@ impl GenerationChanges {
         current: &BTreeMap<String, ContentDigest>,
     ) -> Self {
         let mut changed = BTreeSet::new();
-        let mut added_module_candidate = false;
         for (path, digest) in current {
             match previous.get(path) {
                 Some(previous) if previous == digest => {}
-                Some(_) => {
-                    changed.insert(path.clone());
-                }
-                None => {
-                    added_module_candidate |= Path::new(path)
-                        .extension()
-                        .and_then(|extension| extension.to_str())
-                        .is_some_and(|extension| MODULE_EXTENSIONS.contains(&extension));
+                Some(_) | None => {
                     changed.insert(path.clone());
                 }
             }
@@ -835,53 +857,58 @@ impl GenerationChanges {
                 .filter(|path| !current.contains_key(*path))
                 .cloned(),
         );
-        Self {
-            changed,
-            added_module_candidate,
-        }
+        Self { changed }
     }
 
-    /// Whether these changes can alter what tsc reports for a project whose
-    /// compiler and resolved configuration are those of `previous`: an added
-    /// module candidate, a file its program or a referenced project's
-    /// program read, or a package manifest governing the tsconfig or one of
-    /// those files. A failed check, missing program, or program with unsealed
-    /// inputs outside the fingerprinted compiler packages cannot rule out a
-    /// change, including when it belongs to a referenced project.
+    /// Whether these changes or the compiler's current evidence can alter
+    /// what tsc reports for a project or any project it references.
+    ///
+    /// The sealed digests say what changed among the files the index holds;
+    /// they cannot say what the compiler reads, since a source the index does
+    /// not seal enters a program without changing any digest. So the compiler
+    /// must list the same files it listed when the result was established
+    /// before that result can stand: then every file the program reads is one
+    /// the check read, and a changed one is a file in `read`. A failed check,
+    /// a listing that differs, or a program with unsealed inputs outside the
+    /// fingerprinted compiler packages cannot rule out a change. The same
+    /// evidence is required from every referenced project, including its
+    /// current compiler and configuration: otherwise reuse could bypass the
+    /// dry build that refuses its stale outputs.
     fn affect(
         &self,
         project_root: &Path,
         tsconfig: &Path,
-        previous: &ProjectResult,
-        configuration: &TypeScriptConfiguration,
         projects: &BTreeMap<PathBuf, ProjectResult>,
+        current: &BTreeMap<PathBuf, CheckableProject>,
     ) -> bool {
-        if self.added_module_candidate {
-            return true;
-        }
-        let Some(membership) = previous.reusable_membership() else {
-            return true;
-        };
-        let mut read = vec![membership];
-        let mut references = configuration.references().to_vec();
+        let mut read = Vec::new();
+        let mut references = vec![tsconfig.to_path_buf()];
         let mut visited = BTreeSet::new();
         while let Some(reference) = references.pop() {
             if !visited.insert(reference.clone()) {
                 continue;
             }
-            let Some(membership) = projects
-                .get(&reference)
-                .and_then(ProjectResult::reusable_membership)
+            let (Some(previous), Some(current)) =
+                (projects.get(&reference), current.get(&reference))
             else {
                 return true;
             };
-            read.push(membership);
-            if let Some(configuration) = projects
-                .get(&reference)
-                .and_then(|result| result.configuration.as_ref())
+            let (Some(revision), Ok(configuration), Ok(listed)) =
+                (&current.revision, &current.configuration, &current.program)
+            else {
+                return true;
+            };
+            if previous.compiler_revision != Some(revision.digest)
+                || previous.configuration.as_ref() != Some(configuration)
+                || previous.listed() != Some(listed.as_slice())
             {
-                references.extend_from_slice(configuration.references());
+                return true;
             }
+            let Some(membership) = previous.reusable_membership() else {
+                return true;
+            };
+            read.push(membership);
+            references.extend_from_slice(configuration.references());
         }
         let tsconfig = tsconfig
             .to_str()
@@ -917,6 +944,8 @@ struct StaleProject {
     compiler: PathBuf,
     revision: Option<InstalledCompilerRevision>,
     configuration: TypeScriptConfiguration,
+    /// The files the compiler listed for the tsconfig this generation.
+    listed: Vec<PathBuf>,
 }
 
 /// The lazy window bounds waiting futures; the shared admission accounts for
@@ -999,6 +1028,7 @@ async fn check_project(
         compiler,
         revision,
         configuration,
+        listed,
     } = project;
     let compiler_revision = revision.as_ref().map(|revision| revision.digest);
     let build_info_guard = admission.serialize_build_info(build_info).await;
@@ -1107,6 +1137,7 @@ async fn check_project(
         outcome: ProjectOutcome::Checked {
             reported: reported.into_iter().map(compiler_diagnostic).collect(),
             membership,
+            listed,
             inputs_covered,
         },
     }

@@ -1,14 +1,13 @@
-# Shared preamble for the shell gates that test a checked-in guard script.
+# Shell tests for checked-in guard scripts source this file.
 #
 # Source it, do not execute it:
 #
 #     . "$(dirname "${BASH_SOURCE[0]}")/../scripts/lib/gate-test.sh"
 #
-# It defines GATE_REPO_ROOT, creates a self-cleaning scratch directory in
-# GATE_SCRATCH, and replaces the `set +e` / command-substitution dance every
-# one of these gates was open-coding. That pattern is easy to get subtly wrong
-#, a forgotten `set -e` leaves the rest of the file unguarded, so it lives
-# here once.
+# It sets GATE_REPO_ROOT and creates a scratch directory in GATE_SCRATCH that
+# it removes on exit. It also captures command failures without requiring each
+# test to disable and restore `set -e`. Failing to restore it would let the
+# rest of the test run after an unexpected error.
 #
 # Usage:
 #

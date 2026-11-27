@@ -1,4 +1,4 @@
-# TraceDecay Cursor Plugin
+# TraceDecay Cursor plugin
 
 This bundle is installed by:
 
@@ -26,7 +26,7 @@ with the workspace folder as the working directory. `serve` resolves the
 workspace from that working directory (project walk-up, then the enclosing
 git checkout) and from MCP initialize roots; the bundle passes no `--path`.
 
-When discovery lands on a directory the profile has not enrolled, the MCP
+When discovery finds a directory the profile has not enrolled, the MCP
 handshake still completes and every tool call answers with the typed
 `project_not_enrolled` refusal naming that directory and the fix
 (`tracedecay init` there). The daemon re-checks the route on each call, so
@@ -58,9 +58,9 @@ Cursor after installation so the extension starts
 The extension forwards bounded native diagnostics only for the single admitted
 workspace folder. It sends URI, document version, range, source, message, and
 safe diagnostic metadata, never document text or arbitrary diagnostic payloads.
-The gateway merges that native upstream lane internally but, in Cursor-native
-mode, publishes only TraceDecay findings back to avoid duplicating Cursor's own
-diagnostics. Multi-root workspaces are not supported.
+The gateway merges the native diagnostics internally. In Cursor-native mode,
+it sends back only TraceDecay findings so Cursor does not display its own
+diagnostics twice. Multi-root workspaces are not supported.
 
 The component is deployed at
 `~/.cursor/extensions/tracedecay.cursor-native-0.0.0/`; its receipt and
@@ -282,12 +282,12 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
 
 Notes:
 
-- The list is exactly the tools that declare `readOnlyHint: true` - the edit
-  primitives (`str_replace`, `replace_symbol`, ...), test runner, session
+- The list contains exactly the tools that declare `readOnlyHint: true`. Edit
+  tools (`str_replace`, `replace_symbol`, ...), the test runner, session
   baseline, memory writes, LCM lifecycle tools, and mutating Work transitions
-  are deliberately excluded so they keep going through review. The listed Work
-  reads include execution `topology`; use them to inspect Work before choosing
-  a mutation.
+  are not listed, so they still go through review. The listed Work reads
+  include execution `topology`. Use them to inspect Work before choosing a
+  mutation.
 - One borderline entry: `tracedecay_dashboard` starts a localhost server. It
   is non-destructive, but remove that line if you want a prompt first.
   `tracedecay_diagnostics` is a read; the daemon runs a TypeScript project's
@@ -307,10 +307,10 @@ process exits or fails `initialize` at startup, every later tool call in that
 session reports "Timed out waiting for connection" until you toggle the
 server or reload the window.
 
-Two layers of defense ship with this plugin:
+TraceDecay helps diagnose and recover from this failure:
 
 - `tracedecay serve` does not exit, and the daemon does not fail `initialize`,
-  when project resolution lands on an unenrolled directory. The handshake
+  when project resolution finds an unenrolled directory. The handshake
   completes and tool calls answer with the typed `project_not_enrolled` error
   naming the directory and the fix; the daemon rechecks the route on every
   tool call and recovers automatically once `tracedecay init` (or a corrected
@@ -322,23 +322,23 @@ Two layers of defense ship with this plugin:
   degraded-mode notices, and checks that the installed plugin bundle version
   matches the binary.
 
-If a scope has already failed: fix the cause (usually `tracedecay init` in the
-project, or upgrading a stale plugin with `tracedecay update-plugin`), then
-toggle the tracedecay MCP server in Cursor Settings → MCP or reload the Cursor
-window.
+If a scope has already failed, fix the cause first. Usually you need to run
+`tracedecay init` in the project or update a stale plugin with
+`tracedecay update-plugin`. Then toggle the tracedecay MCP server under MCP in
+Cursor Settings, or reload the Cursor window.
 
 ## Known limitations
 
-- **Cloud agents:** lifecycle availability is host-dependent. The desktop
-  projection's daemon-owned native lifecycle journey uses `sessionStart`,
-  `preCompact`, `afterFileEdit`, and `stop`; each is fail-open. Only
-  `sessionStart` has a host-supported immediate context response.
+- Lifecycle support for cloud agents depends on the host. The desktop
+  bundle uses `sessionStart`, `preCompact`, `afterFileEdit`, and `stop` to
+  notify the daemon. Each hook is fail-open. Only `sessionStart` has a
+  host-supported immediate context response.
 - Session recall is sourced from the daemon's canonical project store, not a
   host hook's local transcript read.
 
 ## Local development
 
-For local development, install the generated Cursor projection after edits:
+For local development, install the generated Cursor bundle after edits:
 
 ```bash
 tracedecay install --agent cursor

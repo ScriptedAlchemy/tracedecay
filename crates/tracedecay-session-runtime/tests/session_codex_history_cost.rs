@@ -39,7 +39,8 @@ const ROLLOUTS_PER_DAY: usize = 4;
 const MAX_PASSES: usize = 64;
 /// The rollout count of the corpus the re-offer cost was first measured on.
 const MEASURED_ROLLOUTS: usize = 2_010;
-/// The control corpus has the same layout and project at a smaller size.
+/// The control corpus: the same layout and project at a size where per-file
+/// store work would be two orders of magnitude smaller.
 const CONTROL_ROLLOUTS: usize = 12;
 const MAX_MEASURED_PASSES: usize = 4_096;
 
@@ -217,9 +218,23 @@ async fn run_to_completion_bounded(
     let before = writer_telemetry(database);
     let started = Instant::now();
     let mut passes = 0;
+    let mut previous_transactions = before.transactions.committed_transactions;
+    let mut previous_vm_steps = before.sqlite_vm.vm_steps;
+    let mut pass_costs = Vec::new();
     loop {
         passes += 1;
+        let pass_started = Instant::now();
         let pass = ingestor.run_pass().await;
+        let pass_wall = pass_started.elapsed();
+        let after_pass = writer_telemetry(database);
+        pass_costs.push((
+            pass.clone(),
+            after_pass.transactions.committed_transactions - previous_transactions,
+            after_pass.sqlite_vm.vm_steps - previous_vm_steps,
+            pass_wall,
+        ));
+        previous_transactions = after_pass.transactions.committed_transactions;
+        previous_vm_steps = after_pass.sqlite_vm.vm_steps;
         assert!(
             passes <= max_passes,
             "history never completed; last pass {:?} units {:?}",
@@ -235,13 +250,26 @@ async fn run_to_completion_bounded(
     }
     let wall = started.elapsed();
     let after = writer_telemetry(database);
-    Cost {
+    let cost = Cost {
         passes,
         transactions: after.transactions.committed_transactions
             - before.transactions.committed_transactions,
         vm_steps: after.sqlite_vm.vm_steps - before.sqlite_vm.vm_steps,
         wall,
+    };
+    // Report after measuring so diagnostic output does not inflate sweep time.
+    for (index, (pass, transactions, vm_steps, wall)) in pass_costs.iter().enumerate() {
+        eprintln!(
+            "codex history pass {}/{}: outcome={:?} made_progress={} units={:?} \
+             transactions={transactions} vm_steps={vm_steps} wall={wall:?}",
+            index + 1,
+            cost.passes,
+            pass.outcome,
+            pass.made_progress,
+            pass.provider_units,
+        );
     }
+    cost
 }
 
 async fn open() -> (

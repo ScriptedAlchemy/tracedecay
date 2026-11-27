@@ -21,7 +21,7 @@ The briefs in this folder own design intent; apply changes to that app rather th
 creating independent replacement screen applications. Neither fixture behavior nor
 recorded snapshot coverage proves live production availability.
 
-The implementation is deliberately hybrid:
+React handles the interface, and a scene renderer draws the dense views:
 
 - React and the DOM own navigation, scope, filters, inspectors, transcripts,
   diffs, review threads, comments, check matrices, forms, tables, keyboard
@@ -37,7 +37,7 @@ The implementation is deliberately hybrid:
   selections, annotations, density summaries, and motion-independent state.
 - A worker performs lane allocation, clustering, edge bundling, density
   aggregation, and semantic-zoom projection for large histories.
-- The Rust backend owns one truthful journey projection joining the existing
+- The Rust backend owns one journey projection that joins existing
   Delivery, Loom, Work, Agents, Sessions, Code, Git, pull-request, CI, review,
   and release evidence. It never invents private reasoning or silently upgrades
   a correlation into a fact.
@@ -52,8 +52,8 @@ renderer, not a constraint on the product language.
 
 The final PNGs describe hierarchy, interaction, density, and visual language.
 The shipping dashboard must not use them as backgrounds, rasterized panels,
-precomputed graphs, or evidence. Every value and relation must arrive through a
-real production authority or render as an honest typed absence.
+precomputed graphs, or evidence. Every value and relation must come from its
+production data source or appear with a typed absence state.
 
 The browser must preserve the evidence-grade ladder in `DESIGN-SYSTEM.md`:
 `EXACT`, `EXPLICIT`, `INFERRED`, `AMBIGUOUS`, `STALE`, and `UNAVAILABLE`.
@@ -135,8 +135,8 @@ JourneyProjection + viewport + semanticZoom + expandedBranches
 
 Invariants:
 
-- X is derived from recorded time, an explicit sequence index for undated
-  evidence, or an honest undated gutter. Rendering never invents timestamps.
+- Use recorded time for X. For evidence without a timestamp, use an explicit
+  sequence index or put it in an undated gutter. Never invent timestamps.
 - Y is allocated deterministically from umbrella Delivery, repository/PR,
   workstream/task, parent session, agent, and subagent identity. Stable inputs
   produce stable coordinates across reloads and renderers.
@@ -216,12 +216,12 @@ It does not fetch data, infer truth, assign evidence grades, or decide review
 status. Those are backend/application concerns. Layout jobs use revision IDs;
 late results for an obsolete projection or viewport are discarded.
 
-### 6. Honest journey projection
+### 6. Journey projection
 
 The existing `DeliveryOverviewV1`, `LoomTemporalPayloadV1`, LCM, Work, agent,
 graph, Git, PR, review, CI, and release models are source authorities, not a
 complete journey model. The backend needs one generated Rust/TypeScript journey
-projection that joins them without creating a second store of truth.
+projection that joins those sources without storing a second copy of their data.
 
 The projection must retain stable identities for:
 

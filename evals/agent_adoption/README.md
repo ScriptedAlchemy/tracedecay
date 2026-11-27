@@ -153,15 +153,15 @@ TRACEDECAY_AGENT_EVALS=1 EVAL_INCLUDE_BASELINE=1 HOSTS=claude \
 
 This is 45 live agent turns; the existing explicit `TRACEDECAY_AGENT_EVALS=1`
 opt-in remains required. Native runs receive only Claude's standard file tools
-and no TraceDecay MCP/plugin/CLI surface; the native condition is Claude-only.
+and no TraceDecay MCP, plugin, or CLI tools. The native condition is Claude-only.
 Every condition retains the same native `Read`, `Write`, `Edit`, `Glob`, `Grep`,
 `Task`, `Agent`, and `Skill` permissions. Product conditions add their product
 tool permissions to that common set.
 `bare` exposes MCP tool descriptions without hooks or skills. `no-hints` and
 `no-skills` are the existing channel ablations; `full` is the ordinary bundled
-experience. Read per-task results rather than adoption averages: the same
-successful answer or edit counts regardless of whether a product surface was
-invoked. Channel ablations retain their documented steering differences, so
+experience. Read per-task results rather than adoption averages. The same
+successful answer or edit counts whether or not the agent uses product tools.
+Channel ablations retain their documented steering differences, so
 they are descriptive unless prompt steering is also controlled.
 
 The report includes per-task pass rates with Wilson intervals, observed
@@ -264,10 +264,10 @@ Claude/Codex profile is never loaded or mutated.
 Codex starts plugin MCP servers with a minimal environment, so the runner adds
 the isolated daemon's `TRACEDECAY_*` variables to the installed plugin's
 `env_vars`. Without them `serve` looks for a daemon under the throwaway `HOME`,
-fails, and Codex drops the graph server without any transcript error. Name the model exactly as the profile does
-(`CLAUDE_MODELS='k3[1m]'`, not `opus`) so transcripts and scoreboards carry the
-model that actually answered; an alias resolved through
-`ANTHROPIC_DEFAULT_*_MODEL` would be mislabelled.
+fails, and Codex drops the graph server without recording a transcript error.
+Name the model exactly as the profile does (`CLAUDE_MODELS='k3[1m]'`, not `opus`)
+so transcripts and scoreboards name the model that answered. An alias resolved
+through `ANTHROPIC_DEFAULT_*_MODEL` would mislabel the result.
 
 Every run, dry or live, builds the shipping target
 `//crates/tracedecay-cli:tracedecay` from the checked-out candidate branch with
@@ -298,18 +298,18 @@ boundary, not an OS sandbox.
 
 ## Fixture contents
 
-`fixture/` is the tiny `orders_fixture` crate. It is deliberately small and
-unambiguously named so grounded answers (symbol names, call edges, duplicated
-logic) are unmistakable. Beyond the order-flow modules it carries, `run.sh`
-enriches the copied fixture at setup so more scenario tiers are gradable:
+`fixture/` contains the small `orders_fixture` crate. Its distinct names make
+symbol names, call edges, and duplicated logic easy to check in answers.
+`run.sh` adds to the copied fixture at setup so it can grade scenarios beyond
+the order-flow modules:
 
 * **Git history (main fixture).** `build_fixture` seeds a real multi-branch
-  history. `init` on the default branch, a `feature/pricing-notes` branch with
-  two commits, a divergent commit on the default branch, and a `--no-ff` merge.
-  This gives `commit_context` / `diff_context` / branch tooling genuine commits
-  and a merge to reason about. **Note:** tracedecay only *tracks* the checked-out
-  branch by default, so `branch_list`/`branch_diff` see one tracked branch unless
-  you add multi-branch indexing; `commit_context` does surface the full commit
+  history. It runs `init` on the default branch, makes two commits on
+  `feature/pricing-notes` and a divergent commit on the default branch, then
+  merges with `--no-ff`. This gives `commit_context`, `diff_context`, and the
+  branch tools real commits and a merge. TraceDecay tracks only the checked-out
+  branch by default, so `branch_list` and `branch_diff` see one tracked branch
+  unless you add multi-branch indexing. `commit_context` shows the full commit
   log and the merge.
 * **Audit-tier plants (`src/audit.rs`).** A module kept **out** of the order
   flow (so exploration/impact ground truth is untouched) plants a `TODO`
@@ -491,12 +491,11 @@ hermetic, componentized plugin. For every condition `run.sh`:
 ablations, retaining every product channel. Comparisons therefore measure the
 candidate under test, never whichever release happens to be installed globally.
 
-> The ablation flag wiring is implemented to the documented Claude Code 2.1.x
-> flag semantics (`--setting-sources`, `--strict-mcp-config`, `--plugin-dir`,
-> `--append-system-prompt`). Confirm the isolation against one live ablation run
->, eyeball that a `no-hints` transcript carries no hint text and a `no-skills`
-> transcript exposes no `tracedecay:*` skills, before trusting ablation
-> aggregates.
+> The runner uses the Claude Code 2.1.x behavior documented for
+> `--setting-sources`, `--strict-mcp-config`, `--plugin-dir`, and
+> `--append-system-prompt`. Before using ablation aggregates, check isolation in
+> a live run. A `no-hints` transcript should contain no hint text, and a
+> `no-skills` transcript should expose no `tracedecay:*` skills.
 
 **Codex.** Ablation conditions are Claude-only. Codex runs only `full`: the
 candidate binary installs its plugin, agents, skills, hooks, and MCP bootstrap

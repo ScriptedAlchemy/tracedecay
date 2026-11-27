@@ -124,10 +124,9 @@ export type ServeSessionOptions = {
   readonly cwd: string;
 };
 
-// The serve child needs home/config resolution, locale, temp dirs, and any
-// `TRACEDECAY_*` overrides — nothing else. The host process env can carry
-// unrelated credentials, so the child inherits an allowlist, not the whole
-// environment.
+// Pass only the variables the serve child needs to find its home, config, and
+// temporary directories, use the locale, and read `TRACEDECAY_*` overrides.
+// The allowlist keeps unrelated host credentials out of the child's environment.
 const CHILD_ENV_EXACT = new Set([
   "PATH",
   "HOME",

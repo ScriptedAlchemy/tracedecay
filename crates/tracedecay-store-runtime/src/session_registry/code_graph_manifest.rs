@@ -564,10 +564,20 @@ fn retained_source_bytes(
         .saturating_add(sealed_state_digest.as_str().len())
         .saturating_add(std::mem::size_of::<GraphSegmentReadPassV1<'_>>())
         .saturating_add(
-            MAX_GRAPH_SEGMENT_OPEN_HANDLES
+            source
+                .pack_identities()
+                .len()
                 .saturating_mul(std::mem::size_of::<PinnedPartitionedSegmentV1>()),
         )
-        .saturating_add(source.content_pack().digest.as_str().len())
+        .saturating_add(
+            source
+                .content_packs()
+                .packs
+                .iter()
+                .fold(0_usize, |bytes, pack| {
+                    bytes.saturating_add(pack.digest.as_str().len())
+                }),
+        )
         .saturating_add(source.evidence_pack().0.as_str().len())
 }
 
@@ -795,7 +805,10 @@ pub(super) fn spill_sealed_generation_graph_from_roots(
         check,
         "code_graph_manifest.spill_sealed_generation_graph",
     )?;
-    let mut segments = GraphSegmentReadPassV1::new(&seal.routes.segment_roots);
+    let mut segments = GraphSegmentReadPassV1::new(
+        &seal.routes.segment_roots,
+        seal.admitted.source.pack_identities().len(),
+    );
     let mut build_memory = CodeGraphMemoryV1::new(resident_memory, "code_graph.build.v1")?;
     spill_verified_seal_graph(
         &seal,
@@ -904,7 +917,10 @@ pub(super) fn graph_rows_from_roots(
         check,
         "code_graph_manifest.graph_rows",
     )?;
-    let mut segments = GraphSegmentReadPassV1::new(&seal.routes.segment_roots);
+    let mut segments = GraphSegmentReadPassV1::new(
+        &seal.routes.segment_roots,
+        seal.admitted.source.pack_identities().len(),
+    );
     let mut layered = |base: &str, spill: LayeredRowSpillV1| {
         layered_graph_rows(
             &seal,
@@ -1039,12 +1055,15 @@ struct PinnedPartitionedSegmentV1 {
     read_succeeded: bool,
 }
 
-/// A generation has one content pack and one evidence pack. Handles remain
-/// owned by this operation across layered attempts and the cold fallback.
-const MAX_GRAPH_SEGMENT_OPEN_HANDLES: usize = 2;
+/// A generation addresses its bounded content packs plus one evidence pack.
+/// Handles remain owned by this operation across layered attempts and the
+/// cold fallback, and a pack is pinned only once its first extent is read.
+#[cfg(test)]
+const TEST_GRAPH_SEGMENT_OPEN_HANDLES: usize = 2;
 
 struct GraphSegmentReadPassV1<'a> {
     roots: &'a [PathBuf],
+    max_handles: usize,
     pinned: Vec<PinnedPartitionedSegmentV1>,
     open_attempts: usize,
     open_wall_time: std::time::Duration,
@@ -1052,10 +1071,11 @@ struct GraphSegmentReadPassV1<'a> {
 }
 
 impl<'a> GraphSegmentReadPassV1<'a> {
-    fn new(roots: &'a [PathBuf]) -> Self {
+    fn new(roots: &'a [PathBuf], max_handles: usize) -> Self {
         Self {
             roots,
-            pinned: Vec::with_capacity(MAX_GRAPH_SEGMENT_OPEN_HANDLES),
+            max_handles,
+            pinned: Vec::with_capacity(max_handles),
             open_attempts: 0,
             open_wall_time: std::time::Duration::ZERO,
             reads: 0,
@@ -1079,9 +1099,10 @@ impl<'a> GraphSegmentReadPassV1<'a> {
             }
             return Ok(position);
         }
-        if self.pinned.len() == MAX_GRAPH_SEGMENT_OPEN_HANDLES {
+        if self.pinned.len() == self.max_handles {
             return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed graph generation requested more than its two physical packs".to_owned(),
+                "sealed graph generation requested more physical packs than it addresses"
+                    .to_owned(),
             ));
         }
         let started = std::time::Instant::now();
@@ -1472,7 +1493,10 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
     )?;
     let source = &admitted.source;
     let roots = [segments_root.to_path_buf()];
-    let segments = std::cell::RefCell::new(GraphSegmentReadPassV1::new(&roots));
+    let segments = std::cell::RefCell::new(GraphSegmentReadPassV1::new(
+        &roots,
+        source.pack_identities().len(),
+    ));
     let mut evidence_barrier = Some(evidence_barrier);
     let mut interruption = None;
     let proof = std::cell::RefCell::new(verified.begin(segments_root));
@@ -1529,7 +1553,12 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
                     segments.borrow_mut().read(request, buffer)?;
                     range_reads.set(range_reads.get().saturating_add(1));
                     range_bytes.set(range_bytes.get().saturating_add(length));
-                    if digest == source.content_pack().digest.as_str() {
+                    if source
+                        .content_packs()
+                        .packs
+                        .iter()
+                        .any(|pack| pack.digest.as_str() == digest)
+                    {
                         content_pack_bytes.set(content_pack_bytes.get().saturating_add(length));
                     }
                     Ok(())
@@ -1551,18 +1580,20 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
             let segments = segments.borrow();
             segments.revalidate(true)?;
             let mut proof = proof.borrow_mut();
-            let content = source.content_pack();
-            for (digest, size_bytes) in std::iter::once((&content.digest, content.size_bytes))
+            let content = source.content_packs();
+            for (digest, size_bytes) in content
+                .packs
+                .iter()
+                .map(|pack| (&pack.digest, pack.size_bytes))
                 .chain(std::iter::once((
                     source.evidence_pack().0,
                     source.evidence_pack().1,
                 )))
-                .chain(
-                    content
-                        .extents
+                .chain(content.packs.iter().flat_map(|pack| {
+                    pack.extents
                         .iter()
-                        .map(|extent| (&extent.digest, extent.size_bytes)),
-                )
+                        .map(|extent| (&extent.digest, extent.size_bytes))
+                }))
             {
                 let request =
                     source.resolve_pack_request(SealedGenerationSegmentReadV1::Whole {
@@ -1912,7 +1943,10 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
         // to reconstruct its exact rows so the ordered journal can advance;
         // the registry compares the rebuilt digests with the durable replay
         // before any row is served.
-        let mut segments = GraphSegmentReadPassV1::new(&seal.routes.segment_roots);
+        let mut segments = GraphSegmentReadPassV1::new(
+            &seal.routes.segment_roots,
+            seal.admitted.source.pack_identities().len(),
+        );
         let mut build_memory =
             CodeGraphMemoryV1::new(&binding.resident_memory, "code_graph.build.v1")?;
         spill_verified_seal_graph(
@@ -2028,7 +2062,10 @@ mod tests {
             tracedecay_code_index::graph_projection::SealedCodeGraphRowsError,
         >,
     ) -> Result<T, GraphDbError> {
-        let mut segments = super::GraphSegmentReadPassV1::new(&routes.segment_roots);
+        let mut segments = super::GraphSegmentReadPassV1::new(
+            &routes.segment_roots,
+            super::TEST_GRAPH_SEGMENT_OPEN_HANDLES,
+        );
         super::with_verified_segments(digest, routes, &mut segments, check, build)
     }
 
@@ -3312,7 +3349,8 @@ mod tests {
             size_bytes: bytes.len() as u64,
         };
         SEGMENT_OPENS.with(|opens| opens.set(0));
-        let mut pass = super::GraphSegmentReadPassV1::new(&roots);
+        let mut pass =
+            super::GraphSegmentReadPassV1::new(&roots, super::TEST_GRAPH_SEGMENT_OPEN_HANDLES);
         let mut decoded = Vec::new();
         pass.read(request, &mut decoded).unwrap();
         assert_eq!(decoded, bytes);
@@ -3325,7 +3363,8 @@ mod tests {
         // to silently fall through to a later apparently valid segment.
         std::fs::create_dir(first.path().join(&filename)).unwrap();
         SEGMENT_OPENS.with(|opens| opens.set(0));
-        let mut fresh = super::GraphSegmentReadPassV1::new(&roots);
+        let mut fresh =
+            super::GraphSegmentReadPassV1::new(&roots, super::TEST_GRAPH_SEGMENT_OPEN_HANDLES);
         assert!(matches!(
             fresh.read(request, &mut Vec::new()),
             Err(CodeIndexProductionErrorV1::Contract(_))
@@ -3344,7 +3383,8 @@ mod tests {
         // before the payload open, while retaining its metadata attempt.
         SEGMENT_OPENS.with(|opens| opens.set(0));
         let roots = vec![second.path().to_path_buf()];
-        let mut wrong_extent = super::GraphSegmentReadPassV1::new(&roots);
+        let mut wrong_extent =
+            super::GraphSegmentReadPassV1::new(&roots, super::TEST_GRAPH_SEGMENT_OPEN_HANDLES);
         let mismatch = SealedGenerationSegmentReadV1::Whole {
             digest: &digest,
             size_bytes: bytes.len() as u64 + 1,
@@ -3385,7 +3425,8 @@ mod tests {
             size_bytes: missing_bytes.len() as u64,
         };
         SEGMENT_OPENS.with(|opens| opens.set(0));
-        let mut pass = super::GraphSegmentReadPassV1::new(&roots);
+        let mut pass =
+            super::GraphSegmentReadPassV1::new(&roots, super::TEST_GRAPH_SEGMENT_OPEN_HANDLES);
         let mut buffer = Vec::new();
         pass.read(healthy, &mut buffer).unwrap();
         assert_eq!(buffer, healthy_bytes);
@@ -3929,7 +3970,8 @@ mod tests {
         let path = super::segment_path(temporary.path(), &digest).unwrap();
         std::fs::write(&path, bytes).unwrap();
         let roots = [temporary.path().to_path_buf()];
-        let mut pass = super::GraphSegmentReadPassV1::new(&roots);
+        let mut pass =
+            super::GraphSegmentReadPassV1::new(&roots, super::TEST_GRAPH_SEGMENT_OPEN_HANDLES);
         let request = SealedGenerationSegmentReadV1::Whole {
             digest: &digest,
             size_bytes: bytes.len() as u64,
@@ -3955,7 +3997,8 @@ mod tests {
         assert_eq!(buffer, bytes);
         drop(pass);
         std::fs::remove_file(&path).unwrap();
-        let mut next = super::GraphSegmentReadPassV1::new(&roots);
+        let mut next =
+            super::GraphSegmentReadPassV1::new(&roots, super::TEST_GRAPH_SEGMENT_OPEN_HANDLES);
         assert!(matches!(
             next.read(request, &mut buffer),
             Err(CodeIndexProductionErrorV1::Contract(_))
@@ -3977,7 +4020,8 @@ mod tests {
         );
         std::fs::write(temporary.path().join(filename), bytes).unwrap();
         let roots = vec![temporary.path().to_path_buf()];
-        let mut pass = super::GraphSegmentReadPassV1::new(&roots);
+        let mut pass =
+            super::GraphSegmentReadPassV1::new(&roots, super::TEST_GRAPH_SEGMENT_OPEN_HANDLES);
         let request = SealedGenerationSegmentReadV1::Whole {
             digest: &digest,
             size_bytes: bytes.len() as u64,
@@ -4087,7 +4131,8 @@ mod tests {
                 (digest, bytes)
             })
             .collect::<Vec<_>>();
-        let mut pass = super::GraphSegmentReadPassV1::new(&roots);
+        let mut pass =
+            super::GraphSegmentReadPassV1::new(&roots, super::TEST_GRAPH_SEGMENT_OPEN_HANDLES);
         SEGMENT_OPENS.with(|opens| opens.set(0));
         let mut buffer = Vec::new();
         for (digest, bytes) in packs.iter().take(2) {
@@ -4174,7 +4219,8 @@ mod tests {
                 (digest, bytes, path)
             })
             .collect::<Vec<_>>();
-        let mut pass = super::GraphSegmentReadPassV1::new(&roots);
+        let mut pass =
+            super::GraphSegmentReadPassV1::new(&roots, super::TEST_GRAPH_SEGMENT_OPEN_HANDLES);
         let mut buffer = Vec::new();
         SEGMENT_OPENS.with(|opens| opens.set(0));
         let (healthy_digest, healthy_bytes, _) = &packs[0];
@@ -4462,9 +4508,10 @@ mod tests {
         let successor_bytes = std::fs::read(&successor_path).unwrap();
         let mut successor: serde_json::Value = serde_json::from_slice(&successor_bytes).unwrap();
 
-        // Logical source identity survives a one-file edit, but its extent is
-        // now bound to a different immutable physical pack. A proof of the
-        // parent file cannot authorize this successor's physical bytes.
+        // Logical source identity survives a one-file edit. The carried files
+        // keep their parent's immutable physical pack by reference, while the
+        // edited file is bound to a new pack. A proof of the parent file
+        // cannot authorize the successor's new physical bytes.
         let parent_file_digests = first_manifest["generation"]["file_segments"]
             .as_array()
             .unwrap()
@@ -4504,9 +4551,28 @@ mod tests {
         let trace_proof = |record: &VerifiedSealedSegmentsV1| {
             capture_formatted_tracing(|| count_proof_reads(record))
         };
-        assert_ne!(
-            first_manifest["generation"]["content_pack"]["digest"],
-            successor["generation"]["content_pack"]["digest"],
+        let parent_pack_digests = first_manifest["generation"]["content_packs"]["packs"]
+            .as_array()
+            .expect("parent pack roster")
+            .iter()
+            .map(|pack| pack["digest"].as_str().expect("parent pack digest"))
+            .collect::<std::collections::BTreeSet<_>>();
+        let successor_pack_digests = successor["generation"]["content_packs"]["packs"]
+            .as_array()
+            .expect("successor pack roster")
+            .iter()
+            .map(|pack| pack["digest"].as_str().expect("successor pack digest"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            successor_pack_digests
+                .iter()
+                .any(|digest| parent_pack_digests.contains(*digest)),
+            "the successor must inherit its parent's content pack by reference"
+        );
+        assert!(
+            successor_pack_digests
+                .iter()
+                .any(|digest| !parent_pack_digests.contains(*digest)),
             "the changed logical roster requires a new content pack"
         );
         assert_ne!(
@@ -4528,30 +4594,58 @@ mod tests {
         };
         assert!(observed.contains("event=sealed_source_proof"));
         assert!(observed_field(&observed, "hashed_segments") > 0);
-        assert_eq!(
-            observed_field(&observed, "reused_segments"),
-            0,
-            "even unchanged logical digests must be proved under the successor's pack binding"
-        );
-        assert_eq!(
-            parent_witness_reads, cold_reads,
-            "a parent proof must not bypass physical or logical successor authentication"
-        );
-        let content_size = successor["generation"]["content_pack"]["size_bytes"]
-            .as_u64()
+        if cfg!(unix) {
+            assert!(
+                observed_field(&observed, "reused_segments") > 0,
+                "the inherited pack's extents reuse the parent's completed witnesses"
+            );
+            assert!(
+                parent_witness_reads < cold_reads,
+                "the parent's completed witnesses cover only the inherited pack; the pack this \\
+                 successor wrote is still authenticated ({parent_witness_reads} vs {cold_reads} reads)"
+            );
+        } else {
+            assert_eq!(observed_field(&observed, "reused_segments"), 0);
+            assert_eq!(
+                parent_witness_reads, cold_reads,
+                "a platform without fingerprints must authenticate every pack again"
+            );
+        }
+        let successor_packs = successor["generation"]["content_packs"]["packs"]
+            .as_array()
             .unwrap();
+        let inherited_size = successor_packs
+            .iter()
+            .filter(|pack| parent_pack_digests.contains(pack["digest"].as_str().unwrap()))
+            .map(|pack| pack["size_bytes"].as_u64().unwrap())
+            .sum::<u64>();
+        let content_size = successor_packs
+            .iter()
+            .map(|pack| pack["size_bytes"].as_u64().unwrap())
+            .sum::<u64>();
+        let written_size = content_size - inherited_size;
         let evidence_size = successor["generation"]["generation_evidence"]["segment_size_bytes"]
             .as_u64()
             .unwrap();
-        assert!(content_size > 0 && evidence_size > 0);
-        let cold_bytes = observed_field(&observed, "range_bytes");
-        let cold_opens = observed_field(&observed, "pack_open_attempts");
+        assert!(written_size > 0 && inherited_size > 0 && evidence_size > 0);
+        let parent_witness_bytes = observed_field(&observed, "range_bytes");
+        let parent_witness_opens = observed_field(&observed, "pack_open_attempts");
+        let expected_content_bytes = if cfg!(unix) {
+            written_size
+        } else {
+            content_size
+        };
         assert_eq!(
             observed_field(&observed, "content_pack_bytes"),
-            content_size
+            expected_content_bytes,
+            "only completed fingerprint witnesses can exclude inherited bytes from proof reads"
         );
-        assert_eq!(cold_bytes, content_size + evidence_size);
-        assert_eq!(cold_opens, payload_open_count(2) as u64);
+        assert_eq!(parent_witness_bytes, expected_content_bytes + evidence_size);
+        assert_eq!(
+            parent_witness_opens,
+            payload_open_count(successor_packs.len() + 1) as u64,
+            "one open per addressed pack, including the inherited one"
+        );
         let (successor_warm_reads, warm_observed) = trace_proof(&verified);
         let warm_bytes = observed_field(&warm_observed, "range_bytes");
         let warm_opens = observed_field(&warm_observed, "pack_open_attempts");
@@ -4564,12 +4658,13 @@ mod tests {
             if cfg!(unix) {
                 evidence_size
             } else {
-                cold_bytes
+                parent_witness_bytes
             }
         );
-        assert_eq!(warm_opens, cold_opens);
+        assert_eq!(warm_opens, parent_witness_opens);
         println!(
-            "successor payload: {cold_bytes} bytes / {cold_opens} pack opens; repeated proof: \
+            "successor proof with parent record: {parent_witness_bytes} bytes / \
+             {parent_witness_opens} pack opens; repeated proof: \
              {warm_bytes} bytes / {warm_opens} pack opens"
         );
         if cfg!(unix) {
@@ -4678,15 +4773,25 @@ mod tests {
             trace_proof(&VerifiedSealedSegmentsV1::default());
         let recovered_hashes = observed_field(&recovered_observed, "hashed_segments");
         let recovery_cold_hashes = observed_field(&recovery_cold_observed, "hashed_segments");
-        assert_eq!(recovery_cold_reads, recovered_reads);
         if cfg!(unix) {
-            assert_eq!(
-                recovery_cold_hashes,
-                recovered_hashes + 1,
-                "a failed content proof must preserve the unchanged evidence-pack witness"
+            assert!(
+                recovery_cold_reads > recovered_reads,
+                "recovery with the parent's witnesses reads only the pack it repaired: \\
+                 cold={recovery_cold_reads} recovered={recovered_reads}"
+            );
+            // A cold recovery proof re-hashes every extent the reset record
+            // no longer covers, including the inherited pack's extents.
+            assert!(
+                recovery_cold_hashes > recovered_hashes,
+                "a cold recovery proof must re-hash the inherited extents the reset record dropped: \\
+                 cold={recovery_cold_hashes} recovered={recovered_hashes}"
             );
         } else {
-            assert_eq!(recovery_cold_hashes, recovered_hashes);
+            assert_eq!(recovery_cold_reads, recovered_reads);
+            assert_eq!(
+                recovery_cold_hashes, recovered_hashes,
+                "a platform without fingerprints must rehash the same extents after recovery"
+            );
         }
 
         let inherited = successor["generation"]["file_segments"]

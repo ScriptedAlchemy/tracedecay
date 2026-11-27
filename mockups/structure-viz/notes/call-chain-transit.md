@@ -2,11 +2,9 @@
 
 `call-chain-transit.html` · shots: `shots/call-chain-transit-{dark,light}.png`
 
-A call chain drawn as a route across horizontal strata, where the strata are
-ordered by a *measured* quantity. The point is that layering violations become a
-**silhouette** rather than a finding you have to read: route A is a staircase
-with no risers, route B has one riser, and you can tell them apart from across
-the room without reading a single symbol name.
+The chart draws each call chain across horizontal bands ordered by dependency
+depth. Route A never climbs to a higher band. Route B climbs once. Readers can
+spot that difference without reading the symbol names.
 
 ## What each channel encodes
 
@@ -15,27 +13,23 @@ the room without reading a single symbol name.
 | Band (vertical position) | The crate that owns the station. |
 | Band **order** | Measured dependency depth. The longest path from that crate to a leaf crate in the workspace's Cargo dependency graph. `tracedecay-domain` = 0, `tracedecay-api` = 5. |
 | Gutter numeral | That depth, printed. It is the axis tick; the crate name annotates it. |
-| Station x-position | Position in the chain, 1 → 8, evenly spaced. Encodes **nothing** about time, cost or call frequency. |
+| Station x-position | The chart spaces positions 1 through 8 evenly. Spacing does not show time, cost, or call frequency. |
 | Station hue | Symbol kind, `kindColor` arc. |
 | Station numeral | Chain order. |
 | Line | The chain. Level runs plus a 45° diagonal per hop, except where the depth crossed exceeds the horizontal room a hop gets, where the diagonal is simply steeper. |
 | Line colour | Accent for a hop that descends or stays level; error hue plus a halo and a double stroke for a hop that climbs. |
 | Foot ruler numeral | That hop's depth delta, negative downward. |
 
-Both panels share one band geometry, one scale and one station spacing, so the
-two silhouettes are directly comparable. That is the whole argument for
-stacking them rather than putting them side by side.
+Stacking the panels lets both use the same band geometry, scale, and station
+spacing so readers can compare the routes directly.
 
 ## Where absence is shown rather than cropped
 
-`tracedecay-hooks` and `tracedecay-tool-catalog` sit at depths 4 and 3 and
-neither chain enters them. They keep their full band height, their gutter label
-and their depth numeral, hatched and captioned `NO STATION ON THIS ROUTE`. A
-strata chart that quietly drops the layers a chain skips is structurally
-incapable of showing you a layer being skipped. Which is one of the two things
-this chart is for. Route B also leaves `tracedecay-domain` empty, and
-that empty band is the visible fact that the correction path never reaches the
-domain model.
+Neither chain enters `tracedecay-hooks` at depth 4 or `tracedecay-tool-catalog`
+at depth 3. The chart keeps their full band heights, gutter labels, and depth
+numbers. Hatching and `NO STATION ON THIS ROUTE` mark each skipped band. Route B
+also leaves `tracedecay-domain` empty because the correction path never reaches
+the domain model.
 
 ## What data would back it, honestly
 

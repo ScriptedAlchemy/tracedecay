@@ -150,9 +150,20 @@ fn finalize_payloads(
         })
         .collect::<Vec<_>>();
     identities.sort_by(|left, right| left.digest.cmp(&right.digest));
-    preparation
+    let roster = preparation
         .finalize_content_pack(&identities)
-        .expect("finalize the complete canonical content roster")
+        .expect("finalize the complete canonical content roster");
+    // No parent is bound, so nothing is inherited and exactly one pack is written.
+    assert_eq!(
+        roster.packs.len(),
+        1,
+        "an unbound preparation writes exactly one physical content pack"
+    );
+    roster
+        .packs
+        .into_iter()
+        .next()
+        .expect("the single written content pack")
 }
 
 #[test]
@@ -345,7 +356,7 @@ fn staged_segment_cold_digest_mismatch_poison_survives_restoration() {
     let publication = generation
         .stage_publication(&mut preparation, &operation)
         .expect("stage a real packed generation");
-    let content = publication.pack_layout().content_pack();
+    let content = &publication.pack_layout().content_packs().packs[0];
     let path = staged_path(&preparation, &content.digest);
     let original = std::fs::read(&path).expect("original content pack");
     assert_ne!(original, [] as [u8; 0]);
@@ -1275,7 +1286,7 @@ fn repeated_pending_segment_accepts_identical_concurrent_canonical_publication()
     let publication = generation
         .stage_publication(&mut preparation, &operation)
         .expect("stage real generation");
-    let pack = publication.pack_layout().content_pack();
+    let pack = &publication.pack_layout().content_packs().packs[0];
     let temporary = staged_path(&preparation, &pack.digest);
     let suffix = sha256_hex_suffix(pack.digest.as_str()).expect("content pack digest suffix");
     let canonical = target.segments_root.join(format!("segment-{suffix}.json"));
@@ -1675,11 +1686,7 @@ fn staged_existing_segments_reuse_authenticated_inodes_without_reopening() {
         .with(std::cell::Cell::get)
         .saturating_sub(full_before);
     let layout = unproven_publication.pack_layout();
-    let physical_packs = if layout.content_pack().digest == layout.evidence_pack().digest {
-        1
-    } else {
-        2
-    };
+    let physical_packs = layout.pack_identities().len() as u64;
     assert_eq!(
         full_opens, physical_packs,
         "hash each distinct physical pack once"
@@ -1696,7 +1703,7 @@ fn staged_existing_segments_reuse_authenticated_inodes_without_reopening() {
     let staged_publication = generation
         .stage_publication(&mut staged, &operation)
         .expect("restage existing canonical bytes");
-    let pack = staged_publication.pack_layout().content_pack();
+    let pack = &staged_publication.pack_layout().content_packs().packs[0];
     let suffix = sha256_hex_suffix(pack.digest.as_str()).expect("content pack digest suffix");
     let existing_path = target.segments_root.join(format!("segment-{suffix}.json"));
     let before = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
@@ -1770,9 +1777,10 @@ fn repeated_canonical_segment_writes_reuse_witness_and_refuse_replacement() {
         .expect("publish canonical packs");
     let layout = publication.pack_layout();
     let logical = layout
-        .content_pack()
-        .extents
+        .content_packs()
+        .packs
         .iter()
+        .flat_map(|pack| pack.extents.iter())
         .find(|extent| extent.size_bytes > 0)
         .expect("nonempty logical extent in the canonical content pack");
     let mut bytes = Vec::new();
@@ -1840,11 +1848,7 @@ fn repeated_canonical_segment_writes_reuse_witness_and_refuse_replacement() {
     let staged_publication = generation
         .stage_publication(&mut preparation, &operation)
         .expect("finalize the full real generation after repeated logical writes");
-    let physical_packs = if layout.content_pack().digest == layout.evidence_pack().digest {
-        1
-    } else {
-        2
-    };
+    let physical_packs = layout.pack_identities().len() as u64;
     assert_eq!(
         PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get) - before,
         physical_packs,
@@ -1868,7 +1872,7 @@ fn repeated_canonical_segment_writes_reuse_witness_and_refuse_replacement() {
         "repeated verification must not hash the canonical packs again"
     );
 
-    let suffix = sha256_hex_suffix(layout.content_pack().digest.as_str())
+    let suffix = sha256_hex_suffix(layout.content_packs().packs[0].digest.as_str())
         .expect("content pack digest suffix");
     let canonical = target.segments_root.join(format!("segment-{suffix}.json"));
     let replacement = canonical.with_extension("repeat-witness.tmp");
@@ -2006,7 +2010,7 @@ fn failed_durability_admission_cannot_leave_a_publishable_segment() {
             files.segments.pending, initial_pending,
             "a refused append must not enroll another physical pack"
         );
-        assert!(files.content_pack.is_none());
+        assert!(files.content_packs.is_none());
     }
     let mut identities = digests
         .iter()

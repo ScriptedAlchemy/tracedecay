@@ -265,12 +265,9 @@ pub enum OptionalPreflightV1 {
 }
 
 pub(super) fn stack_drift(
-    previous: Option<&GitHubStackSnapshotV1>,
-    current: Option<&GitHubStackSnapshotV1>,
+    previous: &GitHubStackSnapshotV1,
+    current: &GitHubStackSnapshotV1,
 ) -> (Vec<StackSignalKindV1>, Vec<StackDriftKindV1>) {
-    let (Some(previous), Some(current)) = (previous, current) else {
-        return (Vec::new(), Vec::new());
-    };
     let mut signals = Vec::new();
     let mut drift = Vec::new();
     if previous.final_target_ref_id != current.final_target_ref_id {

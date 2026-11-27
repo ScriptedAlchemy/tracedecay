@@ -1,6 +1,6 @@
 ## Summary
 
-<!-- What does this PR do? 1-3 bullet points. -->
+<!-- Summarize what this PR does in 1-3 bullet points. -->
 
 -
 
@@ -10,7 +10,7 @@
 
 ## Changes
 
-<!-- Key files/areas modified. Highlight anything non-obvious. -->
+<!-- List the main changes and explain any that need context. -->
 
 -
 
@@ -20,8 +20,8 @@
 - [ ] `bazel build //...` passes when the change crosses package boundaries
 - [ ] Tested manually (describe below if applicable)
 
-<!-- For new language extractors: fixture file added, extraction test added. -->
-<!-- For sync/DB changes: tested with `tracedecay sync --doctor` on a real project. -->
+<!-- For new language extractors, add a fixture file and an extraction test. -->
+<!-- For sync/DB changes, test with `tracedecay sync --doctor` on a real project. -->
 
 ## Checklist
 

@@ -2,11 +2,10 @@
 
 `disagreement-field.html` · shots: `shots/disagreement-field-{dark,light}.png`
 
-Two graphs over the same 25 symbols. The call graph, and the co-change graph
-built from sessions that edited two symbols within one session, overlaid so
-that the interesting cell is the one where they **disagree**. The loud state is
-the pair that gets edited together over and over with no call edge in either
-direction: coupling that is real, repeated, and entirely absent from the code.
+The chart overlays the call graph and the co-change graph for the same 25
+symbols. A co-change edge joins symbols edited in the same session. The chart
+emphasizes pairs that share several editing sessions but have no call edge in
+either direction.
 
 ## What each channel encodes
 
@@ -18,63 +17,51 @@ direction: coupling that is real, repeated, and entirely absent from the code.
 | Edge: thin solid, edge-strong | **Coupled and called**. A call edge whose ends also co-change. Agreement, and therefore drawn quietest. |
 | Edge: fine dotted, edge-subtle | **Called, never co-touched**. A real call edge no captured session has crossed. |
 | Edge: conflicting hue, halo + weighted stroke | **Co-changed, not linked.** The finding. Stroke width = shared sessions. |
-| Draw order | call-only → coupled → unlinked, so the finding lands on top. A finding that renders under the expected case is not a finding. |
+| Draw order | The chart draws call-only edges first, then coupled edges, then unlinked co-change edges so they stay visible. |
 
-The three counts in the key and the four in the masthead are **computed from the
-edge list at render time**, not typed into the markup, so the caption and the
-picture cannot drift apart. The seven unlinked pairs are also printed in full
-below the field, sorted by shared sessions. The field shows that the state
-exists and where it clusters; only the table says *which*.
+The renderer computes the three legend counts and four header counts from the
+same edge list it draws. The chart shows where unlinked pairs cluster. The
+table below it names all seven pairs and sorts them by shared sessions.
 
-## Where absence is shown rather than cropped
+## Missing session attribution
 
 Three of the 25 symbols (`storage::open_reader`, `kind_histogram`,
-`snapshot::validate`) have **no session attribution at all**. They are drawn as
-open dashed circles at the low end of the diameter scale, and they still carry
-their call edges. Their absence from the co-change layer is **unmeasured, not
-zero**, and collapsing that distinction is the easiest lie this chart could
-tell, because a symbol nobody has captured a session for looks exactly like a
-symbol nobody edits together with anything. The caption names it.
+`snapshot::validate`) have no session attribution. The chart draws them as open
+dashed circles at the low end of the diameter scale and keeps their call edges.
+The caption distinguishes unavailable session attribution from a measured
+co-change count of zero.
 
-## What data would back it, honestly
+## Data requirements
 
-Invented: all 25 symbols, all 39 edges, every session count.
+All 25 symbols, 39 edges, and session counts are synthetic.
 
-- **Co-change edges.** The load-bearing new data: for each session, the set of
-  symbols it edited, pairwise. Everything loud on this page comes from that
-  join, and it is the piece I would verify exists before drawing any of this.
-  Its quality also depends entirely on capture coverage, sessions from before
-  capture was installed produce false "never co-touched".
-- **Sessions-per-symbol**, for the diameter and for the honesty about the three
-  unattributed nodes.
-- **Call edges**. The one layer I would expect to be solid.
+- Verify that each session can supply the symbols it edited before deriving
+  co-change edges. Sessions from before capture began can produce a false
+  "never co-touched" result.
+- Count sessions per symbol to size each node. Track missing attribution
+  separately so the chart can mark those nodes.
+- Call edges are the most likely data to be available already.
 - Symbol names and module membership are shaped like this repo's real crates;
   the specific symbols and their pairings are made up.
 
-A real version also needs a **threshold**, which this mockup dodges: two symbols
-sharing one session is noise. The page shows pairs down to 2 shared sessions and
-does not state a cut-off. A shipping version must.
+A single shared session may not indicate coupling. The mockup shows pairs with
+as few as two shared sessions but does not state a cutoff. The production view
+must state its threshold.
 
 ## One open question
 
-**Is "no call edge" the right definition of unlinked, or just the cheap one?**
-Two symbols can be genuinely coupled through a trait impl, a serialized schema,
-a config key, a generated binding, or a test fixture, none of which is a call
-edge, all of which would make a pair land in the loud bucket while being
-perfectly well recorded in the code. If that is common, the loud state is mostly
-false positives and the chart trains people to ignore it. The question is
-whether "linked" should mean *any* graph relationship rather than a call edge,
-and I cannot answer it from the mockup: it needs a sample of real co-change
-pairs, hand-classified, before the third edge state is worth shipping at this
-volume.
+Should any graph relationship count as a link, or only a call edge? A trait
+impl, serialized schema, config key, generated binding, or test fixture may
+couple two symbols without a call edge. If those cases are common, the view
+would highlight many pairs whose relationship is already recorded. Classify a
+sample of real co-change pairs by hand before shipping the third edge state at
+this volume.
 
 ## Known mockup shortcuts
 
-- 25 nodes hand-placed, labels hand-positioned. Neither survives real data; a
-  real field needs a layout and a label solver, and the "position means nothing"
-  caption is only honest as long as the layout stays deliberate.
-- Undirected edges. Call direction is dropped, which is fine for the
-  disagreement question and would be wrong for anything else.
-- No interaction: no hover, no filtering by threshold, no drill-through from a
-  pair to the sessions that produced it. Which is the obvious next click and
-  the thing that would make the finding actionable.
+- The mockup positions 25 nodes and their labels by hand. Production data needs
+  an automatic layout and label placement that do not imply a measured position.
+- The chart omits call direction because this comparison only asks whether a
+  call edge exists.
+- The mockup has no hover or threshold filter. It also cannot open the sessions
+  for a pair, which a reader would need to verify the finding.

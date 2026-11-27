@@ -49,6 +49,11 @@ pub(crate) async fn reconcile_active_workflow_fan_out(
     .map(|_| ())
 }
 
+#[tracing::instrument(
+    name = "daemon.service.workflow.reconcile_fan_out_page",
+    level = "trace",
+    skip_all
+)]
 async fn reconcile_active_workflow_fan_out_page(
     registered: &RegisteredWorkRuntime,
     attempt_processes: Arc<super::super::super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
@@ -181,6 +186,11 @@ async fn resume_work_attempts_for_workflow_recovery(
     Ok(())
 }
 
+#[tracing::instrument(
+    name = "daemon.service.workflow.recover_fan_out_startup",
+    level = "trace",
+    skip_all
+)]
 async fn recover_workflow_fan_out_startup(
     registered: &RegisteredWorkRuntime,
 ) -> Result<(), ApplicationProblem> {

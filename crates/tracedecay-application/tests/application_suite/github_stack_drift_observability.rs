@@ -10,8 +10,9 @@ use tracedecay_application::{
         restore_github_stack_drift_intervals,
     },
     stack_coordinator::{
-        DaemonGitHubStackCoordinatorV1, GitHubStackDriftObservationV1,
-        GitHubStackProviderSourceBindingV1, github_stack_circuit_policy,
+        DaemonGitHubStackCoordinatorV1, GitHubStackDriftObservationV1, GitHubStackObservationV1,
+        GitHubStackProviderOutcomeV1, GitHubStackProviderSourceBindingV1,
+        github_stack_circuit_policy,
     },
 };
 use tracedecay_contracts::{
@@ -29,6 +30,8 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+use super::github_stack_coordinator::enabled_snapshot;
 
 fn resolved_scope(name: &str) -> ResolvedScope {
     ResolvedScope::new(
@@ -52,6 +55,30 @@ fn source_binding(scope: &ResolvedScope) -> GitHubStackProviderSourceBindingV1 {
             .expect("capability source anchor"),
         snapshot_source_anchor_id: None,
     }
+}
+
+fn observe_stack(
+    coordinator: &DaemonGitHubStackCoordinatorV1,
+    scope: &ResolvedScope,
+    observed_at: i64,
+) -> GitHubStackObservationV1 {
+    let mut binding = source_binding(scope);
+    binding.snapshot_source_anchor_id = Some(
+        RetrievalAnchorId::new("anchor.github-stack-drift.snapshot").expect("snapshot anchor"),
+    );
+    let read = coordinator
+        .authorize_provider_read(scope)
+        .expect("provider read authority")
+        .expect("probing registration");
+    coordinator
+        .observe_provider(
+            read,
+            ProviderId::new("provider.github").expect("provider"),
+            GitHubStackProviderOutcomeV1::Enabled(enabled_snapshot(scope)),
+            binding,
+            UtcMicros(observed_at),
+        )
+        .expect("provider snapshot")
 }
 
 fn producer_identity(project_id: &ProjectId) -> ObservabilityProducerIdentityV1 {
@@ -379,9 +406,9 @@ async fn coordinator_drift_is_durable_closed_monotone_and_scope_denial_writes_no
 }
 
 /// A restarted daemon rebuilds this scope's open drift intervals from the
-/// durable receipts before its next observation, so the original trace closes
-/// instead of a duplicate interval opening. A receipt from another worktree of
-/// the same project is durable evidence for that scope, not this one.
+/// durable receipts before its next observation. A policy observation or first
+/// provider sample cannot establish closure; a later stable comparison closes
+/// the original trace. Another worktree's receipt cannot bind this scope.
 #[tokio::test]
 async fn restart_restores_only_this_scope_open_drift_and_closes_its_original_trace() {
     let profile_dir = tempfile::tempdir().expect("profile");
@@ -522,7 +549,7 @@ async fn restart_restores_only_this_scope_open_drift_and_closes_its_original_tra
     );
     assert_eq!(report.coverage, CoverageStateV1::Known);
 
-    let settled = restarted
+    let unavailable = restarted
         .observe_policy(
             scope.clone(),
             ProviderId::new("provider.github").expect("provider"),
@@ -530,6 +557,10 @@ async fn restart_restores_only_this_scope_open_drift_and_closes_its_original_tra
             UtcMicros(3_000),
         )
         .expect("policy observation after restart");
+    assert!(unavailable.drift_observations.is_empty());
+    let baseline = observe_stack(&restarted, &scope, 3_001);
+    assert!(baseline.drift_observations.is_empty());
+    let settled = observe_stack(&restarted, &scope, 3_002);
     let [restored] = settled.drift_observations.as_slice() else {
         panic!(
             "the restored interval must close exactly once: {:?}",
@@ -539,7 +570,7 @@ async fn restart_restores_only_this_scope_open_drift_and_closes_its_original_tra
     assert_eq!(restored.trace_id, open.trace_id);
     assert_eq!(restored.drift.state, IntervalStateV1::Closed);
     assert_eq!(restored.drift.first_observed_micros, 2_000);
-    assert_eq!(restored.drift.terminal_micros, Some(3_000));
+    assert_eq!(restored.drift.terminal_micros, Some(3_002));
     assert_ne!(
         settled.drift_observations[0].trace_id, other_open.trace_id,
         "another worktree's open interval is not this scope's evidence"
@@ -642,7 +673,7 @@ async fn restore_reduces_drift_kinds_by_event_time_across_unsorted_pages() {
     assert!(!report.scope_already_live);
     assert_eq!(report.coverage, CoverageStateV1::Known);
 
-    let settled = coordinator
+    let unavailable = coordinator
         .observe_policy(
             scope.clone(),
             ProviderId::new("provider.github").expect("provider"),
@@ -650,10 +681,14 @@ async fn restore_reduces_drift_kinds_by_event_time_across_unsorted_pages() {
             UtcMicros(3_000),
         )
         .expect("policy observation after restoration");
+    assert!(unavailable.drift_observations.is_empty());
+    let baseline = observe_stack(&coordinator, &scope, 3_001);
+    assert!(baseline.drift_observations.is_empty());
+    let settled = observe_stack(&coordinator, &scope, 3_002);
     let [restored] = settled.drift_observations.as_slice() else {
         panic!("the restored interval must close exactly once: {settled:?}");
     };
     assert_eq!(restored.trace_id, open.trace_id);
     assert_eq!(restored.drift.first_observed_micros, 2_000);
-    assert_eq!(restored.drift.terminal_micros, Some(3_000));
+    assert_eq!(restored.drift.terminal_micros, Some(3_002));
 }

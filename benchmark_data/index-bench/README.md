@@ -1,12 +1,10 @@
-# indexing benchmark workload
+# Indexing benchmark workload
 
-The benchmark workload for the indexing pipeline. It exists
-so a pull request can be asked one question. *did this diff make indexing
-slower?*, and get an answer that is about the diff rather than about the
-runner.
+Use this workload to measure whether a change slows the indexing pipeline. Run
+the same workload on both revisions to compare the change rather than the runner.
 
-Entrypoint: `crates/tracedecay-query/src/bin/tracedecay_index_bench.rs`,
-built as the `tracedecay-index-bench` binary.
+The `tracedecay-index-bench` binary starts in
+`crates/tracedecay-query/src/bin/tracedecay_index_bench.rs`.
 
 ```text
 cargo build -p tracedecay-query --bin tracedecay-index-bench \
@@ -15,9 +13,8 @@ cargo build -p tracedecay-query --bin tracedecay-index-bench \
 target/debug/tracedecay-index-bench
 ```
 
-The workload summary, including each phase's wall time, goes to stdout as
-JSON. The bench installs no `tracing` subscriber, so the summary is its only
-timing output.
+The benchmark writes a JSON summary with each phase's wall time to stdout.
+It installs no `tracing` subscriber, so it reports timing only in the summary.
 
 ## What it measures
 

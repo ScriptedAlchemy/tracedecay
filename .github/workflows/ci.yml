@@ -31,12 +31,11 @@ on:
 permissions:
   contents: read
 
-# Explicit OS/host coverage must not be replaced by a default-coverage push
-# while queued (separate group suffixes). Non-master refs cancel superseded
-# runs for tip-fast feedback. Master finishes the in-progress snapshot so a
-# green/red signal still lands when merges outpace the long pole; GitHub
-# keeps only the newest pending tip. Shorter shards cut how long that tip
-# may wait for first job — shard layout is owned elsewhere.
+# Separate group suffixes keep default pushes from replacing queued runs that
+# request OS or host coverage. Outside master, a newer run cancels the earlier
+# one. On master, the active run finishes even when merges are faster than the
+# checks, so it still reports a result. GitHub keeps only the newest pending run.
+# Shorter shards reduce that run's wait. Shards are configured separately.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'workflow_dispatch' && format('os-{0}-{1}-hosts-{2}', inputs.run_os, inputs.native_platform, inputs.run_hosts) || 'default' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
@@ -343,9 +342,8 @@ jobs:
         shell: bash
         run: bash .github/actions/setup-bazel/report_disk.sh
 
-  # The macOS and Windows lanes run the same Bazel workspace the Linux
-  # authority does, on demand: they exercise target-specific behavior the
-  # Linux lane cannot prove.
+  # The on-demand macOS and Windows jobs run the same Bazel workspace as the
+  # Linux job. They check behavior specific to their platforms.
   macos-test:
     permissions:
       contents: read
@@ -849,10 +847,11 @@ jobs:
     if: >-
       ${{ !cancelled() && needs.change-scope.outputs.bazel != 'false'
       && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
-    # Same image as Test Linux so rustc action keys can restore that job's
-    # disk cache (proc-macros, build scripts, grammar cc, matching rlibs)
-    # when this job's own prefix misses. ARM isolated Clippy from that
-    # cache and paid a cold 55–61m `//...` on recent PRs.
+    # Use the Test Linux image so Clippy can reuse that job's cached Rust
+    # actions when its own cache prefix misses. These include proc-macros,
+    # build scripts, grammar C compilation, and matching rlibs. Clippy could
+    # not reuse that cache on ARM, where a cold `//...` took 55 to 61 minutes
+    # on recent PRs.
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -1022,8 +1021,8 @@ jobs:
           //plugin/chatgpt-extension:serve_client_test
           //plugin/chatgpt-extension:bridge_lifecycle_test
 
-      # The native SDK socket suite builds Rust and runs in the workspace-c
-      # (or fleet) shard's //... target set, keeping this frontend lane separate.
+      # The native SDK socket suite builds Rust. It runs as part of `//...`
+      # in the workspace-c or fleet shard, separate from the frontend job.
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
