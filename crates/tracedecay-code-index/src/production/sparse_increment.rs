@@ -369,9 +369,9 @@ impl SparseBuildV1<'_> {
             &code_graph_pages,
             &resolution_index,
         )?;
-        let content_pack = preparation.finalize_content_pack(&content_segments)?;
+        let content_packs = preparation.finalize_content_pack(&content_segments)?;
         drop(content_segments);
-        let manifest_base = manifest_base.saturating_add(content_pack.retained_bytes());
+        let manifest_base = manifest_base.saturating_add(content_packs.retained_bytes());
         memory.resize(count(manifest_base)?)?;
         let manifest_bytes = seal_partitioned_manifest_charged(
             &PartitionedPublishedGenerationRefV1 {
@@ -391,7 +391,7 @@ impl SparseBuildV1<'_> {
                 generation_evidence: &generation_evidence,
                 code_graph_pages: &code_graph_pages,
                 resolution_index: &resolution_index,
-                content_pack: &content_pack,
+                content_packs: &content_packs,
             },
             manifest_base,
             &mut |bytes| memory.resize(bytes),
@@ -415,7 +415,7 @@ impl SparseBuildV1<'_> {
             (reused, computed, stale),
             &mut |needed| memory.resize(count(prepared_base.saturating_add(needed))?),
         )?;
-        drop(content_pack);
+        drop(content_packs);
         drop(file_segments);
         drop(file_evidence);
         drop(code_graph_pages);

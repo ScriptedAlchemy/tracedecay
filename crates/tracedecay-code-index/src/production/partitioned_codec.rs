@@ -38,11 +38,11 @@
 //! ([`super::file_evidence_rows`]): its typed JSON, raw DEFLATE compressed,
 //! with no identity substitution because it names nothing generation-local.
 //!
-//! File, file-evidence, resolution, and code-graph segment bytes are concatenated
-//! into one generation-local content pack, in unique digest order. The manifest
-//! authenticates each contiguous extent and the complete pack. Packing does not
-//! rewrite any logical segment bytes or let a successor depend on an ancestor's
-//! physical pack; generation evidence remains the second physical pack.
+//! File, file-evidence, resolution, and code-graph segment bytes occupy a bounded
+//! set of immutable content packs, each in unique digest order. A successor may
+//! retain a parent's physical pack by its complete authenticated extent map.
+//! Compaction copies only currently required extents, without rewriting their
+//! logical bytes. Generation evidence retains its separate physical pack.
 
 #[cfg(test)]
 use std::collections::BTreeMap;
@@ -257,7 +257,7 @@ pub struct SealedGenerationSegmentIdentityV1 {
     pub size_bytes: u64,
 }
 
-/// One logical content segment inside its generation's immutable pack.
+/// One logical content segment inside one immutable physical pack.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SealedGenerationContentExtentV1 {
@@ -266,8 +266,10 @@ pub struct SealedGenerationContentExtentV1 {
     pub size_bytes: u64,
 }
 
-/// The complete content roster, in digest order, authenticated by the manifest.
-/// Generation evidence retains its separately authenticated streaming pack.
+/// One immutable physical pack and the logical extents it holds, in digest
+/// order at contiguous offsets from zero. A pack is written once and never
+/// rewritten: a successor that still uses an extent references the pack it
+/// already lives in instead of copying its bytes.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SealedGenerationContentPackV1 {
@@ -292,31 +294,37 @@ impl SealedGenerationContentPackV1 {
     }
 
     /// Refuse a noncanonical layout or a pack that omits or adds logical bytes.
-    /// The caller supplies the complete, canonically ordered logical roster.
+    /// The caller supplies the complete, canonically ordered logical roster
+    /// this pack must hold.
     pub fn validate(
         &self,
         required: &[SealedGenerationSegmentIdentityV1],
     ) -> Result<(), CodeIndexProductionErrorV1> {
-        self.digest
-            .validate()
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-        if self.extents.len() != required.len() {
+        self.validate_layout()?;
+        if self.extents.len() != required.len()
+            || self.extents.iter().zip(required).any(|(extent, identity)| {
+                extent.digest != identity.digest || extent.size_bytes != identity.size_bytes
+            })
+        {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed content pack does not contain the exact required segment roster".to_owned(),
             ));
         }
+        Ok(())
+    }
+
+    fn validate_layout(&self) -> Result<(), CodeIndexProductionErrorV1> {
+        self.digest
+            .validate()
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         let mut end = 0_u64;
         let mut previous = None;
-        for (extent, identity) in self.extents.iter().zip(required) {
+        for extent in &self.extents {
             extent
                 .digest
                 .validate()
                 .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-            if previous.is_some_and(|digest| digest >= &extent.digest)
-                || extent.digest != identity.digest
-                || extent.size_bytes != identity.size_bytes
-                || extent.offset != end
-            {
+            if previous.is_some_and(|digest| digest >= &extent.digest) || extent.offset != end {
                 return Err(CodeIndexProductionErrorV1::Contract(
                     "sealed content pack extents are not the canonical logical roster".to_owned(),
                 ));
@@ -337,10 +345,159 @@ impl SealedGenerationContentPackV1 {
     }
 }
 
+/// The upper bound on physical content packs one generation may reference.
+/// A successor inherits unchanged extents from its parent's packs, so a long
+/// run of small edits would otherwise grow the pack set without bound and
+/// every read pass would pay one endpoint-authorized open per pack. Once a
+/// successor would exceed this bound its finalizer folds the still-required
+/// extents from the lowest-digest inherited packs into the new pack. Every
+/// generation's pack count stays bounded independently of its edit history.
+pub const MAX_SEALED_GENERATION_CONTENT_PACKS_V1: usize = 8;
+
+/// The complete logical content roster of one generation, partitioned across
+/// a bounded number of immutable physical packs. Packs are strictly ordered
+/// by digest and every logical digest appears in exactly one of them, so a
+/// logical request resolves to one physical address. Generation evidence
+/// retains its separately authenticated streaming pack.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SealedGenerationContentRosterV1 {
+    pub packs: Vec<SealedGenerationContentPackV1>,
+}
+
+impl SealedGenerationContentRosterV1 {
+    fn heap_bytes(&self) -> usize {
+        self.packs.iter().fold(0_usize, |bytes, pack| {
+            bytes.saturating_add(pack.heap_bytes())
+        })
+    }
+
+    /// Owned allocation footprint, using the canonical decoded-ID convention.
+    #[must_use]
+    pub fn retained_bytes(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(self.heap_bytes())
+            .saturating_add(
+                self.packs
+                    .capacity()
+                    .saturating_mul(size_of::<SealedGenerationContentPackV1>()),
+            )
+    }
+
+    /// Refuse a noncanonical roster or one that does not hold every digest
+    /// of the caller's complete, canonically ordered logical roster at its
+    /// exact length. A pack inherited from a parent keeps the parent's whole
+    /// extent list so its physical digest stays reproducible. Entries unused
+    /// by the successor remain part of that physical proof until compaction.
+    pub fn validate(
+        &self,
+        required: &[SealedGenerationSegmentIdentityV1],
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        if self.packs.is_empty() || self.packs.len() > MAX_SEALED_GENERATION_CONTENT_PACKS_V1 {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed content roster holds an out-of-bound pack count".to_owned(),
+            ));
+        }
+        let mut previous_pack = None;
+        for pack in &self.packs {
+            // Inheritance preserves the whole physical extent list, including
+            // inert entries. It must still cover every byte exactly once so
+            // hashing the extents also authenticates the physical pack.
+            pack.validate_layout()?;
+            if previous_pack.is_some_and(|digest| digest >= &pack.digest) {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "sealed content roster packs are not strictly canonical".to_owned(),
+                ));
+            }
+            previous_pack = Some(&pack.digest);
+        }
+        // Packs are digest-ordered, but an inherited pack's extents interleave
+        // with the new pack's. Merge at most the bounded pack count without
+        // allocating a duplicate of every inherited extent just to validate it.
+        let mut positions = [0_usize; MAX_SEALED_GENERATION_CONTENT_PACKS_V1];
+        let mut previous = None;
+        let mut required_position = 0;
+        while let Some((index, extent)) = self
+            .packs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pack)| {
+                pack.extents
+                    .get(positions[index])
+                    .map(|extent| (index, extent))
+            })
+            .min_by(|(_, left), (_, right)| left.digest.cmp(&right.digest))
+        {
+            if previous == Some(&extent.digest) {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "sealed content roster holds one logical segment in two packs".to_owned(),
+                ));
+            }
+            if let Some(identity) = required.get(required_position) {
+                if identity.digest < extent.digest
+                    || (identity.digest == extent.digest
+                        && identity.size_bytes != extent.size_bytes)
+                {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "sealed content roster does not hold the exact required segment roster"
+                            .to_owned(),
+                    ));
+                }
+                if identity.digest == extent.digest {
+                    required_position += 1;
+                }
+            }
+            previous = Some(&extent.digest);
+            positions[index] += 1;
+        }
+        if required_position != required.len() {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed content roster does not hold the exact required segment roster".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The pack and extent holding one logical digest, if this roster has it.
+    pub fn locate(
+        &self,
+        digest: &ManifestDigest,
+    ) -> Option<(
+        &SealedGenerationContentPackV1,
+        &SealedGenerationContentExtentV1,
+    )> {
+        self.packs.iter().find_map(|pack| {
+            pack.extents
+                .binary_search_by(|extent| extent.digest.cmp(digest))
+                .ok()
+                .map(|index| (pack, &pack.extents[index]))
+        })
+    }
+
+    /// The physical packs this roster addresses, deduplicated against the
+    /// evidence pack when both authenticate one file.
+    pub fn pack_identities(
+        &self,
+        evidence: &SealedGenerationSegmentIdentityV1,
+    ) -> Vec<SealedGenerationSegmentIdentityV1> {
+        let mut identities = Vec::with_capacity(self.packs.len().saturating_add(1));
+        for pack in &self.packs {
+            identities.push(SealedGenerationSegmentIdentityV1 {
+                digest: pack.digest.clone(),
+                size_bytes: pack.size_bytes,
+            });
+        }
+        if !self.packs.iter().any(|pack| pack.digest == evidence.digest) {
+            identities.push(evidence.clone());
+        }
+        identities
+    }
+}
+
 /// A generation-bound address map admitted through its authenticated manifest.
 #[derive(Clone, Debug)]
 pub struct SealedGenerationPackLayoutV1 {
-    content: SealedGenerationContentPackV1,
+    content: SealedGenerationContentRosterV1,
     evidence: SealedGenerationSegmentIdentityV1,
 }
 
@@ -348,14 +505,14 @@ impl SealedGenerationPackLayoutV1 {
     #[must_use]
     pub fn retained_bytes(&self) -> usize {
         size_of::<Self>()
-            .saturating_add(self.content.heap_bytes())
+            .saturating_add(self.content.retained_bytes())
             .saturating_add(self.evidence.digest.as_str().len())
     }
 
     pub fn open(bytes: &[u8]) -> Result<Self, CodeIndexProductionErrorV1> {
         let generation = parse_partitioned_manifest(bytes)?;
         Ok(Self {
-            content: generation.content_pack,
+            content: generation.content_packs,
             evidence: SealedGenerationSegmentIdentityV1 {
                 digest: generation.generation_evidence.segment_digest,
                 size_bytes: generation.generation_evidence.segment_size_bytes,
@@ -363,14 +520,21 @@ impl SealedGenerationPackLayoutV1 {
         })
     }
 
+    /// The complete content roster across every physical pack.
     #[must_use]
-    pub fn content_pack(&self) -> &SealedGenerationContentPackV1 {
+    pub fn content_packs(&self) -> &SealedGenerationContentRosterV1 {
         &self.content
     }
 
     #[must_use]
     pub fn evidence_pack(&self) -> &SealedGenerationSegmentIdentityV1 {
         &self.evidence
+    }
+
+    /// Every physical file this generation addresses: its content packs and
+    /// its evidence pack, deduplicated when one file serves both roles.
+    pub fn pack_identities(&self) -> Vec<SealedGenerationSegmentIdentityV1> {
+        self.content.pack_identities(&self.evidence)
     }
 
     fn view(&self) -> SealedGenerationPackLayoutRefV1<'_> {
@@ -405,7 +569,7 @@ impl SealedGenerationPackLayoutV1 {
 
 /// Decoding borrows the parsed manifest's map without allocating it twice.
 struct SealedGenerationPackLayoutRefV1<'a> {
-    content: &'a SealedGenerationContentPackV1,
+    content: &'a SealedGenerationContentRosterV1,
     evidence_digest: &'a ManifestDigest,
     evidence_size_bytes: u64,
 }
@@ -461,32 +625,34 @@ impl<'a> SealedGenerationPackLayoutRefV1<'a> {
                 }
             });
         }
-        let index = self
-            .content
-            .extents
-            .binary_search_by(|extent| extent.digest.cmp(digest))
-            .map_err(|_| {
+        for pack in &self.content.packs {
+            let Ok(index) = pack
+                .extents
+                .binary_search_by(|extent| extent.digest.cmp(digest))
+            else {
+                continue;
+            };
+            let extent = &pack.extents[index];
+            if size_bytes != extent.size_bytes {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "sealed content request differs from its authenticated length".to_owned(),
+                ));
+            }
+            let offset = extent.offset.checked_add(offset).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract(
-                    "sealed logical segment is absent from this generation's pack".to_owned(),
+                    "sealed content pack read offset overflowed".to_owned(),
                 )
             })?;
-        let extent = &self.content.extents[index];
-        if size_bytes != extent.size_bytes {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed content request differs from its authenticated length".to_owned(),
-            ));
+            return Ok(SealedGenerationSegmentReadV1::Range {
+                digest: &pack.digest,
+                size_bytes: pack.size_bytes,
+                offset,
+                length,
+            });
         }
-        let offset = extent.offset.checked_add(offset).ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed content pack read offset overflowed".to_owned(),
-            )
-        })?;
-        Ok(SealedGenerationSegmentReadV1::Range {
-            digest: &self.content.digest,
-            size_bytes: self.content.size_bytes,
-            offset,
-            length,
-        })
+        Err(CodeIndexProductionErrorV1::Contract(
+            "sealed logical segment is absent from this generation's pack".to_owned(),
+        ))
     }
 
     /// Keep stale output unavailable on a layout or underlying I/O refusal.
@@ -566,6 +732,7 @@ pub enum SealedGenerationSegmentReadV1<'a> {
     },
 }
 
+#[cfg(test)]
 fn canonical_segment_identities<'a>(
     identities: impl Iterator<Item = (&'a ManifestDigest, u64)>,
 ) -> Result<Vec<SealedGenerationSegmentIdentityV1>, CodeIndexProductionErrorV1> {
@@ -648,26 +815,28 @@ pub(super) fn content_segment_identities(
 }
 
 fn validate_pack_roles(
-    content: &SealedGenerationContentPackV1,
+    content: &SealedGenerationContentRosterV1,
     evidence_digest: &ManifestDigest,
     evidence_size_bytes: u64,
 ) -> Result<(), CodeIndexProductionErrorV1> {
     evidence_digest
         .validate()
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-    if content.digest == *evidence_digest && content.size_bytes != evidence_size_bytes {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed physical pack has conflicting encoded lengths".to_owned(),
-        ));
-    }
-    if let Ok(index) = content
-        .extents
-        .binary_search_by(|extent| extent.digest.cmp(evidence_digest))
-        && content.extents[index].size_bytes != evidence_size_bytes
-    {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed evidence identity conflicts with a content extent".to_owned(),
-        ));
+    for pack in &content.packs {
+        if pack.digest == *evidence_digest && pack.size_bytes != evidence_size_bytes {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed physical pack has conflicting encoded lengths".to_owned(),
+            ));
+        }
+        if let Ok(index) = pack
+            .extents
+            .binary_search_by(|extent| extent.digest.cmp(evidence_digest))
+            && pack.extents[index].size_bytes != evidence_size_bytes
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed evidence identity conflicts with a content extent".to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -755,7 +924,7 @@ pub(super) struct PartitionedPublishedGenerationRefV1<'a> {
     pub(super) ignored_source_admissions_digest: &'a ManifestDigest,
     pub(super) file_segments: &'a [PartitionedFileSegmentDescriptorV1],
     pub(super) file_evidence: &'a [PartitionedFileEvidenceDescriptorV1],
-    pub(super) content_pack: &'a SealedGenerationContentPackV1,
+    pub(super) content_packs: &'a SealedGenerationContentRosterV1,
     pub(super) coverage: CoverageSummaryV1,
     pub(super) capability: &'a CodeIndexCapabilityManifestV1,
     pub(super) generation_evidence: &'a PartitionedGenerationEvidenceDescriptorV1,
@@ -779,7 +948,7 @@ pub(super) struct PartitionedPublishedGenerationV1 {
     pub(super) ignored_source_admissions_digest: ManifestDigest,
     pub(super) file_segments: Vec<PartitionedFileSegmentDescriptorV1>,
     pub(super) file_evidence: Vec<PartitionedFileEvidenceDescriptorV1>,
-    pub(super) content_pack: SealedGenerationContentPackV1,
+    pub(super) content_packs: SealedGenerationContentRosterV1,
     pub(super) coverage: CoverageSummaryV1,
     pub(super) capability: CodeIndexCapabilityManifestV1,
     pub(super) generation_evidence: PartitionedGenerationEvidenceDescriptorV1,
@@ -828,7 +997,7 @@ struct PartitionedSegmentIdentityGenerationV1 {
     file_evidence: Vec<PartitionedFileEvidenceIdentityV1>,
     /// Retired manifests reach the revision gate before this is required.
     #[serde(default)]
-    content_pack: Option<SealedGenerationContentPackV1>,
+    content_packs: Option<SealedGenerationContentRosterV1>,
     generation_evidence: PartitionedEvidenceSegmentIdentityV1,
     #[serde(default)]
     code_graph_pages: Vec<PartitionedCodeGraphPageIdentityV1>,
@@ -2650,7 +2819,7 @@ impl PartitionedPublishedGenerationV1 {
         ) -> Result<(), CodeIndexProductionErrorV1>,
     ) -> Result<(), CodeIndexProductionErrorV1> {
         SealedGenerationPackLayoutRefV1 {
-            content: &self.content_pack,
+            content: &self.content_packs,
             evidence_digest: &self.generation_evidence.segment_digest,
             evidence_size_bytes: self.generation_evidence.segment_size_bytes,
         }
@@ -2807,7 +2976,7 @@ pub(super) fn parse_partitioned_manifest_admitted(
     )?;
     generation.resolution_index.validate()?;
     generation
-        .content_pack
+        .content_packs
         .validate(&content_segment_identities(
             &generation.file_segments,
             &generation.file_evidence,
@@ -2815,7 +2984,7 @@ pub(super) fn parse_partitioned_manifest_admitted(
             &generation.resolution_index,
         )?)?;
     validate_pack_roles(
-        &generation.content_pack,
+        &generation.content_packs,
         &generation.generation_evidence.segment_digest,
         generation.generation_evidence.segment_size_bytes,
     )?;
@@ -3234,9 +3403,10 @@ impl SealedGenerationFileWindowsV1 {
         super::resident_bytes::partitioned_manifest_retained_bytes(&self.generation)
     }
 
+    /// The complete content roster across every physical pack.
     #[must_use]
-    pub fn content_pack(&self) -> &SealedGenerationContentPackV1 {
-        &self.generation.content_pack
+    pub fn content_packs(&self) -> &SealedGenerationContentRosterV1 {
+        &self.generation.content_packs
     }
 
     #[must_use]
@@ -3247,23 +3417,16 @@ impl SealedGenerationFileWindowsV1 {
         )
     }
 
-    /// The two physical roles, deduplicated when they authenticate one file.
+    /// Every physical file this generation addresses: its content packs and
+    /// its evidence pack, deduplicated when one file serves both roles.
     #[must_use]
     pub fn pack_identities(&self) -> Vec<SealedGenerationSegmentIdentityV1> {
-        let content = self.content_pack();
-        let (evidence_digest, evidence_size) = self.evidence_pack();
-        let mut identities = Vec::with_capacity(2);
-        identities.push(SealedGenerationSegmentIdentityV1 {
-            digest: content.digest.clone(),
-            size_bytes: content.size_bytes,
-        });
-        if evidence_digest != &content.digest {
-            identities.push(SealedGenerationSegmentIdentityV1 {
-                digest: evidence_digest.clone(),
-                size_bytes: evidence_size,
-            });
-        }
-        identities
+        self.generation
+            .content_packs
+            .pack_identities(&SealedGenerationSegmentIdentityV1 {
+                digest: self.generation.generation_evidence.segment_digest.clone(),
+                size_bytes: self.generation.generation_evidence.segment_size_bytes,
+            })
     }
 
     /// Resolve a logical proof identity or an exact physical role. Every
@@ -3283,9 +3446,9 @@ impl SealedGenerationFileWindowsV1 {
                 length,
             } => (digest, size_bytes, offset, length),
         };
-        let content = self.content_pack();
-        if digest == &content.digest {
-            if size_bytes != content.size_bytes
+        let content = self.content_packs();
+        if let Some(pack) = content.packs.iter().find(|pack| pack.digest == *digest) {
+            if size_bytes != pack.size_bytes
                 || offset
                     .checked_add(length)
                     .is_none_or(|end| end > size_bytes)
@@ -3298,13 +3461,13 @@ impl SealedGenerationFileWindowsV1 {
             return Ok(match request {
                 SealedGenerationSegmentReadV1::Whole { .. } => {
                     SealedGenerationSegmentReadV1::Whole {
-                        digest: &content.digest,
+                        digest: &pack.digest,
                         size_bytes,
                     }
                 }
                 SealedGenerationSegmentReadV1::Range { .. } => {
                     SealedGenerationSegmentReadV1::Range {
-                        digest: &content.digest,
+                        digest: &pack.digest,
                         size_bytes,
                         offset,
                         length,
@@ -3376,7 +3539,7 @@ impl SealedGenerationFileWindowsV1 {
     /// The map contribution already present in the legacy graph-page bounds.
     /// A separately admitted complete source must charge this allocation once.
     pub fn retained_pack_bytes(&self) -> usize {
-        self.generation.content_pack.retained_bytes()
+        self.generation.content_packs.retained_bytes()
     }
 
     pub(crate) fn code_graph_pages(&self) -> &[PartitionedCodeGraphPageDescriptorV1] {
@@ -3458,7 +3621,7 @@ pub(super) fn seal_partitioned_manifest_charged(
     // This temporary roster is gone before manifest serialization grows.
     retain(base.saturating_add(roster_bytes) as u64)?;
     generation
-        .content_pack
+        .content_packs
         .validate(&content_segment_identities(
             generation.file_segments,
             generation.file_evidence,
@@ -3467,7 +3630,7 @@ pub(super) fn seal_partitioned_manifest_charged(
         )?)?;
     retain(base as u64)?;
     validate_pack_roles(
-        generation.content_pack,
+        generation.content_packs,
         &generation.generation_evidence.segment_digest,
         generation.generation_evidence.segment_size_bytes,
     )?;
@@ -3574,7 +3737,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
             ignored_source_admissions_digest: generation.ignored_source_admissions_digest,
         };
         let layout = SealedGenerationPackLayoutV1 {
-            content: generation.content_pack,
+            content: generation.content_packs,
             evidence: SealedGenerationSegmentIdentityV1 {
                 digest: generation.generation_evidence.segment_digest,
                 size_bytes: generation.generation_evidence.segment_size_bytes,
@@ -3803,7 +3966,7 @@ impl CodeIndexPublishedGenerationV1 {
             &code_graph_pages,
             &resolution_index,
         )?;
-        let content_pack = preparation.finalize_content_pack(&segments)?;
+        let content_packs = preparation.finalize_content_pack(&segments)?;
         let statistics = self.generation_statistics()?;
         seal_partitioned_manifest(&PartitionedPublishedGenerationRefV1 {
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
@@ -3821,7 +3984,7 @@ impl CodeIndexPublishedGenerationV1 {
             ignored_source_admissions_digest: self.ignored_source_roster.digest(),
             file_segments: &file_segments,
             file_evidence: &file_evidence,
-            content_pack: &content_pack,
+            content_packs: &content_packs,
             coverage: self.coverage,
             capability: &self.capability,
             generation_evidence: &generation_evidence,
@@ -3936,7 +4099,7 @@ impl CodeIndexPublishedGenerationV1 {
             parse_partitioned_manifest_admitted(bytes, admit_manifest)
         }?;
         let layout = SealedGenerationPackLayoutRefV1 {
-            content: &generation.content_pack,
+            content: &generation.content_packs,
             evidence_digest: &generation.generation_evidence.segment_digest,
             evidence_size_bytes: generation.generation_evidence.segment_size_bytes,
         };
@@ -4107,7 +4270,7 @@ impl CodeIndexPublishedGenerationV1 {
             sources,
         )?;
         let layout = SealedGenerationPackLayoutV1 {
-            content: generation.content_pack,
+            content: generation.content_packs,
             evidence: SealedGenerationSegmentIdentityV1 {
                 digest: generation.generation_evidence.segment_digest,
                 size_bytes: generation.generation_evidence.segment_size_bytes,
@@ -4171,19 +4334,14 @@ impl CodeIndexPublishedGenerationV1 {
         bytes: &[u8],
     ) -> Result<Vec<SealedGenerationSegmentIdentityV1>, CodeIndexProductionErrorV1> {
         let generation = parse_partitioned_manifest(bytes)?;
-        canonical_segment_identities(
-            [
-                (
-                    &generation.content_pack.digest,
-                    generation.content_pack.size_bytes,
-                ),
-                (
-                    &generation.generation_evidence.segment_digest,
-                    generation.generation_evidence.segment_size_bytes,
-                ),
-            ]
-            .into_iter(),
-        )
+        Ok(SealedGenerationPackLayoutV1 {
+            content: generation.content_packs,
+            evidence: SealedGenerationSegmentIdentityV1 {
+                digest: generation.generation_evidence.segment_digest,
+                size_bytes: generation.generation_evidence.segment_size_bytes,
+            },
+        }
+        .pack_identities())
     }
 
     /// Stream only current-revision physical pack identities from a generation
@@ -4307,26 +4465,25 @@ impl CodeIndexPublishedGenerationV1 {
                 size_bytes: segment.segment_size_bytes,
             }
         }));
-        let content_pack = generation.content_pack.ok_or_else(|| {
+        let content_packs = generation.content_packs.ok_or_else(|| {
             CodeIndexProductionErrorV1::Contract("sealed generation has no content pack".to_owned())
         })?;
-        content_pack.validate(&canonicalize_segment_identities(identities)?)?;
+        content_packs.validate(&canonicalize_segment_identities(identities)?)?;
         validate_pack_roles(
-            &content_pack,
+            &content_packs,
             &generation.generation_evidence.segment_digest,
             generation.generation_evidence.segment_size_bytes,
         )?;
-        canonical_segment_identities(
-            [
-                (&content_pack.digest, content_pack.size_bytes),
-                (
-                    &generation.generation_evidence.segment_digest,
-                    generation.generation_evidence.segment_size_bytes,
-                ),
-            ]
-            .into_iter(),
-        )
-        .map(Some)
+        Ok(Some(
+            SealedGenerationPackLayoutV1 {
+                content: content_packs,
+                evidence: SealedGenerationSegmentIdentityV1 {
+                    digest: generation.generation_evidence.segment_digest,
+                    size_bytes: generation.generation_evidence.segment_size_bytes,
+                },
+            }
+            .pack_identities(),
+        ))
     }
 
     /// Authenticate both physical packs and every logical segment against
@@ -4356,13 +4513,25 @@ fn verify_partitioned_generation(
 ) -> Result<(), CodeIndexProductionErrorV1> {
     let mut segment = Vec::with_capacity(PAYLOAD_VERIFY_WINDOW_BYTES_V1 as usize);
     let layout = SealedGenerationPackLayoutRefV1 {
-        content: &generation.content_pack,
+        content: &generation.content_packs,
         evidence_digest: &generation.generation_evidence.segment_digest,
         evidence_size_bytes: generation.generation_evidence.segment_size_bytes,
     };
-    verify_content_pack(&layout, &mut already_verified, &mut segment, &mut read_pack)?;
+    for pack in &layout.content.packs {
+        verify_content_pack(
+            pack,
+            layout.evidence_digest,
+            &mut already_verified,
+            &mut segment,
+            &mut read_pack,
+        )?;
+    }
     let evidence_descriptor = &generation.generation_evidence;
-    let mut evidence_hasher = (layout.evidence_digest != &layout.content.digest
+    let mut evidence_hasher = (!layout
+        .content
+        .packs
+        .iter()
+        .any(|pack| pack.digest == *layout.evidence_digest)
         && !already_verified(layout.evidence_digest, layout.evidence_size_bytes))
     .then(Sha256::new);
     if evidence_descriptor.pages.is_empty() && evidence_hasher.take().is_some() {
@@ -4410,7 +4579,8 @@ fn verify_partitioned_generation(
 }
 
 fn verify_content_pack(
-    layout: &SealedGenerationPackLayoutRefV1<'_>,
+    pack: &SealedGenerationContentPackV1,
+    evidence_digest: &ManifestDigest,
     already_verified: &mut impl FnMut(&ManifestDigest, u64) -> bool,
     buffer: &mut Vec<u8>,
     read_pack: &mut impl FnMut(
@@ -4418,14 +4588,13 @@ fn verify_content_pack(
         &mut Vec<u8>,
     ) -> Result<(), CodeIndexProductionErrorV1>,
 ) -> Result<(), CodeIndexProductionErrorV1> {
-    let pack = layout.content;
     let mut pack_hasher = (!already_verified(&pack.digest, pack.size_bytes)).then(Sha256::new);
     if pack.extents.is_empty() && pack_hasher.is_some() {
         return verify_payload_digest(&pack.digest, pack.size_bytes, buffer, read_pack);
     }
 
     for extent in &pack.extents {
-        let extent_verified = extent.digest != *layout.evidence_digest
+        let extent_verified = extent.digest != *evidence_digest
             && already_verified(&extent.digest, extent.size_bytes);
         if extent_verified && pack_hasher.is_none() {
             continue;
@@ -4492,10 +4661,12 @@ mod tests {
             .collect();
         (
             SealedGenerationPackLayoutV1 {
-                content: SealedGenerationContentPackV1 {
-                    digest: ManifestDigest::from_sha256_bytes(&Sha256::digest(&bytes)).unwrap(),
-                    size_bytes: u64::try_from(bytes.len()).unwrap(),
-                    extents,
+                content: SealedGenerationContentRosterV1 {
+                    packs: vec![SealedGenerationContentPackV1 {
+                        digest: ManifestDigest::from_sha256_bytes(&Sha256::digest(&bytes)).unwrap(),
+                        size_bytes: u64::try_from(bytes.len()).unwrap(),
+                        extents,
+                    }],
                 },
                 evidence: SealedGenerationSegmentIdentityV1 {
                     digest: ManifestDigest::from_sha256_bytes(&Sha256::digest(b"evidence"))
@@ -4511,32 +4682,35 @@ mod tests {
     fn a_content_pack_proves_both_physical_and_logical_digests() {
         let (layout, bytes) = content_pack_fixture();
         let verify = |layout: &SealedGenerationPackLayoutV1, bytes: &[u8]| {
-            verify_content_pack(
-                &layout.view(),
-                &mut |_, _| false,
-                &mut Vec::new(),
-                &mut |request, into| {
-                    let SealedGenerationSegmentReadV1::Range { offset, length, .. } = request
-                    else {
-                        panic!("proof must request bounded ranges");
-                    };
-                    let start = usize::try_from(offset).unwrap();
-                    let end = start + usize::try_from(length).unwrap();
-                    into.extend_from_slice(&bytes[start..end]);
-                    Ok(())
-                },
-            )
+            layout.content.packs.iter().try_for_each(|pack| {
+                verify_content_pack(
+                    pack,
+                    &layout.evidence.digest,
+                    &mut |_, _| false,
+                    &mut Vec::new(),
+                    &mut |request, into| {
+                        let SealedGenerationSegmentReadV1::Range { offset, length, .. } = request
+                        else {
+                            panic!("proof must request bounded ranges");
+                        };
+                        let start = usize::try_from(offset).unwrap();
+                        let end = start + usize::try_from(length).unwrap();
+                        into.extend_from_slice(&bytes[start..end]);
+                        Ok(())
+                    },
+                )
+            })
         };
         verify(&layout, &bytes).unwrap();
 
         let mut wrong_address = layout.clone();
-        wrong_address.content.digest =
+        wrong_address.content.packs[0].digest =
             ManifestDigest::from_sha256_bytes(&Sha256::digest(b"a different pack")).unwrap();
         assert!(verify(&wrong_address, &bytes).is_err());
 
         let mut wrong_content = bytes;
         wrong_content[0] ^= 1;
-        wrong_address.content.digest =
+        wrong_address.content.packs[0].digest =
             ManifestDigest::from_sha256_bytes(&Sha256::digest(&wrong_content)).unwrap();
         assert!(verify(&wrong_address, &wrong_content).is_err());
     }
@@ -4544,7 +4718,7 @@ mod tests {
     #[test]
     fn content_pack_requires_the_exact_contiguous_canonical_roster() {
         let (layout, _) = content_pack_fixture();
-        let pack = layout.content;
+        let pack = &layout.content.packs[0];
         let roster = canonical_segment_identities(
             pack.extents
                 .iter()
@@ -4552,6 +4726,8 @@ mod tests {
         )
         .unwrap();
         pack.validate(&roster).unwrap();
+        layout.content.validate(&roster).unwrap();
+        layout.content.validate(&roster[..1]).unwrap();
 
         let mut malformed = Vec::new();
         let mut missing = pack.clone();
@@ -4580,9 +4756,17 @@ mod tests {
         malformed.push(("trailing bytes", trailing));
         for (reason, candidate) in malformed {
             assert!(candidate.validate(&roster).is_err(), "accepted {reason}");
+            assert!(
+                SealedGenerationContentRosterV1 {
+                    packs: vec![candidate]
+                }
+                .validate(&roster)
+                .is_err(),
+                "roster accepted {reason}"
+            );
         }
 
-        let mut overflowing = pack;
+        let mut overflowing = pack.clone();
         let mut large_roster = roster;
         overflowing.extents[0].size_bytes = u64::MAX;
         overflowing.extents[1].offset = u64::MAX;
@@ -4592,11 +4776,93 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_pack_extents_cannot_substitute_the_physical_digest() {
+        let physical = b"abc";
+        let mut extents = [(0_u64, b"ab".as_slice()), (1_u64, b"bc".as_slice())]
+            .into_iter()
+            .map(|(offset, bytes)| {
+                (
+                    SealedGenerationContentExtentV1 {
+                        digest: ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap(),
+                        offset,
+                        size_bytes: bytes.len() as u64,
+                    },
+                    bytes,
+                )
+            })
+            .collect::<Vec<_>>();
+        extents.sort_unstable_by(|(left, _), (right, _)| left.digest.cmp(&right.digest));
+        // The old roster gate admitted overlapping ranges, allowing the
+        // physical hasher to authenticate their concatenation instead of the
+        // actual file. No SHA-256 collision is needed for that substitution.
+        let claimed_bytes = extents
+            .iter()
+            .flat_map(|(_, bytes)| bytes.iter().copied())
+            .collect::<Vec<_>>();
+        let pack = SealedGenerationContentPackV1 {
+            digest: ManifestDigest::from_sha256_bytes(&Sha256::digest(&claimed_bytes)).unwrap(),
+            size_bytes: physical.len() as u64,
+            extents: extents.into_iter().map(|(extent, _)| extent).collect(),
+        };
+        assert_ne!(
+            pack.digest,
+            ManifestDigest::from_sha256_bytes(&Sha256::digest(physical)).unwrap()
+        );
+        let required = pack
+            .extents
+            .iter()
+            .map(|extent| SealedGenerationSegmentIdentityV1 {
+                digest: extent.digest.clone(),
+                size_bytes: extent.size_bytes,
+            })
+            .collect::<Vec<_>>();
+        let roster = SealedGenerationContentRosterV1 { packs: vec![pack] };
+        let evidence = ManifestDigest::from_sha256_bytes(&Sha256::digest(b"evidence")).unwrap();
+        let mut reads = 0;
+        let result = roster.validate(&required).and_then(|()| {
+            verify_content_pack(
+                &roster.packs[0],
+                &evidence,
+                &mut |_, _| false,
+                &mut Vec::new(),
+                &mut |request, into| {
+                    let SealedGenerationSegmentReadV1::Range { offset, length, .. } = request
+                    else {
+                        panic!("nonempty pack proof must read ranges");
+                    };
+                    reads += 1;
+                    into.clear();
+                    into.extend_from_slice(&physical[offset as usize..(offset + length) as usize]);
+                    Ok(())
+                },
+            )
+        });
+        assert!(
+            result.is_err(),
+            "overlap must not prove a different physical digest"
+        );
+        assert_eq!(reads, 0, "reject the malformed physical layout before I/O");
+    }
+
+    #[test]
+    fn inherited_rosters_refuse_ambiguous_logical_addresses() {
+        let (layout, _) = content_pack_fixture();
+        let mut second = layout.content.packs[0].clone();
+        second.digest =
+            ManifestDigest::from_sha256_bytes(&Sha256::digest(b"another pack")).unwrap();
+        let mut packs = vec![layout.content.packs[0].clone(), second];
+        packs.sort_unstable_by(|left, right| left.digest.cmp(&right.digest));
+        let error = SealedGenerationContentRosterV1 { packs }
+            .validate(&[])
+            .unwrap_err();
+        assert!(error.to_string().contains("two packs"), "{error}");
+    }
+
+    #[test]
     fn logical_roster_deduplicates_identical_bytes_but_refuses_conflicting_lengths() {
         let (layout, _) = content_pack_fixture();
         let roster = canonical_segment_identities(
-            layout
-                .content
+            layout.content_packs().packs[0]
                 .extents
                 .iter()
                 .map(|extent| (&extent.digest, extent.size_bytes)),
@@ -4617,7 +4883,8 @@ mod tests {
     #[test]
     fn logical_reads_address_only_their_extent_in_the_generation_pack() {
         let (layout, bytes) = content_pack_fixture();
-        for extent in &layout.content.extents {
+        let pack = &layout.content.packs[0];
+        for extent in &pack.extents {
             for (offset, length) in [
                 (0, extent.size_bytes),
                 (1, extent.size_bytes - 2),
@@ -4644,8 +4911,8 @@ mod tests {
                         assert_eq!(
                             physical,
                             SealedGenerationSegmentReadV1::Range {
-                                digest: &layout.content.digest,
-                                size_bytes: layout.content.size_bytes,
+                                digest: &pack.digest,
+                                size_bytes: pack.size_bytes,
                                 offset: extent.offset + offset,
                                 length,
                             }
@@ -4692,7 +4959,7 @@ mod tests {
     #[test]
     fn invalid_logical_requests_clear_output_before_any_physical_read() {
         let (layout, _) = content_pack_fixture();
-        let segment = &layout.content.extents[0];
+        let segment = &layout.content.packs[0].extents[0];
         let unknown = ManifestDigest::from_sha256_bytes(&Sha256::digest(b"unknown")).unwrap();
         for request in [
             SealedGenerationSegmentReadV1::Whole {
@@ -4744,7 +5011,7 @@ mod tests {
     #[test]
     fn failed_or_short_pack_reads_do_not_expose_partial_logical_bytes() {
         let (layout, _) = content_pack_fixture();
-        let segment = &layout.content.extents[0];
+        let segment = &layout.content.packs[0].extents[0];
         let request = SealedGenerationSegmentReadV1::Whole {
             digest: &segment.digest,
             size_bytes: segment.size_bytes,

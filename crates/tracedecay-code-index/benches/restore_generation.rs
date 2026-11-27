@@ -246,12 +246,22 @@ fn contract(message: &str) -> CodeIndexProductionErrorV1 {
 /// cannot identify the evidence pack and may include unrelated generations.
 fn payload_bytes(manifest: &[u8], segments: &Path) -> Result<(u64, u64), Box<dyn Error>> {
     let layout = SealedGenerationPackLayoutV1::open(manifest)?;
-    let content = layout.content_pack();
     let evidence = layout.evidence_pack();
-    for (digest, size_bytes) in [
-        (&content.digest, content.size_bytes),
-        (&evidence.digest, evidence.size_bytes),
-    ] {
+    let mut content_bytes = 0_u64;
+    for (digest, size_bytes, is_content) in layout
+        .content_packs()
+        .packs
+        .iter()
+        .map(|pack| (&pack.digest, pack.size_bytes, true))
+        .chain(std::iter::once((
+            &evidence.digest,
+            evidence.size_bytes,
+            false,
+        )))
+    {
+        if is_content {
+            content_bytes = content_bytes.saturating_add(size_bytes);
+        }
         let name = digest
             .as_str()
             .strip_prefix("sha256:")
@@ -261,7 +271,7 @@ fn payload_bytes(manifest: &[u8], segments: &Path) -> Result<(u64, u64), Box<dyn
             return Err("pack size does not match its manifest".into());
         }
     }
-    Ok((content.size_bytes, evidence.size_bytes))
+    Ok((content_bytes, evidence.size_bytes))
 }
 
 /// Process CPU nanoseconds across every thread, from the scheduler's own

@@ -801,9 +801,9 @@ pub(super) fn partitioned_manifest_retained_bytes(
         ))
         .saturating_add(
             generation
-                .content_pack
+                .content_packs
                 .retained_bytes()
-                .saturating_sub(size_of::<super::SealedGenerationContentPackV1>()),
+                .saturating_sub(size_of::<super::SealedGenerationContentRosterV1>()),
         )
 }
 

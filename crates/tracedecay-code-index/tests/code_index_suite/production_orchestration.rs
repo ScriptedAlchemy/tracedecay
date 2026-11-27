@@ -28,13 +28,14 @@ use tracedecay_code_index::{
         CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
         CodeIndexSealedGenerationV1, CodeIndexSealedPublicationV1, MemoryCodeIndexPreparationV1,
         MemorySealedPublicationStoreV1, SEALED_GENERATION_FORMAT_REVISION_V1,
-        SealedGenerationContentPackV1, SealedGenerationFileWindowsV1, SealedGenerationPackLayoutV1,
-        SealedGenerationPackReadFactoryV1, SealedGenerationPackReadPassV1,
-        SealedGenerationSegmentIdentityV1, SealedGenerationSegmentPublicationV1,
-        SealedGenerationSegmentReadV1, SealedSegmentReaderV1, SharedDecodedContentPoolV1,
-        SharedPhysicalCodeArtifactPoolV1, VerifiedSealedLexicalPageReadV1,
-        VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
-        advance_import_dictionary_digest, initial_import_dictionary_digest,
+        SealedGenerationContentRosterV1, SealedGenerationFileWindowsV1,
+        SealedGenerationPackLayoutV1, SealedGenerationPackReadFactoryV1,
+        SealedGenerationPackReadPassV1, SealedGenerationSegmentIdentityV1,
+        SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1, SealedSegmentReaderV1,
+        SharedDecodedContentPoolV1, SharedPhysicalCodeArtifactPoolV1,
+        VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
+        VerifiedSealedLexicalPageV1, advance_import_dictionary_digest,
+        initial_import_dictionary_digest,
     },
     provider::GenerationTestAttributionJoinReadPort,
     retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool},
@@ -167,7 +168,7 @@ impl CodeIndexPreparationPort for PartialKeyPreparation {
     fn finalize_content_pack(
         &mut self,
         segments: &[SealedGenerationSegmentIdentityV1],
-    ) -> Result<SealedGenerationContentPackV1, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<SealedGenerationContentRosterV1, CodeIndexPublicationStoreErrorV1> {
         self.inner.finalize_content_pack(segments)
     }
 
@@ -1843,7 +1844,7 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
     let retained_layout_bytes = initial.retained_layout_bytes();
     assert!(
         retained_layout_bytes > std::mem::size_of::<u64>() * 4
-            && retained_layout_bytes < sealed.byte_len() / 8,
+            && retained_layout_bytes < sealed.byte_len() / 7,
         "source layout must count retained file positions while staying compact"
     );
     let first = match initial
@@ -3225,7 +3226,7 @@ impl<F: FnMut(SealedGenerationSegmentPublicationV1<'_>)> CodeIndexPreparationPor
     fn finalize_content_pack(
         &mut self,
         segments: &[SealedGenerationSegmentIdentityV1],
-    ) -> Result<SealedGenerationContentPackV1, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<SealedGenerationContentRosterV1, CodeIndexPublicationStoreErrorV1> {
         self.inner.finalize_content_pack(segments)
     }
 
@@ -3311,6 +3312,19 @@ fn partitioned_codec_fixture() -> (
     Vec<u8>,
     BTreeMap<String, Vec<u8>>,
 ) {
+    let (child, _, manifest, segments) = partitioned_codec_fixture_with_parent();
+    (child, manifest, segments)
+}
+
+/// The child fixture together with the parent generation its seal inherits
+/// unchanged extents from. Re-encoding the child byte-exactly requires the
+/// same parent, because pack inheritance is part of the sealed layout.
+fn partitioned_codec_fixture_with_parent() -> (
+    CodeIndexPublishedGenerationV1,
+    CodeIndexPublishedGenerationV1,
+    Vec<u8>,
+    BTreeMap<String, Vec<u8>>,
+) {
     let store = SharedPublicationStore::default();
     let mut owner = CodeIndexProductionOwnerV1::new(config(), store.clone())
         .expect("partitioned fixture owner");
@@ -3345,12 +3359,17 @@ fn partitioned_codec_fixture() -> (
         !second.edges().is_empty(),
         "the child fixture needs edge evidence"
     );
-    (second.as_ref().clone(), sealed.manifest, sealed.segments)
+    (
+        second.as_ref().clone(),
+        first.as_ref().clone(),
+        sealed.manifest,
+        sealed.segments,
+    )
 }
 
 // The sealed generation revision is part of the authenticated manifest payload.
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:02bcc04df11d5962c0a6f72e6789b521c83de5ca0878cf39f01fd89de8b361bb";
+    "sha256:8630148b857baea8d3c5fd4bc12b49be2a58547c7d51597c5f96c3a5d54f8aac";
 
 #[test]
 fn admitted_partitioned_source_refuses_before_decode_and_releases_parse_workspace() {
@@ -3641,12 +3660,12 @@ fn partitioned_file_segments_omit_the_identities_they_determine() {
 #[test]
 fn partitioned_codec_has_stable_bytes_and_round_trips() {
     let operation = memory_operation();
-    let (expected, manifest, segments) = partitioned_codec_fixture();
+    let (expected, parent, manifest, segments) = partitioned_codec_fixture_with_parent();
     let layout = SealedGenerationPackLayoutV1::open(&manifest).expect("canonical pack layout");
     let envelope: serde_json::Value =
         serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
     assert_eq!(
-        envelope["generation"]["format_revision"], 24,
+        envelope["generation"]["format_revision"], SEALED_GENERATION_FORMAT_REVISION_V1,
         "the canonical fixture pins the sealed generation revision"
     );
     assert_eq!(
@@ -3815,11 +3834,15 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
                     length,
                 } => (digest, size_bytes, offset, length),
             };
-            let reading_content = pack_digest == &layout.content_pack().digest;
-            let digest = if reading_content {
-                assert_eq!(pack_size, layout.content_pack().size_bytes);
-                &layout
-                    .content_pack()
+            let content_pack = layout
+                .content_packs()
+                .packs
+                .iter()
+                .find(|pack| pack.digest == *pack_digest);
+            let reading_content = content_pack.is_some();
+            let digest = if let Some(pack) = content_pack {
+                assert_eq!(pack_size, pack.size_bytes);
+                &pack
                     .extents
                     .iter()
                     .find(|extent| extent.offset == offset && extent.size_bytes == length)
@@ -3995,7 +4018,11 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         }
     }
 
-    let reencoded = PartitionedSealV1::of(&restored);
+    // Pack inheritance is part of the sealed layout, so a byte-exact re-seal
+    // must bind the same parent the fixture bound rather than seal cold.
+    let mut encoding_store = MemorySealedPublicationStoreV1::default();
+    let (_, parent) = publish_fixture_parent(&mut encoding_store, &parent, |_| {});
+    let reencoded = encode_fixture_child(&mut encoding_store, &restored, Some(&parent), |_| {});
     assert_eq!(reencoded.manifest, manifest);
     assert_eq!(
         reencoded.segments, segments,
@@ -4185,9 +4212,29 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
         child.snapshot().files.len(),
         "a retired parent offers no reuse, so every file segment is re-encoded"
     );
-    assert_eq!(
+    // Pack inheritance is part of the sealed layout, so a child that reuses
+    // its parent's packs addresses a different roster than one that encodes
+    // cold. Both must still verify and decode to the same typed generation.
+    assert_ne!(
         sealed.manifest, reusing.manifest,
-        "reuse decides which segment bytes are published, never the manifest"
+        "a child that inherits its parent's packs addresses a different roster"
+    );
+    let cold_roster = SealedGenerationPackLayoutV1::open(&sealed.manifest)
+        .expect("cold child layout")
+        .content_packs()
+        .clone();
+    let reusing_roster = SealedGenerationPackLayoutV1::open(&reusing.manifest)
+        .expect("reusing child layout")
+        .content_packs()
+        .clone();
+    assert_eq!(
+        cold_roster.packs.len(),
+        1,
+        "a child with no parent to inherit from writes one pack"
+    );
+    assert!(
+        reusing_roster.packs.len() > 1,
+        "a child that inherits from its parent addresses more than one pack"
     );
 
     CodeIndexPublishedGenerationV1::verify_partitioned_sealed(

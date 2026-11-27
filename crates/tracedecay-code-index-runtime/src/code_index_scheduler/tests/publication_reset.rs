@@ -114,7 +114,7 @@ fn failed_reset_releases_publication_handles_across_store_clones() {
         "positive live-pointer-handle control"
     );
 
-    let segment_identity = publication.pack_layout().content_pack();
+    let segment_identity = &publication.pack_layout().content_packs().packs[0];
     assert!(
         segment_identity.size_bytes > 0,
         "real nonempty content pack"
