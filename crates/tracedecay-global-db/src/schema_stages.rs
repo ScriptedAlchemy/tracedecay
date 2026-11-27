@@ -1166,6 +1166,7 @@ async fn install_registered_schema_stage_sequence(
         .map_err(|error| {
             global_db_operation_error("initialize Work product graph journal", error)
         })?;
+    refuse_work_product_journal_predating_selection_lines(transaction).await?;
     transaction
         .execute_batch(AUTHORIZED_SCOPE_SET_SCHEMA_V1)
         .await
@@ -1790,6 +1791,49 @@ async fn inspect_workflow_schema_for_admission(
     Ok(Ok(WorkflowSchemaAdmission::Complete))
 }
 
+/// The Work product journal keys every version line by the scope set an event
+/// was admitted under. A store written before that column exists opens, because
+/// `CREATE TABLE IF NOT EXISTS` leaves it untouched, and would then fail its
+/// first append on a missing column. The shape is refused here instead, as the
+/// typed reset the store's reset path already answers, so no old row is ever
+/// read under a key it never had and no shim converts it.
+async fn refuse_work_product_journal_predating_selection_lines(
+    conn: &impl QueryExecutor,
+) -> tracedecay_domain::errors::Result<()> {
+    const AUTHORITY: &str = "work_product_graph_journal";
+    let mut columns = conn
+        .query(
+            "SELECT name FROM pragma_table_info('work_product_events_v1')",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error("inspect Work product journal shape", error))?;
+    let mut has_selection_key = false;
+    let mut column_count = 0_usize;
+    while let Some(row) = columns
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error("read Work product journal shape", error))?
+    {
+        column_count += 1;
+        let column = row.get::<String>(0).map_err(|error| {
+            global_db_operation_error("decode Work product journal column", error)
+        })?;
+        has_selection_key |= column == "selection_key";
+    }
+    // A fresh store has the table with the column; a store that predates the
+    // column has the table without it. No table at all is not a state this
+    // install can produce, so it is left to the schema contract to refuse.
+    if column_count > 0 && !has_selection_key {
+        return Err(tracedecay_domain::errors::TraceDecayError::reset_required(
+            AUTHORITY,
+            "the Work product journal predates per-selection version lines and cannot be read; \
+             reset the profile so Work events are journaled under their authorized scope sets",
+        ));
+    }
+    Ok(())
+}
+
 fn workflow_schema_refusal(reason: impl Into<Cow<'static, str>>) -> RefusedAuthorityV1 {
     RefusedAuthorityV1::Shape {
         authority: "workflow",
@@ -2162,6 +2206,50 @@ mod tests {
             Ok(_) => panic!("incompatible registered schema must not be admitted"),
             Err(error) => error,
         }
+    }
+
+    /// A Work product journal written before version lines were keyed by
+    /// scope set has no `selection_key`. `CREATE TABLE IF NOT EXISTS` leaves
+    /// such a table untouched, so without this refusal the store would open and
+    /// fail its first append on a missing column. The old shape is refused as
+    /// the typed reset, never converted.
+    #[tokio::test]
+    async fn a_work_product_journal_predating_selection_lines_is_refused_as_a_reset() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("global.db");
+        install_registered_schema(&path).await;
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE work_product_events_v1_old AS
+                     SELECT * FROM work_product_events_v1;
+                 DROP TABLE work_product_events_v1;
+                 CREATE TABLE work_product_events_v1 (
+                     owner_brain_id TEXT NOT NULL,
+                     owner_profile_id TEXT NOT NULL,
+                     sequence INTEGER NOT NULL CHECK (sequence > 0),
+                     event_id TEXT NOT NULL,
+                     command_id TEXT NOT NULL,
+                     canonical_input_digest TEXT NOT NULL,
+                     expected_graph_version INTEGER,
+                     result_graph_version INTEGER NOT NULL CHECK (result_graph_version > 0),
+                     occurred_at INTEGER NOT NULL,
+                     event_payload TEXT NOT NULL,
+                     PRIMARY KEY (owner_brain_id, owner_profile_id, sequence)
+                 ) STRICT;
+                 DROP TABLE work_product_events_v1_old;",
+            )
+            .unwrap();
+
+        let error = registered_admission_error(&path).await;
+        let (authority, reason) = error
+            .reset_required_context()
+            .unwrap_or_else(|| panic!("the old journal shape must be a typed reset: {error}"));
+        assert_eq!(authority, "work_product_graph_journal");
+        assert!(
+            reason.contains("predates per-selection version lines"),
+            "{reason}"
+        );
     }
 
     /// Every registered store a released binary wrote carries the same

@@ -3,7 +3,7 @@
 use tracedecay_contracts::AuthorizedWorkProductScopeV1;
 use tracedecay_domain::{ManifestDigest, WorkProductEventSequenceV1, WorkProductGraphV1};
 
-use super::{StoreFault, cursor_value, owner_params, recovered_graph_digest};
+use super::{StoreFault, cursor_value, owner_params, recovered_graph_digest, selection_params};
 use crate::exact_sql::ExactSqlValue;
 use crate::work::{
     RegisteredWorkQuery, RegisteredWorkWrite, exact_sql_integer, exact_sql_statement,
@@ -74,6 +74,11 @@ pub(super) fn load(
     scope: &AuthorizedWorkProductScopeV1,
     through: u64,
 ) -> Result<Option<GraphCheckpoint>, StoreFault> {
+    // The checkpoint caches a fold under the READER's selection, so its
+    // selection_key is the selection digest, while the published row carries the
+    // EVENT's scope-set digest. The two differ whenever the selection names more
+    // than one scope set, so the publication is joined on the event sequence
+    // alone: one physical journal means one published row per sequence.
     let rows = registered_work_query(
         source,
         "SELECT checkpoint.event_sequence, checkpoint.graph_version,
@@ -85,9 +90,9 @@ pub(super) fn load(
           AND published.owner_profile_id = checkpoint.owner_profile_id
           AND published.event_sequence = checkpoint.event_sequence
          WHERE checkpoint.owner_brain_id = ?1 AND checkpoint.owner_profile_id = ?2
-           AND checkpoint.event_sequence <= ?3
+           AND checkpoint.selection_key = ?3 AND checkpoint.event_sequence <= ?4
          ORDER BY checkpoint.event_sequence DESC LIMIT 1",
-        owner_params(scope)
+        selection_params(scope)?
             .into_iter()
             .chain([cursor_value(through, "checkpoint bound")?])
             .collect(),
@@ -120,10 +125,10 @@ pub(super) fn load(
         let rows = registered_work_query(
             source,
             "SELECT chunk_index, chunk_payload FROM work_product_graph_checkpoint_chunks_v1
-             WHERE owner_brain_id = ?1 AND owner_profile_id = ?2
-               AND event_sequence = ?3 AND chunk_index >= ?4
-             ORDER BY chunk_index LIMIT ?5",
-            owner_params(scope)
+             WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND selection_key = ?3
+               AND event_sequence = ?4 AND chunk_index >= ?5
+             ORDER BY chunk_index LIMIT ?6",
+            selection_params(scope)?
                 .into_iter()
                 .chain([
                     cursor_value(sequence, "checkpoint sequence")?,
@@ -180,9 +185,10 @@ pub(super) fn write(
     for (index, chunk) in payload.chunks(CHUNK_BYTES).enumerate() {
         transaction.work_execute(exact_sql_statement(
             "INSERT INTO work_product_graph_checkpoint_chunks_v1 (
-                owner_brain_id, owner_profile_id, event_sequence, chunk_index, chunk_payload
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            owner_params(scope)
+                owner_brain_id, owner_profile_id, selection_key, event_sequence, chunk_index,
+                chunk_payload
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            selection_params(scope)?
                 .into_iter()
                 .chain([
                     cursor_value(sequence.get(), "checkpoint sequence")?,
@@ -196,10 +202,10 @@ pub(super) fn write(
     // commit. Any refusal rolls all of them back together.
     transaction.work_execute(exact_sql_statement(
         "INSERT INTO work_product_graph_checkpoints_v1 (
-            owner_brain_id, owner_profile_id, event_sequence, graph_version,
+            owner_brain_id, owner_profile_id, selection_key, event_sequence, graph_version,
             recovered_graph_digest, payload_bytes, chunk_count
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        owner_params(scope)
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        selection_params(scope)?
             .into_iter()
             .chain([
                 cursor_value(sequence.get(), "checkpoint sequence")?,

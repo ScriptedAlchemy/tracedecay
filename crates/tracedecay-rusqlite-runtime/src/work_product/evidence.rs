@@ -50,7 +50,7 @@ use tracedecay_domain::{
     TaskEvidenceLinkV1, TaskId, WorkProductGraphV1, WorkTaskEvidenceCoverageV1, WorkTaskEvidenceV1,
 };
 
-use super::{FromStoreFault, fold_graph, load_covered_journal, verified_version};
+use super::{FromStoreFault, fold_graph, folded_publications, load_journal, verified_version};
 use crate::work::WorkSqliteStorage;
 
 type PortError = WorkEvidenceReadPortErrorV1;
@@ -144,26 +144,31 @@ fn task_links(graph: &WorkProductGraphV1, task_id: &TaskId) -> Vec<TaskEvidenceL
 /// Resolve the exact verified version the caller named, and the graph folded to
 /// it.
 ///
-/// The selection bounds which versions are readable, exactly as it does for a
-/// graph read: the journal's covered prefix is answered, and a version folded
-/// across an event outside the selection is not readable under it, because that
-/// graph never existed under this selection. A version *inside* the covered
-/// prefix is served normally, an event admitted under some other scope later
-/// in the journal does not retract evidence the caller is plainly authorized
-/// for.
+/// A version is readable exactly as it is for a graph read: it belongs to the
+/// scope-set line that published it, and the caller must be under a selection
+/// that covers that event. A version published on a line this selection does
+/// not cover is not readable under it at all.
 fn verified_graph(
     storage: &WorkSqliteStorage,
     context: &WorkProductPortContextV1,
     requested: &VerifiedWorkGraphVersionV1,
 ) -> Result<(VerifiedWorkGraphVersionV1, WorkProductGraphV1), PortError> {
     let scope = context.authorized_scope();
-    let covered = load_covered_journal(storage.handle(), scope).map_err(PortError::from_fault)?;
-    let (journal, published) = (covered.journal, covered.published);
+    let journal = load_journal(storage.handle(), scope).map_err(PortError::from_fault)?;
+    // The version is resolved over this selection's own aggregate: the events
+    // its chain folds, each published on the line its scope set names. A
+    // version on an event the chain skips is not this caller's to read.
+    let (folded, published) = folded_publications(storage.handle(), scope, &journal)
+        .map_err(PortError::from_fault)?
+        // A chain this authority cannot verify has no version to answer with,
+        // which for evidence is the same absence as a version it never
+        // published.
+        .ok_or(PortError::NotFoundOrNotAuthorized)?;
     let Some(version) = published
         .iter()
         .find(|version| version.graph_version == requested.graph_version())
     else {
-        // A version this authority never published is an absence. A version
+        // A version this aggregate never published is an absence. A version
         // the caller is behind is staleness. They are not the same answer.
         return Err(
             if published
@@ -176,11 +181,12 @@ fn verified_graph(
             },
         );
     };
-    let entry = journal
+    let entry = folded
         .iter()
         .find(|entry| entry.sequence == version.event_sequence)
         .ok_or(PortError::Unavailable)?;
-    let graph = fold_graph(&journal, version.event_sequence).ok_or(PortError::Unavailable)?;
+    let graph = fold_graph(scope.selection(), &folded, version.event_sequence)
+        .ok_or(PortError::Unavailable)?;
     if graph.version() != version.graph_version {
         return Err(PortError::Unavailable);
     }

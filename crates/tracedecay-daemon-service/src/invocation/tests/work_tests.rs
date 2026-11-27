@@ -854,7 +854,6 @@ async fn a_views_read_before_any_task_is_absent_and_a_foreign_selection_stays_de
         serde_json::json!({
             "mode": "absent",
             "authorized_scope": {"selection": {"selection": "profile_owned_no_git"}},
-            "selection_coverage": {"coverage": "complete", "covered_events": 0},
         })
     );
 

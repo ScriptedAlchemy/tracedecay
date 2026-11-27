@@ -865,7 +865,6 @@ import type {
   WorkGraphReadModeV1,
   WorkGraphReadRequestV1,
   WorkGraphReadV1,
-  WorkGraphSelectionCoverageV1,
   WorkGraphTimelineCoverageV1,
   WorkGraphTimelineV1,
   WorkGraphVersionEntryV1,
@@ -11314,57 +11313,22 @@ export const WorkGraphReadRequestV1Schema: z.ZodObject<{
 export const WorkGraphReadV1Schema: z.ZodType<WorkGraphReadV1, unknown> = z.discriminatedUnion("mode", [z.object({
   authorized_scope: z.lazy(() => AuthorizedWorkProductScopeV1Schema),
   mode: z.literal("absent"),
-  selection_coverage: z.lazy(() => WorkGraphSelectionCoverageV1Schema),
 }), z.object({
   authorized_scope: z.lazy(() => AuthorizedWorkProductScopeV1Schema),
   mode: z.literal("as_of"),
-  selection_coverage: z.lazy(() => WorkGraphSelectionCoverageV1Schema),
   snapshot: z.lazy(() => WorkGraphVersionEntryV1Schema),
 }), z.object({
   authorized_scope: z.lazy(() => AuthorizedWorkProductScopeV1Schema),
   mode: z.literal("current"),
-  selection_coverage: z.lazy(() => WorkGraphSelectionCoverageV1Schema),
   snapshot: z.lazy(() => WorkGraphVersionEntryV1Schema),
 }), z.object({
   authorized_scope: z.lazy(() => AuthorizedWorkProductScopeV1Schema),
   mode: z.literal("evolution"),
-  selection_coverage: z.lazy(() => WorkGraphSelectionCoverageV1Schema),
   timeline: z.lazy(() => WorkGraphTimelineV1Schema),
 }), z.object({
   authorized_scope: z.lazy(() => AuthorizedWorkProductScopeV1Schema),
   mode: z.literal("forensic"),
-  selection_coverage: z.lazy(() => WorkGraphSelectionCoverageV1Schema),
   timeline: z.lazy(() => WorkGraphTimelineV1Schema),
-})]);
-
-/** How much of the owner's journal the read's selection actually covers.
-
-A selection names a slice of the owner's work, not the whole journal: an
-event records the relation scopes it was admitted under, and a selection
-that does not name them puts that event *outside* the slice. The events
-outside a selection do not poison the ones inside it, but they must never be
-concealed either, a caller who is shown the covered slice with no way to
-learn that more exists is reading a silently incomplete graph.
-
-So the read answers over the covered slice and says so, in the same
-`Complete`/`Partial` vocabulary [`WorkGraphTimelineCoverageV1`] and
-[`WorkHistoryCoverageV1`](crate::WorkHistoryCoverageV1) already use.
-
-The covered slice is always a *prefix* of the journal, and that is a
-property of folding rather than a simplification. A graph version is folded
-from every event up to its own sequence, so the first event a selection does
-not cover ends the readable slice: every later version, whatever scopes its
-own event named, would have to be folded across that event to exist at all.
-`excluded_events` therefore counts every event from the first uncovered one
-onward. */
-export const WorkGraphSelectionCoverageV1Schema: z.ZodType<WorkGraphSelectionCoverageV1, unknown> = z.discriminatedUnion("coverage", [z.object({
-  coverage: z.literal("complete"),
-  covered_events: z.number().refine(Number.isInteger).min(0),
-}), z.object({
-  coverage: z.literal("partial"),
-  covered_events: z.number().refine(Number.isInteger).min(0),
-  excluded_events: z.number().refine(Number.isInteger).min(0),
-  first_excluded_sequence: z.number().int().min(0),
 })]);
 
 export const WorkGraphTimelineCoverageV1Schema: z.ZodType<WorkGraphTimelineCoverageV1, unknown> = z.discriminatedUnion("coverage", [z.object({

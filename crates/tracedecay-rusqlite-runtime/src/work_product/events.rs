@@ -10,8 +10,8 @@ use tracedecay_domain::{
 };
 
 use super::{
-    FromStoreFault, StoreFault, WORK_PRODUCT_EVENT_ID_DOMAIN, insert_fault, load_journal_tail,
-    owner_params, selection_covers,
+    FromStoreFault, StoreFault, WORK_PRODUCT_EVENT_ID_DOMAIN, insert_fault, line_params,
+    load_journal_tail, owner_params, selection_covers,
 };
 use crate::exact_sql::ExactSqlValue;
 use crate::work::{
@@ -110,6 +110,8 @@ fn replay_from(
     let event: WorkProductEventV1 =
         serde_json::from_str(exact_sql_text(&row.values, 1).ok_or_else(corrupt)?)
             .map_err(|_| corrupt())?;
+    // A command is unique per owner, so the same id may have been committed
+    // under another selection. That event is not this aggregate's to replay.
     if !selection_covers(scope.selection(), &event) {
         return Err(PortError::NotFoundOrNotAuthorized);
     }
@@ -121,10 +123,17 @@ fn replay_from(
         return Err(PortError::IdempotencyConflict);
     }
     let sequence = event.sequence().get();
-    let published = super::load_published_versions_between(source, scope, sequence - 1, sequence)
-        .map_err(PortError::from_fault)?
-        .pop()
-        .ok_or(PortError::Unavailable)?;
+    // The replayed event was published on its own scope-set line.
+    let published = super::load_line_versions_between(
+        source,
+        scope,
+        event.authorized_relation_scopes(),
+        sequence - 1,
+        sequence,
+    )
+    .map_err(PortError::from_fault)?
+    .pop()
+    .ok_or(PortError::Unavailable)?;
     let verified = super::verified_version(&published, &event).ok_or(PortError::Unavailable)?;
     WorkProductEventCommitV1::new(event, verified)
         .map(Some)
@@ -150,17 +159,24 @@ pub(super) fn append_in_transaction(
     )? {
         return Ok(WorkProductEventCommitOutcomeV1::Replayed(commit));
     }
-    let tail = load_journal_tail(transaction, scope).map_err(PortError::from_fault)?;
-    let expected_matches = match (&tail, draft.expected_graph_version) {
+    let tail = load_journal_tail(transaction, scope)
+        .map_err(PortError::from_fault)?
+        .ok_or(PortError::Unavailable)?;
+    // The compare-and-swap is against this selection's own line head, so an
+    // event another selection appended in between does not make this draft
+    // stale. The sequence is the owner's next, so it never collides with that
+    // other event.
+    let expected_matches = match (tail.line_head, draft.expected_graph_version) {
         (None, None) => true,
-        (Some((_, stored)), Some(expected)) => *stored == expected,
+        (Some(stored), Some(expected)) => stored == expected,
         _ => false,
     };
     if !expected_matches {
         return Err(PortError::VersionConflict);
     }
     let sequence = tail
-        .map_or(Some(1), |(sequence, _)| sequence.get().checked_add(1))
+        .last_sequence
+        .map_or(Some(1), |sequence| sequence.get().checked_add(1))
         .and_then(|next| WorkProductEventSequenceV1::new(next).ok())
         .ok_or(PortError::Unavailable)?;
     // A draft that cannot become an event is not a stale revision: the head
@@ -231,28 +247,32 @@ fn insert_event(
         .work_execute(
             exact_sql_statement(
                 "INSERT INTO work_product_events_v1 (
-                    owner_brain_id, owner_profile_id, sequence, event_id, command_id,
-                    canonical_input_digest, expected_graph_version, result_graph_version,
-                    occurred_at, event_payload
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                owner_params(context.authorized_scope())
-                    .into_iter()
-                    .chain([
-                        ExactSqlValue::Integer(
-                            i64::try_from(sequence.get()).map_err(|_| PortError::Unavailable)?,
-                        ),
-                        ExactSqlValue::Text(event.event_id().as_str().to_owned()),
-                        ExactSqlValue::Text(event.command_id().as_str().to_owned()),
-                        ExactSqlValue::Text(event.canonical_input_digest().as_str().to_owned()),
-                        expected,
-                        ExactSqlValue::Integer(
-                            i64::try_from(event.result_graph_version().get())
-                                .map_err(|_| PortError::Unavailable)?,
-                        ),
-                        ExactSqlValue::Integer(event.occurred_at().0),
-                        ExactSqlValue::Text(payload),
-                    ])
-                    .collect(),
+                    owner_brain_id, owner_profile_id, selection_key, sequence, event_id,
+                    command_id, canonical_input_digest, expected_graph_version,
+                    result_graph_version, occurred_at, event_payload
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                line_params(
+                    context.authorized_scope(),
+                    event.authorized_relation_scopes(),
+                )
+                .map_err(PortError::from_fault)?
+                .into_iter()
+                .chain([
+                    ExactSqlValue::Integer(
+                        i64::try_from(sequence.get()).map_err(|_| PortError::Unavailable)?,
+                    ),
+                    ExactSqlValue::Text(event.event_id().as_str().to_owned()),
+                    ExactSqlValue::Text(event.command_id().as_str().to_owned()),
+                    ExactSqlValue::Text(event.canonical_input_digest().as_str().to_owned()),
+                    expected,
+                    ExactSqlValue::Integer(
+                        i64::try_from(event.result_graph_version().get())
+                            .map_err(|_| PortError::Unavailable)?,
+                    ),
+                    ExactSqlValue::Integer(event.occurred_at().0),
+                    ExactSqlValue::Text(payload),
+                ])
+                .collect(),
             )
             .map_err(PortError::from_fault)?,
         )

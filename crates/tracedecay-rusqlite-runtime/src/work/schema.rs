@@ -286,11 +286,33 @@ ON work_duplicate_adjudications_v1 (
 /// and the verified graph versions committed atomically with it.
 ///
 /// The product journal is scoped by the registered profile OWNER (brain +
-/// profile), because that is the scope
-/// `WorkProductEventV1::owner_scope` declares and the only scope its
-/// authorization port resolves. The two are never joined: correlating a task
-/// row with a product item would invent a correspondence neither authority
-/// records.
+/// profile), because that is the scope `WorkProductEventV1::owner_scope`
+/// declares and the only scope its authorization port resolves. The two are
+/// never joined: correlating a task row with a product item would invent a
+/// correspondence neither authority records.
+///
+/// Each SCOPE SET is its own version line over that journal. An event carries
+/// the relation scopes it was admitted under, and `selection_key` is the
+/// canonical digest of that scope set. A graph version number is therefore
+/// always read together with the scope set it belongs to: a no-Git event and a
+/// repository-scoped event owned by the same profile never share a version,
+/// even when both are the second event their own line has folded.
+///
+/// A reader under a selection folds exactly the events whose scopes the
+/// selection names, and only those, so an event admitted under a scope the
+/// selection does not name is never folded into a graph it returns. A writer
+/// pins the head of its own line, folded only from events it is authorized to
+/// see. An unrelated scoped event cannot freeze work the caller is authorized
+/// for, and no hidden event is ever replayed into a visible response. A change
+/// that genuinely depends on an entity only another line holds fails the
+/// graph's own validation as an unknown task, which leaks nothing about it.
+///
+/// The event rows are one physical journal keyed by the owner-wide sequence.
+/// Published versions carry the same `selection_key` as their event. Checkpoints
+/// cache a fold, which is a function of the READER's selection, so they carry
+/// that selection's key instead. Invalidation markers are owner-wide: a journal
+/// mutation anywhere can affect any line that covers it, so one conservative
+/// marker is re-verified against every line rather than enumerated per line.
 ///
 /// Checkpoints are a derived cache of the journal fold, written in the same
 /// transaction as the event that reaches a checkpoint boundary. An append
@@ -311,6 +333,7 @@ pub const WORK_PRODUCT_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS work_product_events_v1 (
     owner_brain_id TEXT NOT NULL,
     owner_profile_id TEXT NOT NULL,
+    selection_key TEXT NOT NULL,
     sequence INTEGER NOT NULL CHECK (sequence > 0),
     event_id TEXT NOT NULL,
     command_id TEXT NOT NULL,
@@ -323,40 +346,45 @@ CREATE TABLE IF NOT EXISTS work_product_events_v1 (
     PRIMARY KEY (owner_brain_id, owner_profile_id, sequence),
     UNIQUE (owner_brain_id, owner_profile_id, event_id),
     UNIQUE (owner_brain_id, owner_profile_id, command_id),
-    UNIQUE (owner_brain_id, owner_profile_id, result_graph_version)
+    UNIQUE (owner_brain_id, owner_profile_id, selection_key, result_graph_version)
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS work_product_graph_versions_v1 (
     owner_brain_id TEXT NOT NULL,
     owner_profile_id TEXT NOT NULL,
+    selection_key TEXT NOT NULL,
     graph_version INTEGER NOT NULL CHECK (graph_version > 0),
     event_sequence INTEGER NOT NULL CHECK (event_sequence > 0),
     valid_at INTEGER NOT NULL,
     observed_at INTEGER NOT NULL CHECK (observed_at >= valid_at),
     source_watermark TEXT NOT NULL,
     recovered_graph_digest TEXT NOT NULL,
-    PRIMARY KEY (owner_brain_id, owner_profile_id, graph_version),
-    UNIQUE (owner_brain_id, owner_profile_id, event_sequence)
+    PRIMARY KEY (owner_brain_id, owner_profile_id, selection_key, graph_version),
+    UNIQUE (owner_brain_id, owner_profile_id, selection_key, event_sequence)
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS work_product_graph_checkpoints_v1 (
     owner_brain_id TEXT NOT NULL,
     owner_profile_id TEXT NOT NULL,
+    selection_key TEXT NOT NULL,
     event_sequence INTEGER NOT NULL CHECK (event_sequence > 0),
     graph_version INTEGER NOT NULL CHECK (graph_version > 0),
     recovered_graph_digest TEXT NOT NULL,
     payload_bytes INTEGER NOT NULL CHECK (payload_bytes > 0),
     chunk_count INTEGER NOT NULL CHECK (chunk_count > 0),
-    PRIMARY KEY (owner_brain_id, owner_profile_id, event_sequence)
+    PRIMARY KEY (owner_brain_id, owner_profile_id, selection_key, event_sequence)
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS work_product_graph_checkpoint_chunks_v1 (
     owner_brain_id TEXT NOT NULL,
     owner_profile_id TEXT NOT NULL,
+    selection_key TEXT NOT NULL,
     event_sequence INTEGER NOT NULL CHECK (event_sequence > 0),
     chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
     chunk_payload BLOB NOT NULL CHECK (length(chunk_payload) BETWEEN 1 AND 1048576),
-    PRIMARY KEY (owner_brain_id, owner_profile_id, event_sequence, chunk_index)
+    PRIMARY KEY (
+        owner_brain_id, owner_profile_id, selection_key, event_sequence, chunk_index
+    )
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS work_product_journal_invalidations_v1 (
@@ -370,7 +398,7 @@ CREATE TRIGGER IF NOT EXISTS work_product_checkpoint_chunks_delete_v1
 AFTER DELETE ON work_product_graph_checkpoints_v1 BEGIN
     DELETE FROM work_product_graph_checkpoint_chunks_v1
     WHERE owner_brain_id = OLD.owner_brain_id AND owner_profile_id = OLD.owner_profile_id
-      AND event_sequence = OLD.event_sequence;
+      AND selection_key = OLD.selection_key AND event_sequence = OLD.event_sequence;
 END;
 
 CREATE TRIGGER IF NOT EXISTS work_product_event_checkpoint_insert_v1

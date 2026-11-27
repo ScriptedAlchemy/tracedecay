@@ -125,7 +125,6 @@ describe('the Work page over mounted routes', () => {
         owner_profile_id: 'profile.work',
         selection: { selection: 'profile_owned_no_git' },
       },
-      selection_coverage: { coverage: 'complete', covered_events: 0 },
     };
     serve((url) =>
       url.includes('/work/views')

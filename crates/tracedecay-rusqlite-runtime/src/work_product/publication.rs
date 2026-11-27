@@ -11,7 +11,7 @@ use tracedecay_domain::WorkProductEventV1;
 
 use super::{
     CHECKPOINT_INTERVAL, FromStoreFault, StoreFault, checkpoint, fold_graph_checkpointed,
-    insert_fault, owner_params, recovered_graph_digest, selection_covers,
+    insert_fault, line_params, load_line_versions, recovered_graph_digest, selection_covers,
 };
 use crate::exact_sql::ExactSqlValue;
 use crate::work::{
@@ -58,8 +58,10 @@ pub(super) fn publish_in_transaction(
     let existing = registered_work_query(
         transaction,
         "SELECT recovered_graph_digest FROM work_product_graph_versions_v1
-         WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND graph_version = ?3",
-        owner_params(scope)
+         WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND selection_key = ?3
+           AND graph_version = ?4",
+        line_params(scope, event.authorized_relation_scopes())
+            .map_err(PortError::from_fault)?
             .into_iter()
             .chain([ExactSqlValue::Integer(
                 i64::try_from(event.result_graph_version().get())
@@ -77,7 +79,7 @@ pub(super) fn publish_in_transaction(
         if stored != digest.as_str() {
             return Err(PortError::VersionConflict);
         }
-        let published = super::load_published_versions(transaction, scope)
+        let published = load_line_versions(transaction, scope, event.authorized_relation_scopes())
             .map_err(PortError::from_fault)?
             .into_iter()
             .find(|published| published.graph_version == event.result_graph_version())
@@ -89,10 +91,12 @@ pub(super) fn publish_in_transaction(
         .work_execute(
             exact_sql_statement(
                 "INSERT INTO work_product_graph_versions_v1 (
-                    owner_brain_id, owner_profile_id, graph_version, event_sequence,
-                    valid_at, observed_at, source_watermark, recovered_graph_digest
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                owner_params(scope)
+                    owner_brain_id, owner_profile_id, selection_key, graph_version,
+                    event_sequence, valid_at, observed_at, source_watermark,
+                    recovered_graph_digest
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                line_params(scope, event.authorized_relation_scopes())
+                    .map_err(PortError::from_fault)?
                     .into_iter()
                     .chain([
                         ExactSqlValue::Integer(

@@ -154,11 +154,6 @@ pub(super) fn prepare_execution_snapshot(
             ),
         )
         .map_err(work_product_problem)?;
-    if read.selection_coverage().is_partial() {
-        return Err(work_product_problem(
-            tracedecay_contracts::WorkProductApplicationErrorV1::SelectionCoverageIncomplete,
-        ));
-    }
     let snapshot = read.into_current_snapshot().map_err(work_product_problem)?;
     let tracedecay_contracts::WorkProductExpectedAuthorityV1::Verified { verified_version } =
         &request.mutation.expected_authority

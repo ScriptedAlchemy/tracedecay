@@ -480,9 +480,6 @@ impl WorkGraphReadPortV1 for WorkProductAttemptStore {
         let Some(graph) = rows.graph.as_ref() else {
             return Ok(WorkGraphReadV1::Absent {
                 authorized_scope: context.authorized_scope().clone(),
-                selection_coverage: tracedecay_contracts::WorkGraphSelectionCoverageV1::Complete {
-                    covered_events: 0,
-                },
             });
         };
         let verified = rows
@@ -527,9 +524,6 @@ impl WorkGraphReadPortV1 for WorkProductAttemptStore {
         match request.mode {
             tracedecay_contracts::WorkGraphReadModeV1::Current => Ok(WorkGraphReadV1::Current {
                 authorized_scope: context.authorized_scope().clone(),
-                selection_coverage: tracedecay_contracts::WorkGraphSelectionCoverageV1::Complete {
-                    covered_events: 1,
-                },
                 snapshot: entry,
             }),
             _ => Err(WorkGraphReadPortErrorV1::Unavailable),

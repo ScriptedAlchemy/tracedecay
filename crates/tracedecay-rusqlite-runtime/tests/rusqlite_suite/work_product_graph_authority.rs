@@ -20,10 +20,9 @@ use std::collections::BTreeSet;
 use tracedecay_contracts::{
     AddWorkTaskRequestV1, CreateWorkProductRequestV1, DecideWorkProposalRequestV1, OpaqueCursor,
     PrefetchedWorkGraphReadV1, WorkGraphReadRequestV1, WorkGraphReadV1,
-    WorkGraphSelectionCoverageV1, WorkProductApplicationErrorV1,
-    WorkProductAuthorizedRelationScopeV1, WorkProductExpectedAuthorityV1,
-    WorkProductMutationIdentityV1, WorkProductMutationRequestV1, WorkProductMutationServiceV1,
-    WorkProductSelectionScopeV1, WorkStorageFailureV1,
+    WorkProductApplicationErrorV1, WorkProductAuthorizedRelationScopeV1,
+    WorkProductExpectedAuthorityV1, WorkProductMutationIdentityV1, WorkProductMutationRequestV1,
+    WorkProductMutationServiceV1, WorkProductSelectionScopeV1, WorkStorageFailureV1,
 };
 use tracedecay_domain::{
     AcceptanceCriterionId, CursorBindingMismatchV1, MAX_WORK_PRODUCT_TEXT_BYTES, ProjectId,
@@ -228,12 +227,13 @@ fn a_uniqueness_violation_on_the_journal_insert_is_a_version_conflict() {
                      BEFORE INSERT ON work_product_events_v1
                      BEGIN
                        INSERT INTO work_product_events_v1 (
-                         owner_brain_id, owner_profile_id, sequence, event_id, command_id,
-                         canonical_input_digest, expected_graph_version, result_graph_version,
-                         occurred_at, event_payload
+                         owner_brain_id, owner_profile_id, selection_key, sequence, event_id,
+                         command_id, canonical_input_digest, expected_graph_version,
+                         result_graph_version, occurred_at, event_payload
                        ) VALUES (
-                         NEW.owner_brain_id, NEW.owner_profile_id, NEW.sequence, 'event.rival',
-                         'command.rival', 'digest.rival', NULL, 9999, 0, '{}'
+                         NEW.owner_brain_id, NEW.owner_profile_id, NEW.selection_key,
+                         NEW.sequence, 'event.rival', 'command.rival', 'digest.rival', NULL,
+                         9999, 0, '{}'
                        );
                      END;",
                 )
@@ -716,7 +716,7 @@ fn appends_resume_from_a_checkpoint_and_survive_restart_across_checkpoint_bounda
         connection
             .execute(
                 "INSERT INTO work_product_graph_checkpoint_chunks_v1
-                 SELECT owner_brain_id, owner_profile_id, event_sequence, 0, ?1
+                 SELECT owner_brain_id, owner_profile_id, selection_key, event_sequence, 0, ?1
                  FROM work_product_graph_checkpoints_v1 WHERE event_sequence = 512",
                 [&payload],
             )
@@ -1086,18 +1086,12 @@ fn an_owner_with_no_journal_has_an_absent_current_graph_and_an_explicitly_empty_
     // zero: a verified version identity requires a real event sequence, so
     // there is no representable empty current graph. The caller is
     // authorized, so the absence is an answer under its scope, not a denial.
-    let WorkGraphReadV1::Absent {
-        authorized_scope,
-        selection_coverage,
-    } = read_current(&store).expect("an authorized read of no graph is answered")
+    let WorkGraphReadV1::Absent { authorized_scope } =
+        read_current(&store).expect("an authorized read of no graph is answered")
     else {
         panic!("an unpublished graph must read as absent");
     };
     assert_eq!(authorized_scope.selection(), &repository_selection());
-    assert_eq!(
-        selection_coverage,
-        WorkGraphSelectionCoverageV1::Complete { covered_events: 0 }
-    );
 
     // A range read's zero state IS representable, so it is answered as an
     // explicit complete-and-empty timeline rather than as a refusal.
@@ -1153,46 +1147,6 @@ fn a_selection_naming_another_project_is_refused_rather_than_narrowed() {
 /// A selection that covers no event at all has no version to point at, so a
 /// `Current` read is the same typed absence an owner with no journal gets.
 /// This is the empty-covered-slice case, not the poisoning one below.
-#[test]
-fn a_selection_that_covers_no_event_has_no_current_version() {
-    let store = RegisteredWorkStore::start("work-product-narrow");
-    create(
-        &store,
-        "command.work-product.narrow",
-        UtcMicros(100),
-        vec![item("task.only", &[], 2)],
-    )
-    .expect("create the work product");
-
-    // The journal was written under a repository relation scope from its very
-    // first event, so a no-Git selection covers none of it. `Current` is a
-    // point read of a version and there is no version inside this selection to
-    // read, which is the absence an empty journal reports, disclosing the
-    // excluded event so it cannot be mistaken for an empty journal.
-    let read = reads(&store)
-        .read_graph(
-            &context(),
-            WorkGraphReadRequestV1::current(
-                WorkProductSelectionScopeV1::ProfileOwnedNoGit,
-                PROJECTED_AT,
-            ),
-        )
-        .expect("a selection covering no event is answered");
-    let WorkGraphReadV1::Absent {
-        selection_coverage, ..
-    } = read
-    else {
-        panic!("a selection covering no event has no current version: {read:?}");
-    };
-    assert_eq!(
-        selection_coverage,
-        WorkGraphSelectionCoverageV1::Partial {
-            covered_events: 0,
-            excluded_events: 1,
-            first_excluded_sequence: WorkProductEventSequenceV1::new(1).unwrap(),
-        }
-    );
-}
 
 /// The no-Git poisoning defect, stated as the contract that replaced it.
 ///
@@ -1203,8 +1157,9 @@ fn a_selection_that_covers_no_event_has_no_current_version() {
 /// work the caller was plainly authorized for became unreadable because of an
 /// event admitted beside it.
 ///
-/// The ruled contract: the covered prefix is answered, and the answer says what
-/// it left out.
+/// The ruled contract: each selection is its own aggregate. The no-Git read is
+/// answered over no-Git events alone, and nothing from the repository event is
+/// ever folded into it.
 #[test]
 fn a_scoped_event_beside_no_git_work_does_not_poison_the_no_git_selection() {
     let store = RegisteredWorkStore::start("work-product-no-git-prefix");
@@ -1220,8 +1175,9 @@ fn a_scoped_event_beside_no_git_work_does_not_poison_the_no_git_selection() {
         )
         .expect("create profile-owned work with no Git relation");
 
-    // The event beside it: admitted under a repository relation scope, on the
-    // same owner journal. This is what a settled provider attempt publishes.
+    // The event beside it: admitted under a repository relation scope. This is
+    // what a settled provider attempt publishes. It pins the repository
+    // aggregate's head, which is empty, so it bootstraps its own graph there.
     mutations(&store)
         .add_task(
             &context(),
@@ -1247,27 +1203,14 @@ fn a_scoped_event_beside_no_git_work_does_not_poison_the_no_git_selection() {
                 PROJECTED_AT,
             ),
         )
-        .expect("the covered prefix is readable, not poisoned by the event beside it");
+        .expect("the no-Git aggregate is readable, not poisoned by the event beside it");
 
-    // The disclosure is the whole point: the caller is told, in the read model's
-    // own coverage vocabulary, that one event lies outside this selection and
-    // where the boundary is. Answering the prefix silently would be the real
-    // falsification.
-    assert_eq!(
-        read.selection_coverage(),
-        &WorkGraphSelectionCoverageV1::Partial {
-            covered_events: 1,
-            excluded_events: 1,
-            first_excluded_sequence: WorkProductEventSequenceV1::new(2).unwrap(),
-        },
-        "the read must disclose the scoped event outside this selection"
-    );
     let WorkGraphReadV1::Current { snapshot, .. } = read else {
         panic!("a current read must answer with a current snapshot");
     };
-    // The answer is the covered slice folded on its own: the no-Git task, at
-    // the version its own event published, and nothing from the event outside
-    // the selection.
+    // The answer is the no-Git aggregate folded on its own: the no-Git task,
+    // at the version its own event published, and nothing from the repository
+    // event.
     assert_eq!(snapshot.verified_version().graph_version().get(), 1);
     assert_eq!(
         snapshot
@@ -1277,32 +1220,51 @@ fn a_scoped_event_beside_no_git_work_does_not_poison_the_no_git_selection() {
             .map(|item| item.task_id().as_str().to_owned())
             .collect::<Vec<_>>(),
         vec!["task.no-git".to_owned()],
-        "the covered slice must not carry the scoped task folded beside it"
+        "the no-Git aggregate must not carry the scoped task written beside it"
     );
     assert_eq!(snapshot.projections().workload().total_effort(), 2);
 
-    // A repository selection covers the scope-free events too, so the same
-    // journal reads whole under it, with a `Complete` disclosure. That is the
-    // remedy the mutation refusal names, proven to actually work.
+    // The repository selection is its own aggregate too. It covers the
+    // scope-free events it was authorized over, so it reads the no-Git create
+    // and its own event, whole.
     let whole = reads(&store)
         .read_graph(
             &context(),
             WorkGraphReadRequestV1::current(repository_selection(), PROJECTED_AT),
         )
-        .expect("the widened selection covers the whole journal");
+        .expect("the repository selection reads its own aggregate");
+    let WorkGraphReadV1::Current { snapshot, .. } = whole else {
+        panic!("a current read must answer with a current snapshot");
+    };
+    assert_eq!(snapshot.verified_version().graph_version().get(), 2);
     assert_eq!(
-        whole.selection_coverage(),
-        &WorkGraphSelectionCoverageV1::Complete { covered_events: 2 }
+        snapshot
+            .graph()
+            .items()
+            .iter()
+            .map(|item| item.task_id().as_str().to_owned())
+            .collect::<Vec<_>>(),
+        vec![
+            "task.no-git".to_owned(),
+            "task.repository-scoped".to_owned()
+        ],
+        "the repository aggregate carries the no-Git create and its own event"
     );
 }
 
-/// Reads answer over a covered slice; mutations do not. A prepared change pins
-/// the head it read, and under partial coverage that head is the slice's head,
-/// not the journal's, so the refusal is kept, but typed by its actual cause
-/// with the selection remedy in it, instead of the concealed
-/// `not_found_or_not_authorized` the old rule produced.
+/// An unrelated scoped event does not freeze independently valid work.
+///
+/// A profile owner creates work with no Git relation, and later an authority
+/// that can only act under a repository scope, attempt admission is the real
+/// one, appends a repository-scoped event to the same owner. The old model
+/// shared one version line across both, so the no-Git writer's next change had
+/// to pin a version folded across the hidden repository event, and was refused
+/// with `SelectionCoverageIncomplete` forever after.
+///
+/// The ruled contract: each selection is its own aggregate. The no-Git
+/// mutation advances over no-Git events alone, and its version says so.
 #[test]
-fn a_mutation_over_a_partially_covered_selection_is_refused_by_name() {
+fn an_unrelated_scoped_event_does_not_freeze_a_no_git_mutation() {
     let store = RegisteredWorkStore::start("work-product-no-git-mutation");
     let created = mutations(&store)
         .create(
@@ -1332,7 +1294,9 @@ fn a_mutation_over_a_partially_covered_selection_is_refused_by_name() {
         )
         .expect("publish a repository-scoped event beside the no-Git work");
 
-    let refused = mutations(&store)
+    // The no-Git writer pins the head it is authorized to see: the create's
+    // own version, not anything folded across the repository event.
+    let second = mutations(&store)
         .add_task(
             &context(),
             &binding(),
@@ -1347,11 +1311,498 @@ fn a_mutation_over_a_partially_covered_selection_is_refused_by_name() {
                 },
             },
         )
-        .expect_err("a mutation cannot be submitted over a covered slice");
+        .expect("an unrelated scoped event must not freeze a valid no-Git mutation");
+
+    // The version reflects only no-Git events: the create was version 1, so
+    // the second no-Git event is version 2. Under the old shared line it would
+    // have been version 3, folded across the hidden repository event.
+    assert_eq!(second.verified_graph_version().graph_version().get(), 2);
+    // The sequence is the owner's next journal position, which the repository
+    // event already advanced. Sequence and version come from different events:
+    // the sequence is physical, the version is this line's own.
+    assert_eq!(second.event().sequence().get(), 3);
+    assert!(!second.replayed());
+
+    // The no-Git current view carries both no-Git tasks and nothing from the
+    // repository event, which was never replayed into this response.
+    let WorkGraphReadV1::Current { snapshot, .. } = reads(&store)
+        .read_graph(
+            &context(),
+            WorkGraphReadRequestV1::current(
+                WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                PROJECTED_AT,
+            ),
+        )
+        .expect("the no-Git selection reads its own current aggregate")
+    else {
+        panic!("a current read must answer with a current snapshot");
+    };
+    assert_eq!(snapshot.verified_version().graph_version().get(), 2);
     assert_eq!(
-        refused,
-        WorkProductApplicationErrorV1::SelectionCoverageIncomplete,
-        "the refusal must name the coverage cause, not conceal it as an absence"
+        snapshot
+            .graph()
+            .items()
+            .iter()
+            .map(|item| item.task_id().as_str().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["task.no-git".to_owned(), "task.third".to_owned()],
+        "the no-Git view must carry only no-Git tasks"
+    );
+    assert_eq!(snapshot.projections().workload().total_effort(), 3);
+}
+
+/// Optimistic concurrency is per line. Two no-Git writers both pin the
+/// no-Git head; the repository event between them is on another line and
+/// neither advances nor stale-ens this one. The second writer loses the
+/// compare-and-swap on its own line, exactly as it would with no scoped event
+/// beside it.
+#[test]
+fn two_writers_on_one_line_conflict_even_with_a_scoped_event_beside_them() {
+    let store = RegisteredWorkStore::start("work-product-line-conflict");
+    let created = mutations(&store)
+        .create(
+            &context(),
+            &binding(),
+            CreateWorkProductRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                initial_graph: graph(vec![item("task.no-git", &[], 2)]),
+                mutation: mutation("command.work-product.line-conflict.create", UtcMicros(100)),
+            },
+        )
+        .expect("create profile-owned work with no Git relation");
+    mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: repository_selection(),
+                item: item("task.repository-scoped", &[], 3),
+                mutation: WorkProductMutationIdentityV1 {
+                    expected_authority: WorkProductExpectedAuthorityV1::Verified {
+                        verified_version: created.verified_graph_version().clone(),
+                    },
+                    ..mutation("command.work-product.line-conflict.scoped", UtcMicros(150))
+                },
+            },
+        )
+        .expect("publish a repository-scoped event beside the no-Git work");
+    let pin_head = |command: &str| WorkProductMutationIdentityV1 {
+        expected_authority: WorkProductExpectedAuthorityV1::Verified {
+            verified_version: created.verified_graph_version().clone(),
+        },
+        ..mutation(command, UtcMicros(200))
+    };
+
+    let first = mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                item: item("task.first-writer", &[], 1),
+                mutation: pin_head("command.work-product.line-conflict.first"),
+            },
+        )
+        .expect("the first writer pins the no-Git head and wins");
+    assert_eq!(first.verified_graph_version().graph_version().get(), 2);
+
+    // The second writer prepared against the same head. The scoped event did
+    // not move it, the first writer did, so this is a genuine conflict on the
+    // line and not a coverage refusal.
+    let conflict = mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                item: item("task.second-writer", &[], 1),
+                mutation: pin_head("command.work-product.line-conflict.second"),
+            },
+        )
+        .expect_err("the second writer must lose the compare-and-swap on its own line");
+    assert_eq!(conflict, WorkProductApplicationErrorV1::VersionConflict);
+    // Three events: the create, the scoped event, and the first writer's.
+    assert_eq!(store.count("work_product_events_v1"), 3);
+}
+
+/// A change that genuinely depends on an entity only another line holds is
+/// refused by the graph's own validation, under the graph the caller can see.
+/// The no-Git aggregate has no `task.repository-scoped`, so a no-Git task
+/// depending on it is an unknown dependency. The refusal names no hidden task
+/// and no scope, and writes nothing.
+#[test]
+fn a_cross_scope_dependency_is_refused_without_disclosing_the_hidden_entity() {
+    let store = RegisteredWorkStore::start("work-product-cross-scope");
+    let created = mutations(&store)
+        .create(
+            &context(),
+            &binding(),
+            CreateWorkProductRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                initial_graph: graph(vec![item("task.no-git", &[], 2)]),
+                mutation: mutation("command.work-product.cross-scope.create", UtcMicros(100)),
+            },
+        )
+        .expect("create profile-owned work with no Git relation");
+    mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: repository_selection(),
+                item: item("task.repository-scoped", &[], 3),
+                mutation: WorkProductMutationIdentityV1 {
+                    expected_authority: WorkProductExpectedAuthorityV1::Verified {
+                        verified_version: created.verified_graph_version().clone(),
+                    },
+                    ..mutation("command.work-product.cross-scope.scoped", UtcMicros(150))
+                },
+            },
+        )
+        .expect("publish a repository-scoped event beside the no-Git work");
+
+    let refused = mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                item: item("task.depends-on-hidden", &["task.repository-scoped"], 1),
+                mutation: WorkProductMutationIdentityV1 {
+                    expected_authority: WorkProductExpectedAuthorityV1::Verified {
+                        verified_version: created.verified_graph_version().clone(),
+                    },
+                    ..mutation("command.work-product.cross-scope.dependent", UtcMicros(200))
+                },
+            },
+        )
+        .expect_err("a dependency on a task only the repository line holds must be refused");
+    // The graph's own illegal-transition answer, which is what an unknown
+    // dependency is under the graph the caller can see. It is not a version
+    // conflict, which would blame a stale head, and not a coverage refusal.
+    assert_eq!(refused, WorkProductApplicationErrorV1::InvalidRequest);
+    // Nothing was written: the no-Git line still has only its create.
+    assert_eq!(store.count("work_product_events_v1"), 2);
+    let WorkGraphReadV1::Current { snapshot, .. } = reads(&store)
+        .read_graph(
+            &context(),
+            WorkGraphReadRequestV1::current(
+                WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                PROJECTED_AT,
+            ),
+        )
+        .expect("the no-Git aggregate is still readable")
+    else {
+        panic!("a current read must answer with a current snapshot");
+    };
+    assert_eq!(snapshot.verified_version().graph_version().get(), 1);
+    assert!(
+        snapshot
+            .graph()
+            .item(&id::<TaskId>("task.repository-scoped"))
+            .is_none(),
+        "the hidden task must not appear in the no-Git aggregate"
+    );
+}
+
+/// Graph versions are per-line counters, so two lines both produce version 2.
+/// Membership in a line therefore cannot be decided by comparing version
+/// numbers: the no-Git line's second event and the repository line's second
+/// event are both version 2, and a version match proves nothing about which
+/// line an event belongs to.
+///
+/// The no-Git line advances twice before the repository line writes anything.
+/// The repository selection covers those scope-free events and has not yet
+/// taken root, so its aggregate IS the no-Git graph: a current read answers
+/// the no-Git head, version 2, with both no-Git tasks. A repository write that
+/// pins version 1 is then genuinely stale against the aggregate it reads, and
+/// is refused as a version conflict rather than silently building on a base
+/// the caller never saw.
+#[test]
+fn a_wider_selection_reads_the_narrower_head_until_it_takes_root() {
+    let store = RegisteredWorkStore::start("work-product-wider-base");
+    let created = mutations(&store)
+        .create(
+            &context(),
+            &binding(),
+            CreateWorkProductRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                initial_graph: graph(vec![item("task.no-git", &[], 2)]),
+                mutation: mutation("command.work-product.wider-base.create", UtcMicros(100)),
+            },
+        )
+        .expect("create profile-owned work with no Git relation");
+    let second = mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                item: item("task.no-git-second", &[], 3),
+                mutation: WorkProductMutationIdentityV1 {
+                    expected_authority: WorkProductExpectedAuthorityV1::Verified {
+                        verified_version: created.verified_graph_version().clone(),
+                    },
+                    ..mutation(
+                        "command.work-product.wider-base.no-git-second",
+                        UtcMicros(110),
+                    )
+                },
+            },
+        )
+        .expect("advance the no-Git line to version 2");
+
+    // The repository selection has folded nothing of its own, so the narrower
+    // events it covers are still its base and its head is the no-Git head.
+    let WorkGraphReadV1::Current { snapshot, .. } = reads(&store)
+        .read_graph(
+            &context(),
+            WorkGraphReadRequestV1::current(repository_selection(), PROJECTED_AT),
+        )
+        .expect("the repository selection reads its base")
+    else {
+        panic!("a current read must answer with a current snapshot");
+    };
+    assert_eq!(
+        snapshot.verified_version().graph_version().get(),
+        2,
+        "an unrooted wider selection answers the narrower head it covers"
+    );
+    assert_eq!(
+        snapshot
+            .graph()
+            .items()
+            .iter()
+            .map(|item| item.task_id().as_str().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["task.no-git".to_owned(), "task.no-git-second".to_owned()],
+        "the unrooted wider aggregate carries the whole narrower base"
+    );
+
+    // Pinning version 1 is stale against that head. The refusal is the
+    // ordinary compare-and-swap answer, which names the real cause: the base
+    // moved, and the caller is being told so rather than having a version
+    // number coincidence hide it.
+    let stale = mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: repository_selection(),
+                item: item("task.repository-scoped", &[], 3),
+                mutation: WorkProductMutationIdentityV1 {
+                    expected_authority: WorkProductExpectedAuthorityV1::Verified {
+                        verified_version: created.verified_graph_version().clone(),
+                    },
+                    ..mutation("command.work-product.wider-base.stale", UtcMicros(120))
+                },
+            },
+        )
+        .expect_err("a repository write pinning the superseded base must be refused");
+    assert_eq!(stale, WorkProductApplicationErrorV1::VersionConflict);
+    assert_eq!(
+        store.count("work_product_events_v1"),
+        2,
+        "the refused write appended nothing"
+    );
+
+    // Pinning the real head takes root on the repository line. Its own event
+    // is version 3, the base's version 2 plus one, and the no-Git line is
+    // untouched by it.
+    let rooted = mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: repository_selection(),
+                item: item("task.repository-scoped", &[], 3),
+                mutation: WorkProductMutationIdentityV1 {
+                    expected_authority: WorkProductExpectedAuthorityV1::Verified {
+                        verified_version: second.verified_graph_version().clone(),
+                    },
+                    ..mutation("command.work-product.wider-base.rooted", UtcMicros(130))
+                },
+            },
+        )
+        .expect("a repository write pinning the real head takes root");
+    assert_eq!(rooted.verified_graph_version().graph_version().get(), 3);
+    assert_eq!(rooted.event().sequence().get(), 3);
+
+    // Once rooted, a later scope-free event is a sibling: it was written
+    // against the no-Git head, which the repository line has moved past. The
+    // repository aggregate skips it, and the no-Git aggregate carries it.
+    let third = mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                item: item("task.no-git-third", &[], 1),
+                mutation: WorkProductMutationIdentityV1 {
+                    expected_authority: WorkProductExpectedAuthorityV1::Verified {
+                        verified_version: second.verified_graph_version().clone(),
+                    },
+                    ..mutation(
+                        "command.work-product.wider-base.no-git-third",
+                        UtcMicros(140),
+                    )
+                },
+            },
+        )
+        .expect("the no-Git line keeps advancing after the repository line roots");
+    assert_eq!(third.verified_graph_version().graph_version().get(), 3);
+
+    let task_ids = |selection: WorkProductSelectionScopeV1| -> (u64, Vec<String>) {
+        let WorkGraphReadV1::Current { snapshot, .. } = reads(&store)
+            .read_graph(
+                &context(),
+                WorkGraphReadRequestV1::current(selection, PROJECTED_AT),
+            )
+            .expect("the aggregate is readable")
+        else {
+            panic!("a current read must answer with a current snapshot");
+        };
+        (
+            snapshot.verified_version().graph_version().get(),
+            snapshot
+                .graph()
+                .items()
+                .iter()
+                .map(|item| item.task_id().as_str().to_owned())
+                .collect(),
+        )
+    };
+    assert_eq!(
+        task_ids(WorkProductSelectionScopeV1::ProfileOwnedNoGit),
+        (
+            3,
+            vec![
+                "task.no-git".to_owned(),
+                "task.no-git-second".to_owned(),
+                "task.no-git-third".to_owned(),
+            ]
+        ),
+        "the no-Git aggregate carries every scope-free event and nothing else"
+    );
+    assert_eq!(
+        task_ids(repository_selection()),
+        (
+            3,
+            vec![
+                "task.no-git".to_owned(),
+                "task.no-git-second".to_owned(),
+                "task.repository-scoped".to_owned(),
+            ]
+        ),
+        "the rooted repository aggregate carries its base and its own event, and skips the later sibling"
+    );
+}
+
+/// The per-selection boundaries are persisted, not held in memory. After a
+/// restart the no-Git aggregate still carries only no-Git tasks at its own
+/// version, and the repository aggregate still carries both.
+#[test]
+fn selection_aggregate_boundaries_survive_a_registered_store_restart() {
+    let store = RegisteredWorkStore::start("work-product-aggregate-restart");
+    let created = mutations(&store)
+        .create(
+            &context(),
+            &binding(),
+            CreateWorkProductRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                initial_graph: graph(vec![item("task.no-git", &[], 2)]),
+                mutation: mutation(
+                    "command.work-product.aggregate-restart.create",
+                    UtcMicros(100),
+                ),
+            },
+        )
+        .expect("create profile-owned work with no Git relation");
+    mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: repository_selection(),
+                item: item("task.repository-scoped", &[], 3),
+                mutation: WorkProductMutationIdentityV1 {
+                    expected_authority: WorkProductExpectedAuthorityV1::Verified {
+                        verified_version: created.verified_graph_version().clone(),
+                    },
+                    ..mutation(
+                        "command.work-product.aggregate-restart.scoped",
+                        UtcMicros(150),
+                    )
+                },
+            },
+        )
+        .expect("publish a repository-scoped event beside the no-Git work");
+    let second = mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                item: item("task.third", &[], 1),
+                mutation: WorkProductMutationIdentityV1 {
+                    expected_authority: WorkProductExpectedAuthorityV1::Verified {
+                        verified_version: created.verified_graph_version().clone(),
+                    },
+                    ..mutation(
+                        "command.work-product.aggregate-restart.second",
+                        UtcMicros(200),
+                    )
+                },
+            },
+        )
+        .expect("a second no-Git event advances the no-Git line");
+    let store = store.restart("work-product-aggregate-restart");
+    let task_ids = |selection: WorkProductSelectionScopeV1| -> Vec<String> {
+        let WorkGraphReadV1::Current { snapshot, .. } = reads(&store)
+            .read_graph(
+                &context(),
+                WorkGraphReadRequestV1::current(selection, PROJECTED_AT),
+            )
+            .expect("the aggregate is readable after restart")
+        else {
+            panic!("a current read must answer with a current snapshot");
+        };
+        snapshot
+            .graph()
+            .items()
+            .iter()
+            .map(|item| item.task_id().as_str().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        task_ids(WorkProductSelectionScopeV1::ProfileOwnedNoGit),
+        vec!["task.no-git".to_owned(), "task.third".to_owned()],
+        "the no-Git aggregate must still carry only no-Git tasks"
+    );
+    assert_eq!(
+        task_ids(repository_selection()),
+        vec![
+            "task.no-git".to_owned(),
+            "task.repository-scoped".to_owned()
+        ],
+        "the repository aggregate must still carry the scope-free create and its own event"
+    );
+    let WorkGraphReadV1::Current { snapshot, .. } = reads(&store)
+        .read_graph(
+            &context(),
+            WorkGraphReadRequestV1::current(
+                WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                PROJECTED_AT,
+            ),
+        )
+        .expect("the no-Git head is readable after restart")
+    else {
+        panic!("a current read must answer with a current snapshot");
+    };
+    assert_eq!(
+        snapshot.verified_version(),
+        second.verified_graph_version(),
+        "the no-Git head after restart is the version the second no-Git event published"
     );
 }
 

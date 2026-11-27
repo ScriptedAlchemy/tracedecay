@@ -6661,43 +6661,26 @@ export type WorkGraphReadV1 =
   | {
     authorized_scope: AuthorizedWorkProductScopeV1;
     mode: "absent";
-    selection_coverage: WorkGraphSelectionCoverageV1;
   }
   | {
     authorized_scope: AuthorizedWorkProductScopeV1;
     mode: "as_of";
-    selection_coverage: WorkGraphSelectionCoverageV1;
     snapshot: WorkGraphVersionEntryV1;
   }
   | {
     authorized_scope: AuthorizedWorkProductScopeV1;
     mode: "current";
-    selection_coverage: WorkGraphSelectionCoverageV1;
     snapshot: WorkGraphVersionEntryV1;
   }
   | {
     authorized_scope: AuthorizedWorkProductScopeV1;
     mode: "evolution";
-    selection_coverage: WorkGraphSelectionCoverageV1;
     timeline: WorkGraphTimelineV1;
   }
   | {
     authorized_scope: AuthorizedWorkProductScopeV1;
     mode: "forensic";
-    selection_coverage: WorkGraphSelectionCoverageV1;
     timeline: WorkGraphTimelineV1;
-  };
-
-export type WorkGraphSelectionCoverageV1 =
-  | {
-    coverage: "complete";
-    covered_events: number;
-  }
-  | {
-    coverage: "partial";
-    covered_events: number;
-    excluded_events: number;
-    first_excluded_sequence: number;
   };
 
 export type WorkGraphTimelineCoverageV1 =
