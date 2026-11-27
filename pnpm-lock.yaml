@@ -248,10 +248,10 @@ importers:
         version: 1.65.1
       '@rsbuild/core':
         specifier: ^2.2.13
-        version: 2.3.4
+        version: 2.3.5
       '@rsbuild/plugin-react':
         specifier: ^2.0.0
-        version: 2.1.1(@rsbuild/core@2.3.4)(@rspack/core@2.3.4(@swc/helpers@0.5.24))
+        version: 2.1.1(@rsbuild/core@2.3.5)(@rspack/core@2.3.4(@swc/helpers@0.5.24))
       '@tailwindcss/postcss':
         specifier: ^4.0.0
         version: 4.3.5
@@ -327,7 +327,7 @@ importers:
         version: 1.65.1
       '@rsbuild/core':
         specifier: ^2.2.13
-        version: 2.3.4
+        version: 2.3.5
       '@rslib/core':
         specifier: ^1.0.0
         version: 1.1.0(typescript@7.0.2)
@@ -1087,8 +1087,8 @@ packages:
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
 
-  '@rsbuild/core@2.3.4':
-    resolution: {integrity: sha512-1P3nLh/uXOcNTJZxvymRzAmuz8SBiCqY2InliNxQTlS0mWtoXbrRBC/W7zfv3MATk/vPmzODAYoZ5oIULk3Ilg==}
+  '@rsbuild/core@2.3.5':
+    resolution: {integrity: sha512-V2/KL+aM0jR583khX8vJdlH3d5j6Tk1Z3luIKOlOG+jpnbBPqpEJCzxwTZnHcUjNypK3wAJFziusk3JAD0ANDw==}
     engines: {node: ^20.19.0 || >=22.12.0}
     hasBin: true
     peerDependencies:
@@ -3428,26 +3428,26 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.1': {}
 
-  '@rsbuild/core@2.3.4':
+  '@rsbuild/core@2.3.5':
     dependencies:
       '@rspack/core': 2.3.4(@swc/helpers@0.5.24)
       '@swc/helpers': 0.5.24
     transitivePeerDependencies:
       - '@module-federation/runtime-tools'
 
-  '@rsbuild/plugin-react@2.1.1(@rsbuild/core@2.3.4)(@rspack/core@2.3.4(@swc/helpers@0.5.24))':
+  '@rsbuild/plugin-react@2.1.1(@rsbuild/core@2.3.5)(@rspack/core@2.3.4(@swc/helpers@0.5.24))':
     dependencies:
       '@rspack/plugin-react-refresh': 2.0.2(@rspack/core@2.3.4(@swc/helpers@0.5.24))(react-refresh@0.19.0)
       react-refresh: 0.19.0
     optionalDependencies:
-      '@rsbuild/core': 2.3.4
+      '@rsbuild/core': 2.3.5
     transitivePeerDependencies:
       - '@rspack/core'
 
   '@rslib/core@1.1.0(typescript@7.0.2)':
     dependencies:
-      '@rsbuild/core': 2.3.4
-      rsbuild-plugin-dts: 1.1.0(@rsbuild/core@2.3.4)(typescript@7.0.2)
+      '@rsbuild/core': 2.3.5
+      rsbuild-plugin-dts: 1.1.0(@rsbuild/core@2.3.5)(typescript@7.0.2)
     optionalDependencies:
       typescript: 7.0.2
     transitivePeerDependencies:
@@ -4661,9 +4661,9 @@ snapshots:
       - supports-color
     optional: true
 
-  rsbuild-plugin-dts@1.1.0(@rsbuild/core@2.3.4)(typescript@7.0.2):
+  rsbuild-plugin-dts@1.1.0(@rsbuild/core@2.3.5)(typescript@7.0.2):
     dependencies:
-      '@rsbuild/core': 2.3.4
+      '@rsbuild/core': 2.3.5
       '@swc-next/parser': 0.7.0
       '@swc-next/walker': 0.7.0
     optionalDependencies:
