@@ -183,9 +183,23 @@ async fn run_to_completion_bounded(
     let before = writer_telemetry(database);
     let started = Instant::now();
     let mut passes = 0;
+    let mut previous_transactions = before.transactions.committed_transactions;
+    let mut previous_vm_steps = before.sqlite_vm.vm_steps;
+    let mut pass_costs = Vec::new();
     loop {
         passes += 1;
+        let pass_started = Instant::now();
         let pass = ingestor.run_pass().await;
+        let pass_wall = pass_started.elapsed();
+        let after_pass = writer_telemetry(database);
+        pass_costs.push((
+            pass.clone(),
+            after_pass.transactions.committed_transactions - previous_transactions,
+            after_pass.sqlite_vm.vm_steps - previous_vm_steps,
+            pass_wall,
+        ));
+        previous_transactions = after_pass.transactions.committed_transactions;
+        previous_vm_steps = after_pass.sqlite_vm.vm_steps;
         assert!(
             passes <= max_passes,
             "history never completed; last pass {:?} units {:?}",
@@ -201,13 +215,26 @@ async fn run_to_completion_bounded(
     }
     let wall = started.elapsed();
     let after = writer_telemetry(database);
-    Cost {
+    let cost = Cost {
         passes,
         transactions: after.transactions.committed_transactions
             - before.transactions.committed_transactions,
         vm_steps: after.sqlite_vm.vm_steps - before.sqlite_vm.vm_steps,
         wall,
+    };
+    // Report after measuring so diagnostic output does not inflate sweep time.
+    for (index, (pass, transactions, vm_steps, wall)) in pass_costs.iter().enumerate() {
+        eprintln!(
+            "codex history pass {}/{}: outcome={:?} made_progress={} units={:?} \
+             transactions={transactions} vm_steps={vm_steps} wall={wall:?}",
+            index + 1,
+            cost.passes,
+            pass.outcome,
+            pass.made_progress,
+            pass.provider_units,
+        );
     }
+    cost
 }
 
 async fn open() -> (
@@ -266,7 +293,7 @@ async fn a_completed_codex_import_stays_idle_across_restart() {
 
 /// The store work of one empty sweep over a settled corpus, whatever its
 /// size: the fixed per-pass cost the daemon pays on every idle poll.
-async fn empty_sweep_vm_steps() -> u64 {
+async fn empty_sweep_cost() -> Cost {
     let (fixture, database, home, cpu) = open().await;
     write_corpus(&fixture, &home);
     let ingestor = ingestor(&fixture, &database, &home, &mounted_hub(&cpu), &cpu);
@@ -274,7 +301,7 @@ async fn empty_sweep_vm_steps() -> u64 {
     let idle = run_to_completion(&ingestor, &database).await;
     ingestor.cancel();
     assert_eq!(idle.transactions, 0, "an idle re-pass commits nothing");
-    idle.vm_steps
+    idle
 }
 
 /// A daemon restarted between the passes of an import finishes it with no
@@ -371,10 +398,12 @@ async fn a_second_sweep_over_the_measured_corpus_commits_nothing() {
     // The second sweep's store work is the fixed per-pass cost, not per file:
     // it equals one empty sweep over the 12-rollout corpus, whatever that
     // costs. A per-file cost would scale with the 2,010 rollouts.
-    let small = empty_sweep_vm_steps().await;
+    let small = empty_sweep_cost().await;
+    eprintln!("codex unchanged-sweep comparison: large={reoffer:?} small={small:?}");
     assert_eq!(
-        reoffer.vm_steps, small,
-        "the second sweep must do only the fixed per-pass store work"
+        reoffer.vm_steps, small.vm_steps,
+        "the second sweep must do only the fixed per-pass store work: \
+         large={reoffer:?} small={small:?}"
     );
     assert!(
         reoffer.vm_steps.saturating_mul(10) < import.vm_steps,
