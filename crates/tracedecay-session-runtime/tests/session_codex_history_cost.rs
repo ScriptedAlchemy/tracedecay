@@ -9,6 +9,7 @@
 #[path = "support/session_store_read_cost.rs"]
 pub mod support;
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -19,6 +20,7 @@ use tracedecay_contracts::ProfileIdentityReadPort;
 use tracedecay_domain::{BrainId, UserProfileId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::tests::harness::writer_telemetry;
+use tracedecay_private_fs::RewriteWitness;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_runtime_core::resident_memory::{
@@ -36,6 +38,9 @@ const ROLLOUTS_PER_DAY: usize = 4;
 const MAX_PASSES: usize = 64;
 /// The rollout count of the corpus the re-offer cost was first measured on.
 const MEASURED_ROLLOUTS: usize = 2_010;
+/// The control corpus: the same layout and project at a size where per-file
+/// store work would be two orders of magnitude smaller.
+const CONTROL_ROLLOUTS: usize = 12;
 const MAX_MEASURED_PASSES: usize = 4_096;
 
 struct FixtureIdentity {
@@ -65,8 +70,9 @@ fn rollout_path(home: &Path, day: usize, index: usize) -> PathBuf {
         ))
 }
 
-/// A settled rollout: its mtime is a day old, as on a daemon re-importing
-/// history after a store reset.
+/// A rollout whose mtime is a day old, as on a daemon re-importing history
+/// after a store reset. Its change time is still now; see
+/// [`settle_codex_tree`].
 fn write_rollout(home: &Path, project: &Path, day: usize, index: usize) {
     let dir = home.join(format!(".codex/sessions/2026/01/{:02}", day + 1));
     std::fs::create_dir_all(&dir).unwrap();
@@ -147,16 +153,44 @@ fn write_corpus(fixture: &DrainFixture, home: &Path) -> usize {
             write_rollout(home, cwd, day, index);
         }
     }
+    settle_codex_tree(home);
     in_scope
 }
 
-/// The measured corpus: every rollout belongs to this one project and is
-/// settled, so after the import the next sweep finds every one unchanged.
-fn write_measured_corpus(fixture: &DrainFixture, home: &Path) -> usize {
-    for index in 0..MEASURED_ROLLOUTS {
+/// Waits until the production discovery witness vouches for every entry of
+/// the Codex tree. A file or directory identity read inside its change-time
+/// quantum is unvouched and matches no later stat, so the next sweep must
+/// re-verify it; a corpus written just before its import is in that state
+/// wherever the clock that stamps change times is coarse. Settling first
+/// makes every sweep observe the same corpus state on every filesystem.
+fn settle_codex_tree(home: &Path) {
+    fn settled(path: &Path) -> bool {
+        let metadata = std::fs::symlink_metadata(path).unwrap();
+        RewriteWitness::NATIVE.vouches_for_unchanged_bytes(&metadata)
+            && (!metadata.is_dir()
+                || std::fs::read_dir(path)
+                    .unwrap()
+                    .all(|entry| settled(&entry.unwrap().path())))
+    }
+    let root = home.join(".codex");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !settled(&root) {
+        assert!(
+            Instant::now() < deadline,
+            "the Codex tree never settled under {}",
+            root.display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A corpus of settled rollouts that all belong to this one project, so
+/// after the import the next sweep finds every one unchanged.
+fn write_single_project_corpus(fixture: &DrainFixture, home: &Path, rollouts: usize) {
+    for index in 0..rollouts {
         write_rollout(home, &fixture.project, index % DAYS, index);
     }
-    MEASURED_ROLLOUTS
+    settle_codex_tree(home);
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -264,19 +298,6 @@ async fn a_completed_codex_import_stays_idle_across_restart() {
     assert_eq!(restart.passes, 1, "a settled restart needs one pass");
 }
 
-/// The store work of one empty sweep over a settled corpus, whatever its
-/// size: the fixed per-pass cost the daemon pays on every idle poll.
-async fn empty_sweep_vm_steps() -> u64 {
-    let (fixture, database, home, cpu) = open().await;
-    write_corpus(&fixture, &home);
-    let ingestor = ingestor(&fixture, &database, &home, &mounted_hub(&cpu), &cpu);
-    run_to_completion(&ingestor, &database).await;
-    let idle = run_to_completion(&ingestor, &database).await;
-    ingestor.cancel();
-    assert_eq!(idle.transactions, 0, "an idle re-pass commits nothing");
-    idle.vm_steps
-}
-
 /// A daemon restarted between the passes of an import finishes it with no
 /// more writer work than an uninterrupted import: committed rollouts are not
 /// re-admitted.
@@ -340,42 +361,98 @@ async fn a_restart_mid_import_resumes_without_rewriting_committed_rollouts() {
 /// a skipped rollout falls short and a re-admitted one overshoots.
 const IMPORT_TRANSACTIONS_PER_ROLLOUT: u64 = 5;
 
+/// Writer work of each transition the re-offer acceptance compares, all over
+/// one settled single-project corpus and one ingestor.
+#[derive(Debug)]
+struct SweepTransitions {
+    /// The import that admits every rollout.
+    import: Cost,
+    /// The first sweep after the import, over the unchanged corpus.
+    first_idle: Cost,
+    /// A later sweep, after one that already found the corpus unchanged.
+    later_idle: Cost,
+    /// The sweep after one record is appended to one rollout.
+    appended: Cost,
+}
+
+async fn sweep_transitions(rollouts: usize) -> SweepTransitions {
+    let (fixture, database, home, cpu) = open().await;
+    write_single_project_corpus(&fixture, &home, rollouts);
+    let ingestor = ingestor(&fixture, &database, &home, &mounted_hub(&cpu), &cpu);
+    let import = run_to_completion_bounded(&ingestor, &database, MAX_MEASURED_PASSES).await;
+    let first_idle = run_to_completion_bounded(&ingestor, &database, MAX_MEASURED_PASSES).await;
+    let later_idle = run_to_completion_bounded(&ingestor, &database, MAX_MEASURED_PASSES).await;
+
+    let appended = rollout_path(&home, 0, 0);
+    assert!(appended.is_file(), "the appended rollout must exist");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&appended)
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        json!({"timestamp": "2026-01-01T00:00:03.000Z", "type": "event_msg",
+               "payload": {"type": "user_message", "message": "appended prompt"}})
+    )
+    .unwrap();
+    drop(file);
+    settle_codex_tree(&home);
+    let appended = run_to_completion_bounded(&ingestor, &database, MAX_MEASURED_PASSES).await;
+    ingestor.cancel();
+
+    let transitions = SweepTransitions {
+        import,
+        first_idle,
+        later_idle,
+        appended,
+    };
+    eprintln!("codex sweep transitions over {rollouts} settled rollouts: {transitions:?}");
+    transitions
+}
+
 /// The re-offer acceptance measurement for #4374: a full second sweep over
 /// 2,010 settled rollouts in one project commits nothing and does no
 /// per-file store work, where the import that first admitted them paid a
 /// durable write for every rollout.
+///
+/// Store work is compared transition by transition against a 12-rollout
+/// control built by the same code: equal writer work across a 167x size
+/// difference is what "no per-file work" means, whatever the fixed per-pass
+/// cost is.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_sweep_over_the_measured_corpus_commits_nothing() {
-    let (fixture, database, home, cpu) = open().await;
-    let rollouts = write_measured_corpus(&fixture, &home);
+    let measured = sweep_transitions(MEASURED_ROLLOUTS).await;
+    let control = sweep_transitions(CONTROL_ROLLOUTS).await;
 
-    let first = ingestor(&fixture, &database, &home, &mounted_hub(&cpu), &cpu);
-    let import = run_to_completion_bounded(&first, &database, MAX_MEASURED_PASSES).await;
-    let reoffer = run_to_completion_bounded(&first, &database, MAX_MEASURED_PASSES).await;
+    // Every rollout was discovered and admitted once: the import's durable
+    // writes are exactly the per-rollout cost times the corpus.
+    for (transitions, rollouts) in [(&measured, MEASURED_ROLLOUTS), (&control, CONTROL_ROLLOUTS)] {
+        assert_eq!(
+            transitions.import.transactions,
+            IMPORT_TRANSACTIONS_PER_ROLLOUT * rollouts as u64,
+            "the import must admit each of {rollouts} rollouts exactly once"
+        );
+    }
 
-    eprintln!(
-        "codex re-offer cost over {rollouts} settled rollouts in one project: \
-         import={import:?} reoffer={reoffer:?}"
-    );
-    // Every rollout was discovered and admitted: the import's durable writes
-    // are exactly the per-rollout cost times the corpus.
-    assert_eq!(
-        import.transactions,
-        IMPORT_TRANSACTIONS_PER_ROLLOUT * rollouts as u64,
-        "the import must admit every rollout exactly once"
-    );
-    assert_eq!(
-        reoffer.transactions, 0,
-        "a second sweep over unchanged rollouts must commit nothing"
-    );
-    // The second sweep's store work is the fixed per-pass cost, not per file:
-    // it equals one empty sweep over the 12-rollout corpus, whatever that
-    // costs. A per-file cost would scale with the 2,010 rollouts.
-    let small = empty_sweep_vm_steps().await;
-    assert_eq!(
-        reoffer.vm_steps, small,
-        "the second sweep must do only the fixed per-pass store work"
-    );
+    for (label, large, small) in [
+        ("first", measured.first_idle, control.first_idle),
+        ("later", measured.later_idle, control.later_idle),
+    ] {
+        assert_eq!(
+            (large.transactions, small.transactions),
+            (0, 0),
+            "a {label} sweep over unchanged rollouts must commit nothing: \
+             large={large:?} small={small:?}"
+        );
+        assert_eq!(
+            large.vm_steps, small.vm_steps,
+            "a {label} unchanged sweep must do only fixed per-pass store work: \
+             large={large:?} small={small:?}"
+        );
+    }
+    let reoffer = measured.first_idle;
+    let import = measured.import;
     assert!(
         reoffer.vm_steps.saturating_mul(10) < import.vm_steps,
         "the second sweep must do far less store work than the import: \
@@ -388,31 +465,16 @@ async fn a_second_sweep_over_the_measured_corpus_commits_nothing() {
     );
 
     // The empty sweep is a live verdict, not a dead probe: one appended
-    // rollout is discovered and admitted on the next sweep, and only it.
-    let appended = rollout_path(&home, 0, 0);
-    assert!(appended.is_file(), "the appended rollout must exist");
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&appended)
-        .unwrap();
-    use std::io::Write as _;
-    writeln!(
-        file,
-        "{}",
-        json!({"timestamp": "2026-01-01T00:00:03.000Z", "type": "event_msg",
-               "payload": {"type": "user_message", "message": "appended prompt"}})
-    )
-    .unwrap();
-    drop(file);
-    let live = run_to_completion_bounded(&first, &database, MAX_MEASURED_PASSES).await;
-    first.cancel();
-    eprintln!("codex sweep after one appended rollout: live={live:?}");
+    // rollout is discovered and committed on the next sweep, and only it, so
+    // its writer work does not depend on how many rollouts sit beside it.
+    let (large, small) = (measured.appended, control.appended);
     assert!(
-        live.transactions > 0,
-        "the appended frames must be committed: {live:?}"
+        large.transactions > 0,
+        "the appended frames must be committed: {large:?}"
     );
-    assert!(
-        live.transactions < import.transactions,
-        "only the appended rollout may be re-admitted: {live:?} vs {import:?}"
+    assert_eq!(
+        (large.transactions, large.vm_steps),
+        (small.transactions, small.vm_steps),
+        "only the appended rollout may be re-admitted: large={large:?} small={small:?}"
     );
 }
