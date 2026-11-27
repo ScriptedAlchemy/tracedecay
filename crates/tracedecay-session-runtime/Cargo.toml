@@ -51,6 +51,7 @@ hex.workspace = true
 rusqlite.workspace = true
 tracedecay-maintenance = { path = "../tracedecay-maintenance" }
 tracedecay-privacy = { path = "../tracedecay-privacy" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracedecay-configuration = { path = "../tracedecay-configuration", features = ["test-helpers"] }
 tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity" }
