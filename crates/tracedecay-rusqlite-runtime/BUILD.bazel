@@ -40,6 +40,22 @@ rust_library(
     crate_features = ["test-runtime", "test-transport"],
 )
 
+rust_library(
+    name = "tracedecay-rusqlite-runtime__d104a1ff1c8__dev",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay_rusqlite_runtime",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-store:tracedecay-store__d7547c5d340__dev"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(2),
+    crate_features = [],
+)
+
 rust_test(
     name = "native_runtime_install",
     srcs = glob(["tests/**/*.rs"], exclude = ["tests/fixtures/**"]) + ["//tests:storage_runtime_rusqlite_suite_sources"],

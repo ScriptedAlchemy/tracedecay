@@ -4,6 +4,7 @@ version.workspace = true
 publish = false
 edition.workspace = true
 description = "TraceDecay command-line interface and daemon binary"
+default-run = "tracedecay"
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
@@ -13,10 +14,24 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 [package.metadata.bazel.test_sizes]
 refresh_memory_journey = "large"
 
+# Host configuration and self-update identify the executable by this basename.
+[package.metadata.bazel.binary_names]
+tracedecay-full = "full/tracedecay"
+
 [[bin]]
 name = "tracedecay"
 path = "src/main.rs"
 # The public library owns target/doc/tracedecay; the binary would overwrite it.
+doc = false
+
+# The optional grammar build uses the same entry point and production runtime.
+# Its required feature gives Bazel a distinct resolved graph and opt-in target.
+[[bin]]
+name = "tracedecay-full"
+path = "src/main.rs"
+required-features = ["full"]
+test = false
+bench = false
 doc = false
 
 # Built explicitly by test workflows. Keeping the fake as an example leaves

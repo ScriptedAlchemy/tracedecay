@@ -3272,6 +3272,34 @@ pub struct DaemonInvocationResponse {
     pub request_id: String,
     #[serde(flatten)]
     pub outcome: DaemonInvocationOutcome,
+    /// Absent on the wire for an admitted stream, which stays open for the
+    /// next request.
+    #[serde(default, skip_serializing_if = "DaemonInvocationStream::is_open")]
+    pub stream: DaemonInvocationStream,
+}
+
+/// Whether the daemon serves another request on the stream that carried a
+/// response.
+///
+/// Only the daemon knows whether it admitted the stream: an admitted owner
+/// and a pre-admission refusal can answer with the same problem, so a client
+/// that infers the stream's fate from the outcome either retires a live
+/// stream or pools a closed one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonInvocationStream {
+    /// The daemon admitted the stream and reads its next request.
+    #[default]
+    Open,
+    /// The daemon answered before admitting the stream and closes it after
+    /// this response; the caller's next request needs a fresh connection.
+    Closing,
+}
+
+impl DaemonInvocationStream {
+    pub fn is_open(&self) -> bool {
+        *self == Self::Open
+    }
 }
 
 /// Bounded operation outcomes. LSP payloads remain protocol frames, not an
@@ -3424,6 +3452,7 @@ impl DaemonInvocationResponse {
                 scope_set_id,
                 scope_set_digest,
             },
+            stream: DaemonInvocationStream::Open,
         }
     }
 
@@ -3433,6 +3462,17 @@ impl DaemonInvocationResponse {
             revision: DAEMON_INVOCATION_REVISION,
             request_id,
             outcome,
+            stream: DaemonInvocationStream::Open,
+        }
+    }
+
+    /// Marks a response the daemon writes before admitting its stream, which
+    /// it closes once the response is written.
+    #[must_use]
+    pub fn closing_stream(self) -> Self {
+        Self {
+            stream: DaemonInvocationStream::Closing,
+            ..self
         }
     }
 }

@@ -1,12 +1,11 @@
 /**
- * Pure spring simulation for the TRACE surface.
+ * Pure spring simulation for the TRACE page.
  *
- * This module is the honesty boundary. Every felt quantity in the prototype,
- * weight, latency, deformation, settle time. Is computed HERE from a stated
- * measurement, and the renderer only draws what comes out. Nothing in this file
- * touches the DOM, a canvas, `Date.now`, `performance.now` or `Math.random`, so
- * the same seed and the same gesture script produce a bit-identical trajectory
- * on every machine and inside `node --test`.
+ * The simulation computes weight, latency, deformation, and settle time from
+ * stated measurements. The renderer only draws the output. The simulation
+ * uses no DOM, canvas, `Date.now`, `performance.now`, or `Math.random`, so the
+ * same seed and gestures produce a bit-identical trajectory on every machine
+ * and in `node --test`.
  *
  * Physics: hand-rolled position Verlet (Störmer–Verlet) with per-node velocity
  * damping, integrated at a fixed substep. Two force families:
@@ -263,7 +262,7 @@ export function createSimulation(spec) {
     get springCount() {
       return springCount;
     },
-    /** Frozen copy of the parameters actually in force. */
+    /** Frozen copy of the active parameters. */
     get params() {
       return Object.freeze({ ...params });
     },

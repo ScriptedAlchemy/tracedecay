@@ -318,9 +318,10 @@ impl PartitionedSealV1 {
         let layout =
             SealedGenerationPackLayoutV1::open(&self.manifest).expect("original pack layout");
         let mut logical = layout
-            .content_pack()
-            .extents
+            .content_packs()
+            .packs
             .iter()
+            .flat_map(|pack| pack.extents.iter())
             .map(|extent| {
                 let mut bytes = Vec::new();
                 layout
@@ -407,7 +408,7 @@ impl PartitionedSealV1 {
         let pack = preparation
             .finalize_content_pack(&roster)
             .expect("finalize altered content pack");
-        envelope["generation"]["content_pack"] =
+        envelope["generation"]["content_packs"] =
             serde_json::to_value(pack).expect("altered pack descriptor");
         let sealed = Self::from_preparation(reseal_manifest(envelope), &preparation);
         preparation.abort().expect("release altered staging");

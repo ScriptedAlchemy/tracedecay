@@ -2,7 +2,7 @@ use tracedecay_contracts::{ApplicationProblem, ResolvedScope};
 
 use super::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonInvocationOutcome,
-    DaemonInvocationProblem, DaemonInvocationResponse,
+    DaemonInvocationProblem, DaemonInvocationResponse, DaemonInvocationStream,
 };
 
 impl DaemonInvocationResponse {
@@ -12,6 +12,7 @@ impl DaemonInvocationResponse {
             revision: DAEMON_INVOCATION_REVISION,
             request_id: request_id.into(),
             outcome: DaemonInvocationOutcome::Problem { problem },
+            stream: DaemonInvocationStream::Open,
         }
     }
 
@@ -21,6 +22,7 @@ impl DaemonInvocationResponse {
             revision: DAEMON_INVOCATION_REVISION,
             request_id: request_id.into(),
             outcome: DaemonInvocationOutcome::ApplicationProblem { problem },
+            stream: DaemonInvocationStream::Open,
         }
     }
 
@@ -34,6 +36,7 @@ impl DaemonInvocationResponse {
             revision: DAEMON_INVOCATION_REVISION,
             request_id: request_id.into(),
             outcome: DaemonInvocationOutcome::RetainedApplicationProblem { scope, problem },
+            stream: DaemonInvocationStream::Open,
         }
     }
 }

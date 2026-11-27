@@ -88,11 +88,11 @@ pub struct HostBundleCliOptions {
     pub adopt: bool,
 }
 
-/// Code intelligence for Rust codebases.
+/// Code intelligence for the languages this build registers.
 #[derive(Parser)]
 #[command(
     name = "tracedecay",
-    about = "Code intelligence for 34 languages, semantic graph queries instead of file reads",
+    about = "Code intelligence for your codebase, semantic graph queries instead of file reads",
     after_help = TOP_LEVEL_AFTER_HELP,
     version = crate::product_runtime::PRODUCT_BUILD_VERSION
 )]

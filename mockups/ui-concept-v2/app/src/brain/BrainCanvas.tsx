@@ -384,7 +384,7 @@ function drawScoped(
   for (const n of layout.nodes) {
     const iso = keepA(n.id);
     if (n.dim) {
-      // typed absence: a hollow, unlit identity. Present, sealed, honest
+      // A hollow, unlit node shows a known identity with unavailable data.
       ctx.globalAlpha = 0.75 * iso;
       ctx.strokeStyle = "rgba(148,163,178,0.55)";
       ctx.lineWidth = 1;

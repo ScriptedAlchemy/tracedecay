@@ -133,7 +133,8 @@ mod partitioned_codec;
 pub(crate) mod resident_bytes;
 mod resolution_outputs;
 pub use partitioned_codec::{
-    SealedGenerationContentExtentV1, SealedGenerationContentPackV1, SealedGenerationFileWindowsV1,
+    MAX_SEALED_GENERATION_CONTENT_PACKS_V1, SealedGenerationContentExtentV1,
+    SealedGenerationContentPackV1, SealedGenerationContentRosterV1, SealedGenerationFileWindowsV1,
     SealedGenerationPackLayoutV1, SealedGenerationPackReadPassV1,
     SealedGenerationSegmentIdentityV1, SealedGenerationSegmentPublicationV1,
     SealedGenerationSegmentReadV1, SealedGenerationSegmentReaderV1,
@@ -496,13 +497,16 @@ pub trait CodeIndexPreparationPort {
 
     fn segment_reader(&self) -> Arc<SealedSegmentReaderV1>;
 
-    /// Freeze the complete logical content roster and assemble its canonical
-    /// self-contained pack. The generation evidence pack has its own existing
-    /// page writer and is not a member of this roster.
+    /// Freeze the complete logical content roster and assemble the physical
+    /// packs that hold it. An extent the bound parent already holds in an
+    /// immutable pack is inherited by reference rather than copied; only the
+    /// remaining extents are written to a new pack. The generation evidence
+    /// pack has its own existing page writer and is not a member of this
+    /// roster.
     fn finalize_content_pack(
         &mut self,
         segments: &[SealedGenerationSegmentIdentityV1],
-    ) -> Result<SealedGenerationContentPackV1, CodeIndexPublicationStoreErrorV1>;
+    ) -> Result<SealedGenerationContentRosterV1, CodeIndexPublicationStoreErrorV1>;
 
     /// Read physical payload packs after finalization. Unlike segment_reader,
     /// these requests carry the physical pack identity and absolute extent.
@@ -3164,9 +3168,9 @@ where
             &resolved.code_graph_pages,
             &resolved.resolution_index,
         )?;
-        let content_pack = preparation.finalize_content_pack(&content_segments)?;
+        let content_packs = preparation.finalize_content_pack(&content_segments)?;
         drop(content_segments);
-        let manifest_base = manifest_base.saturating_add(content_pack.retained_bytes());
+        let manifest_base = manifest_base.saturating_add(content_packs.retained_bytes());
         memory.resize(manifest_base as u64)?;
         let chunk_count = u64::try_from(projection.receipt_count()).map_err(|_| {
             CodeIndexProductionErrorV1::Contract("generation chunk count exceeds u64".to_owned())
@@ -3188,7 +3192,7 @@ where
             generation_evidence: &generation_evidence,
             code_graph_pages: &resolved.code_graph_pages,
             resolution_index: &resolved.resolution_index,
-            content_pack: &content_pack,
+            content_packs: &content_packs,
         };
         let manifest_bytes = partitioned_codec::seal_partitioned_manifest_charged(
             &generation_ref,
@@ -3210,7 +3214,7 @@ where
             (clones_reused, clones_computed, 0),
             &mut |needed| memory.resize(prepared_base.saturating_add(needed) as u64),
         )?;
-        drop(content_pack);
+        drop(content_packs);
         drop(generation_evidence);
         drop(file_segments);
         drop(resolved);

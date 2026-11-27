@@ -15,15 +15,18 @@ test-helpers = []
 # every repository has them, so no shipped tier may index code without also
 # indexing its documentation. Its grammar is the dedicated `tree-sitter-md`
 # crate (byte-identical parser/scanner sources to the copy vendored in the
-# large bundle), so `lite` never links the large bundle.
+# large bundle). TOML also rides in `lite`: Rust cross-crate resolution reads
+# each package's declared name from its indexed Cargo.toml. TOML uses the
+# large grammar bundle, whose unregistered languages remain unavailable.
 # Kotlin is registered from arborium-kotlin (through `medium-grammars`), not from the
 # medium bundle's former tree-sitter-kotlin-sg dependency, so `full` never
 # links two Kotlin parse tables.
-lite = ["medium-grammars", "lang-markdown", "lang-json"]
+lite = ["medium-grammars", "lang-markdown", "lang-json", "lang-toml"]
 # The two grammar bundles supply native parse tables. Every `lang-*` feature
 # names the bundle that ships its grammar, and `ts_provider` registers only the
 # languages whose features are on so unused tables can be linker-GC'd when a
-# tier omits a language. The shipping `full` set matches master.
+# tier omits a language. The shipped profile enables `lite` and `medium`;
+# `full` adds the optional grammar set.
 medium-grammars = ["dep:tracedecay-medium-treesitters", "dep:arborium-kotlin"]
 large-grammars = ["dep:tracedecay-large-treesitters"]
 medium = ["lang-dart", "lang-pascal", "lang-php", "lang-ruby", "lang-bash", "lang-protobuf", "lang-powershell", "lang-nix", "lang-vbnet"]

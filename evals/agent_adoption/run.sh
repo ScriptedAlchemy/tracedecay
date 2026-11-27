@@ -3,8 +3,8 @@
 #
 # Drives real headless Claude Code and/or Codex agents against a small indexed
 # fixture project and captures each agent's full tool-call stream for grading by
-# grade.py. This measures what agents ACTUALLY do (native grep vs tracedecay
-# tools, whether they rate facts, etc.), not what an offline classifier decides.
+# grade.py. The calls show whether agents use native grep or tracedecay tools
+# and whether they rate facts, without asking an offline classifier to infer it.
 #
 # Live agent invocations cost tokens, so they are gated: fixtures are always
 # built, but agents only run when TRACEDECAY_AGENT_EVALS=1. Without it the script
@@ -127,9 +127,8 @@ fi
 # no PATH or older-build fallback exists.
 TD="$("$repo_root/scripts/build-eval-binary.sh")" || exit 2
 
-# Neutrality lint (USER DOCTRINE): fail fast, before building fixtures or
-# spending a single token, if any scenario prompt names tracedecay/MCP/a
-# tool/a skill. Keeps future scenarios honest at the point of use.
+# Reject scenario prompts that name tracedecay, MCP, a tool, or a skill before
+# building fixtures or calling a model.
 echo "linting scenario prompts for neutrality..."
 if ! python3 "$here/grade.py" --lint-only --scenarios "$EVAL_SCENARIOS_DIR"; then
   echo "abort: scenario prompts failed the neutrality lint (see above)." >&2

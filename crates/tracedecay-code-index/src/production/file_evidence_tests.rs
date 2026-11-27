@@ -72,7 +72,7 @@ impl CodeIndexPreparationPort for CountingPreparationV1 {
     fn finalize_content_pack(
         &mut self,
         segments: &[SealedGenerationSegmentIdentityV1],
-    ) -> Result<SealedGenerationContentPackV1, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<SealedGenerationContentRosterV1, CodeIndexPublicationStoreErrorV1> {
         self.inner.finalize_content_pack(segments)
     }
 

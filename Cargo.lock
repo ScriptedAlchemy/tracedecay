@@ -6878,6 +6878,7 @@ dependencies = [
  "tracedecay-lcm",
  "tracedecay-maintenance",
  "tracedecay-privacy",
+ "tracedecay-private-fs",
  "tracedecay-query",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",

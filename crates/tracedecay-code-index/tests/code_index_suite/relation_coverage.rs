@@ -498,6 +498,8 @@ fn typescript_calls_on_computed_receivers_make_callers_partial() {
 
 #[test]
 fn a_crlf_cargo_manifest_names_its_crate_for_cross_crate_calls() {
+    // The declared crate name differs from its directory, so this call must
+    // resolve through indexed Cargo.toml evidence, not the directory fallback.
     let graph = sealed_graph_of(&[
         (
             "lib/Cargo.toml",
@@ -514,11 +516,23 @@ fn a_crlf_cargo_manifest_names_its_crate_for_cross_crate_calls() {
         ),
     ]);
 
+    let package_name = graph
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| symbol.qualified_name == "lib/Cargo.toml::package::name")
+        .expect("the core profile indexes Cargo package identity");
+    assert_eq!(
+        package_name.signature.as_deref().map(str::trim_end),
+        Some("name = \"crlf-lib\"")
+    );
     assert_eq!(
         graph.callers("lib/src/lib.rs::helper"),
         ["app/src/main.rs::main"]
     );
     assert!(!graph.callers_partial("lib/src/lib.rs::helper"));
+    assert!(!graph.callees_partial("app/src/main.rs::main"));
 }
 
 #[test]

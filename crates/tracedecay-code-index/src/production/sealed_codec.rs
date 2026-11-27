@@ -58,7 +58,10 @@ use super::*;
 /// receiver facts used by both full and sparse generation resolution.
 /// Revision 24 stores all logical payloads in the two self-contained pack
 /// roles authenticated by the manifest's extent map.
-pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 24;
+/// Revision 25 lets a successor reference the immutable packs of its parent
+/// for unchanged extents. It writes new extents plus the still-required
+/// extents of any inherited pack folded to keep the pack count bounded.
+pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 25;
 
 /// The typed refusal for a sealed generation this build no longer reads.
 pub fn superseded_sealed_generation_revision(revision: u32) -> CodeIndexProductionErrorV1 {

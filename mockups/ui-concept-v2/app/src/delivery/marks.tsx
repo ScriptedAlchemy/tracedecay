@@ -37,7 +37,7 @@ export function HonestMark(props: { id: HonestInbox }) {
 
 export function HonestLegend() {
   return (
-    <div className="dl-filters" aria-label="Honest inbox states">
+    <div className="dl-filters" aria-label="Inbox state legend">
       {HONEST_INBOX.map((h) => (
         <div key={h.id} className="dl-stat">
           <span>
