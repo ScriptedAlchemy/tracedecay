@@ -61,7 +61,8 @@ use tracedecay_code_index::{
         CodeIndexGenerationScopeV1, CodeIndexInterruptionV1, CodeIndexPreparationPort,
         CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
         CodeIndexPublishedGenerationV1, CodeIndexSealedGenerationV1, CodeIndexSealedPublicationV1,
-        SealedGenerationContentExtentV1, SealedGenerationContentPackV1,
+        MAX_SEALED_GENERATION_CONTENT_PACKS_V1, SealedGenerationContentExtentV1,
+        SealedGenerationContentPackV1, SealedGenerationContentRosterV1,
         SealedGenerationPackLayoutV1, SealedGenerationPackReadFactoryV1,
         SealedGenerationPackReadPassV1, SealedGenerationSegmentIdentityV1,
         SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1, SealedSegmentReaderV1,
@@ -75,7 +76,9 @@ use crate::code_graph_seat::CodeGraphBuildAdmissionV1;
 
 #[path = "publication_store/pack_read_pass.rs"]
 mod pack_read_pass;
-use pack_read_pass::{GenerationPackReadPassV1, PackReadOpenAttemptsV1};
+use pack_read_pass::{
+    GenerationPackReadPassV1, MAX_PACK_READ_PASS_HANDLES_V1, PackReadOpenAttemptsV1,
+};
 
 #[cfg(all(test, unix))]
 #[path = "tests/staged_segment_reads.rs"]
@@ -710,17 +713,17 @@ struct GenerationReadAuthorityV1 {
     pointer_memo: Arc<Mutex<Option<PublicationPointerMemoV1>>>,
 }
 
-fn pack_read_workspace_bytes(root: &Path, digest_bytes: usize) -> usize {
+fn pack_read_workspace_bytes(root: &Path, packs: usize, digest_bytes: usize) -> usize {
     let path_bytes = root
         .as_os_str()
         .len()
         .saturating_add(1 + "segment-".len() + 64 + ".json".len());
-    // Two retained paths on every platform and cold-open pathname/string
-    // temporaries can coexist. Windows identity checks also encode one path
-    // as UTF-16; PathBuf growth may double its existing allocation.
+    // Every retained pack path coexists with cold-open pathname/string
+    // temporaries. Windows identity checks also encode one path as UTF-16;
+    // PathBuf growth may double its existing allocation.
     size_of::<RetainedPackReadPassV1>()
-        .saturating_add(size_of::<SealedGenerationSegmentIdentityV1>().saturating_mul(2))
-        .saturating_add(path_bytes.saturating_mul(8))
+        .saturating_add(size_of::<SealedGenerationSegmentIdentityV1>().saturating_mul(packs))
+        .saturating_add(path_bytes.saturating_mul(packs.saturating_mul(4)))
         .saturating_add(digest_bytes.saturating_mul(4))
 }
 
@@ -759,25 +762,16 @@ impl GenerationReadAuthorityV1 {
                 CodeIndexInterruptionV1::Cancelled,
             ));
         }
-        let content = layout.content_pack();
-        let evidence = layout.evidence_pack();
+        let identities = layout.pack_identities();
         let mut memory = PreparedPackMemoryV1::new(operation)?;
         let workspace = pack_read_workspace_bytes(
             &self.segments_root,
-            content
-                .digest
-                .as_str()
-                .len()
-                .saturating_add(evidence.digest.as_str().len()),
+            identities.len(),
+            identities.iter().fold(0_usize, |bytes, identity| {
+                bytes.saturating_add(identity.digest.as_str().len())
+            }),
         );
         memory.admit(workspace)?;
-        let identities = [
-            SealedGenerationSegmentIdentityV1 {
-                digest: content.digest.clone(),
-                size_bytes: content.size_bytes,
-            },
-            evidence.clone(),
-        ];
         memory.admit(workspace.saturating_add(
             GenerationPackReadPassV1::immutable_workspace_bytes(
                 &self.segments_root,
@@ -808,7 +802,7 @@ struct DaemonCodeIndexPreparationFilesV1 {
     logical: StagedContentV1,
     evidence: TemporaryPayloadPackV1,
     segments: StagedGenerationSegmentsV1,
-    content_pack: Option<SealedGenerationContentPackV1>,
+    content_packs: Option<SealedGenerationContentRosterV1>,
     evidence_identity: Option<SealedGenerationSegmentIdentityV1>,
     segment_read_open_attempts: PackReadOpenAttemptsV1,
     // One changed sealed pathname invalidates the entire transaction. Retrying
@@ -864,9 +858,9 @@ impl DaemonCodeIndexPreparationFilesV1 {
             .saturating_add(authenticated)
             .saturating_add(self.logical.index_bytes(None))
             .saturating_add(
-                self.content_pack
+                self.content_packs
                     .as_ref()
-                    .map_or(0, SealedGenerationContentPackV1::retained_bytes),
+                    .map_or(0, SealedGenerationContentRosterV1::retained_bytes),
             )
             .saturating_add(
                 self.evidence_identity
@@ -890,12 +884,17 @@ impl DaemonCodeIndexPreparationFilesV1 {
     }
 
     fn physical_identities(&self) -> Vec<SealedGenerationSegmentIdentityV1> {
-        let mut identities = Vec::with_capacity(2);
-        if let Some(pack) = &self.content_pack {
-            identities.push(SealedGenerationSegmentIdentityV1 {
-                digest: pack.digest.clone(),
-                size_bytes: pack.size_bytes,
-            });
+        let mut identities = Vec::new();
+        if let Some(roster) = &self.content_packs {
+            identities.extend(
+                roster
+                    .packs
+                    .iter()
+                    .map(|pack| SealedGenerationSegmentIdentityV1 {
+                        digest: pack.digest.clone(),
+                        size_bytes: pack.size_bytes,
+                    }),
+            );
         }
         if let Some(pack) = &self.evidence_identity {
             identities.push(pack.clone());
@@ -925,9 +924,9 @@ impl DaemonCodeIndexPreparationFilesV1 {
             } => (digest, size_bytes, offset, length),
         };
         let expected = self
-            .content_pack
+            .content_packs
             .as_ref()
-            .filter(|pack| &pack.digest == digest)
+            .and_then(|roster| roster.packs.iter().find(|pack| &pack.digest == digest))
             .map(|pack| pack.size_bytes)
             .or_else(|| {
                 self.evidence_identity
@@ -963,16 +962,25 @@ impl DaemonCodeIndexPreparationFilesV1 {
         self.require_physical_request(request)?;
         if self.payload_reads.is_none() {
             let digest_bytes = self
-                .content_pack
+                .content_packs
                 .as_ref()
-                .map_or(0, |pack| pack.digest.as_str().len())
+                .map_or(0, |roster| {
+                    roster.packs.iter().fold(0_usize, |bytes, pack| {
+                        bytes.saturating_add(pack.digest.as_str().len())
+                    })
+                })
                 .saturating_add(
                     self.evidence_identity
                         .as_ref()
                         .map_or(0, |pack| pack.digest.as_str().len()),
                 );
-            let workspace = pack_read_workspace_bytes(root, digest_bytes).max(
-                pack_read_workspace_bytes(self.directory.path(), digest_bytes),
+            let packs = self
+                .content_packs
+                .as_ref()
+                .map_or(0, |roster| roster.packs.len())
+                .saturating_add(1);
+            let workspace = pack_read_workspace_bytes(root, packs, digest_bytes).max(
+                pack_read_workspace_bytes(self.directory.path(), packs, digest_bytes),
             );
             self.admit(workspace)?;
             let identities = self.physical_identities();
@@ -1454,24 +1462,15 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
         {
             return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
         }
-        let content = manifest.layout.content_pack();
-        let evidence = manifest.layout.evidence_pack();
+        let identities = manifest.layout.pack_identities();
         let workspace = pack_read_workspace_bytes(
             &self.segments_root,
-            content
-                .digest
-                .as_str()
-                .len()
-                .saturating_add(evidence.digest.as_str().len()),
+            identities.len(),
+            identities.iter().fold(0_usize, |bytes, identity| {
+                bytes.saturating_add(identity.digest.as_str().len())
+            }),
         );
         files.admit(workspace)?;
-        let identities = [
-            SealedGenerationSegmentIdentityV1 {
-                digest: content.digest.clone(),
-                size_bytes: content.size_bytes,
-            },
-            evidence.clone(),
-        ];
         files.admit(
             workspace.saturating_add(
                 GenerationPackReadPassV1::immutable_workspace_bytes(
@@ -1494,6 +1493,17 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
             files.segment_reads_poisoned = true;
             DaemonCodeIndexPublicationStoreV1::corruption(error)
         })?;
+        // The parent's packs were content-addressed when the parent committed
+        // and are pinned here by inode. A successor that inherits them names
+        // these same inodes, so commit rechecks identity rather than
+        // re-hashing the whole generation again.
+        #[cfg(unix)]
+        for (path, metadata) in read.admitted_identities() {
+            files
+                .segments
+                .authenticated_segments
+                .insert(path.to_path_buf(), metadata.clone());
+        }
         files.parent = Some(BoundParentPacksV1 {
             manifest: Arc::clone(manifest),
             read,
@@ -1524,7 +1534,7 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                 "staged sealed segment identity was invalidated",
             ));
         }
-        if files.manifest_identity.is_some() || files.content_pack.is_some() {
+        if files.manifest_identity.is_some() || files.content_packs.is_some() {
             return Err(DaemonCodeIndexPublicationStoreV1::unavailable(
                 "code-index preparation already entered commit",
             ));
@@ -1679,12 +1689,12 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
     fn finalize_content_pack(
         &mut self,
         identities: &[SealedGenerationSegmentIdentityV1],
-    ) -> Result<SealedGenerationContentPackV1, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<SealedGenerationContentRosterV1, CodeIndexPublicationStoreErrorV1> {
         let mut state = self.state.lock().map_err(|_| Self::closed())?;
         let DaemonCodeIndexPreparationStateV1::Open(files) = &mut *state else {
             return Err(Self::closed());
         };
-        if files.content_pack.is_some()
+        if files.content_packs.is_some()
             || files.evidence_identity.is_none()
             || files.segment_reads_poisoned
             || files.logical.poisoned
@@ -1693,13 +1703,7 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                 "content pack finalization is not admitted",
             ));
         }
-        let mut total = 0_u64;
         let mut previous = None;
-        let mut descriptor_bytes = size_of::<SealedGenerationContentPackV1>().saturating_add(
-            identities
-                .len()
-                .saturating_mul(size_of::<SealedGenerationContentExtentV1>()),
-        );
         for identity in identities {
             if previous.is_some_and(|prior: &ManifestDigest| prior >= &identity.digest) {
                 return Err(DaemonCodeIndexPublicationStoreV1::corruption(
@@ -1707,13 +1711,87 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                 ));
             }
             previous = Some(&identity.digest);
-            total = total.checked_add(identity.size_bytes).ok_or_else(|| {
-                DaemonCodeIndexPublicationStoreV1::unavailable("content pack length overflowed")
-            })?;
-            descriptor_bytes = descriptor_bytes.saturating_add(identity.digest.as_str().len());
         }
-        let scratch_bytes = usize::try_from(total.min(DURABLE_GENERATION_IO_CHUNK_BYTES_V1 as u64))
-            .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        // An extent the bound parent already holds in an immutable pack is
+        // inherited by reference. Only the rest is written to the new pack,
+        // so a one-file successor writes its own bytes alone.
+        let mut inherited_packs: BTreeSet<usize> = BTreeSet::new();
+        let mut written: Vec<SealedGenerationSegmentIdentityV1> = Vec::new();
+        for identity in identities {
+            let located = files.parent.as_ref().and_then(|parent| {
+                parent
+                    .manifest
+                    .layout
+                    .content_packs()
+                    .packs
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, pack)| {
+                        let position = pack
+                            .extents
+                            .binary_search_by(|extent| extent.digest.cmp(&identity.digest))
+                            .ok()?;
+                        (pack.extents[position].size_bytes == identity.size_bytes).then_some(index)
+                    })
+            });
+            match located {
+                Some(index) => {
+                    inherited_packs.insert(index);
+                }
+                None => written.push(identity.clone()),
+            }
+        }
+        // Keep the pack count bounded: a long run of small edits would
+        // otherwise reference one more pack per edit and every read pass
+        // would pay one endpoint-authorized open per pack. Once the parent's
+        // packs plus this new one would exceed the bound, fold the parent's
+        // lowest-ordered packs into the new pack so the chain restarts here.
+        let overflow = inherited_packs
+            .len()
+            .saturating_add(1)
+            .saturating_sub(MAX_SEALED_GENERATION_CONTENT_PACKS_V1);
+        for index in inherited_packs
+            .iter()
+            .copied()
+            .take(overflow)
+            .collect::<Vec<_>>()
+        {
+            inherited_packs.remove(&index);
+            let parent = files
+                .parent
+                .as_ref()
+                .and_then(|parent| parent.manifest.layout.content_packs().packs.get(index))
+                .ok_or_else(|| {
+                    DaemonCodeIndexPublicationStoreV1::corruption(
+                        "folded content pack is absent from the bound parent",
+                    )
+                })?;
+            written.extend(
+                parent
+                    .extents
+                    .iter()
+                    .map(|extent| SealedGenerationSegmentIdentityV1 {
+                        digest: extent.digest.clone(),
+                        size_bytes: extent.size_bytes,
+                    }),
+            );
+        }
+        written.sort_unstable_by(|left, right| left.digest.cmp(&right.digest));
+        let written_bytes = written.iter().fold(0_u64, |total, identity| {
+            total.saturating_add(identity.size_bytes)
+        });
+        let descriptor_bytes = size_of::<SealedGenerationContentRosterV1>()
+            .saturating_add(
+                size_of::<SealedGenerationContentPackV1>()
+                    .saturating_mul(inherited_packs.len().saturating_add(2)),
+            )
+            .saturating_add(
+                size_of::<SealedGenerationContentExtentV1>()
+                    .saturating_mul(identities.len().saturating_add(written.len())),
+            );
+        let scratch_bytes =
+            usize::try_from(written_bytes.min(DURABLE_GENERATION_IO_CHUNK_BYTES_V1 as u64))
+                .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
         files.admit(
             descriptor_bytes
                 .saturating_mul(2)
@@ -1724,9 +1802,9 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
         let mut content =
             TemporaryPayloadPackV1::create(files.directory.path().join("content-pack.tmp"))?;
         let mut scratch = Vec::with_capacity(scratch_bytes);
-        let mut extents = Vec::with_capacity(identities.len());
+        let mut extents = Vec::with_capacity(written.len());
         let mut offset = 0_u64;
-        for identity in identities {
+        for identity in &written {
             DaemonCodeIndexPublicationStoreV1::publication_checkpoint(
                 self.shutdown_signal.as_deref(),
                 self.capture_control.as_ref(),
@@ -1782,23 +1860,23 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                 DaemonCodeIndexPublicationStoreV1::unavailable("content pack offset overflowed")
             })?;
         }
-        let descriptor = SealedGenerationContentPackV1 {
+        let new_pack = SealedGenerationContentPackV1 {
             digest: content.digest()?,
-            size_bytes: total,
+            size_bytes: written_bytes,
             extents,
         };
-        descriptor
-            .validate(identities)
+        new_pack
+            .validate(&written)
             .map_err(DaemonCodeIndexPublicationStoreV1::corruption)?;
         let created = content.commit(
             &self.segments_root,
             files.directory.path(),
-            &descriptor.digest,
-            descriptor.size_bytes,
+            &new_pack.digest,
+            new_pack.size_bytes,
             0,
         )?;
         if created {
-            let suffix = sha256_hex_suffix(descriptor.digest.as_str()).ok_or_else(|| {
+            let suffix = sha256_hex_suffix(new_pack.digest.as_str()).ok_or_else(|| {
                 DaemonCodeIndexPublicationStoreV1::corruption("content pack digest is not sha256")
             })?;
             let name = format!("segment-{suffix}.json");
@@ -1812,17 +1890,52 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
         if let Some((path, identity)) = content.authenticated.take() {
             files.segments.authenticated_segments.insert(path, identity);
         }
+        // An inherited pack is the parent's descriptor verbatim: the same
+        // physical identity, size, and complete extent list. Its digest stays
+        // reproducible because the proof re-hashes every extent the parent
+        // proved, and the extents this generation no longer addresses are
+        // inert: nothing resolves them, so they pin only their own bytes.
+        let parent_packs = files
+            .parent
+            .as_ref()
+            .map(|parent| &parent.manifest.layout.content_packs().packs);
+        let mut packs = Vec::with_capacity(inherited_packs.len().saturating_add(1));
+        for index in &inherited_packs {
+            let parent = parent_packs
+                .and_then(|packs| packs.get(*index))
+                .ok_or_else(|| {
+                    DaemonCodeIndexPublicationStoreV1::corruption(
+                        "inherited content pack is absent from the bound parent",
+                    )
+                })?;
+            packs.push(parent.clone());
+        }
+        packs.push(new_pack);
+        packs.sort_unstable_by(|left, right| left.digest.cmp(&right.digest));
+        let descriptor = SealedGenerationContentRosterV1 { packs };
+        descriptor
+            .validate(identities)
+            .map_err(DaemonCodeIndexPublicationStoreV1::corruption)?;
         // A prior evidence-only pass has at most one role. Replace it once
         // before the full finalized pass; never reopen per logical extent.
         files.payload_reads = None;
-        files.content_pack = Some(descriptor.clone());
-        files.referenced_segment_bytes = descriptor.size_bytes.saturating_add(
-            files
-                .evidence_identity
-                .as_ref()
-                .filter(|pack| pack.digest != descriptor.digest)
-                .map_or(0, |pack| pack.size_bytes),
-        );
+        files.content_packs = Some(descriptor.clone());
+        files.referenced_segment_bytes = descriptor
+            .packs
+            .iter()
+            .fold(0_u64, |bytes, pack| bytes.saturating_add(pack.size_bytes))
+            .saturating_add(
+                files
+                    .evidence_identity
+                    .as_ref()
+                    .filter(|pack| {
+                        !descriptor
+                            .packs
+                            .iter()
+                            .any(|content| content.digest == pack.digest)
+                    })
+                    .map_or(0, |pack| pack.size_bytes),
+            );
         Ok(descriptor)
     }
 
@@ -3819,7 +3932,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // without a second manifest parse or a per-logical-file open.
         let _lifetime_lock = lifetime_lock;
         let mut memory = PreparedPackMemoryV1::new(&operation)?;
-        let mut pinned: [Option<(ManifestDigest, GenerationPackReadPassV1)>; 2] = [None, None];
+        let mut pinned: Vec<(ManifestDigest, GenerationPackReadPassV1)> = Vec::new();
         let mut open_attempts = PackReadOpenAttemptsV1::default();
         match CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
             &manifest,
@@ -3832,19 +3945,18 @@ impl DaemonCodeIndexPublicationStoreV1 {
                         digest, size_bytes, ..
                     } => (digest, size_bytes),
                 };
-                let index = match pinned
-                    .iter()
-                    .position(|slot| slot.as_ref().is_some_and(|(known, _)| known == digest))
-                {
+                let index = match pinned.iter().position(|(known, _)| known == digest) {
                     Some(index) => index,
                     None => {
-                        let index = pinned.iter().position(Option::is_none).ok_or_else(|| {
-                            CodeIndexProductionErrorV1::Contract(
-                                "sealed decode requested more than two physical packs".to_owned(),
-                            )
-                        })?;
+                        if pinned.len() == MAX_PACK_READ_PASS_HANDLES_V1 {
+                            return Err(CodeIndexProductionErrorV1::Contract(
+                                "sealed decode requested more physical packs than one pass admits"
+                                    .to_owned(),
+                            ));
+                        }
                         let workspace = pack_read_workspace_bytes(
                             &self.segments_root,
+                            1,
                             digest.as_str().len().saturating_mul(2),
                         );
                         memory.admit(workspace.saturating_mul(2))?;
@@ -3869,13 +3981,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
                             None,
                             &mut open_attempts,
                         )?;
-                        pinned[index] = Some((identity.digest, pass));
-                        index
+                        pinned.push((identity.digest, pass));
+                        pinned.len() - 1
                     }
                 };
-                let (_, pass) = pinned[index].as_mut().ok_or_else(|| {
-                    CodeIndexProductionErrorV1::Contract("sealed decode pack is absent".to_owned())
-                })?;
+                let (_, pass) = &mut pinned[index];
                 pass.read(request, buffer)
             },
             &mut |needed| {
@@ -4945,7 +5055,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                     evidence,
                     logical,
                     parent: None,
-                    content_pack: None,
+                    content_packs: None,
                     evidence_identity: None,
                     payload_reads: None,
                     segment_read_open_attempts: PackReadOpenAttemptsV1::default(),
@@ -5421,25 +5531,21 @@ impl DaemonCodeIndexPublicationStoreV1 {
         publication: &CodeIndexSealedPublicationV1,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         let layout = publication.pack_layout();
-        if files.content_pack.as_ref() != Some(layout.content_pack())
+        if files.content_packs.as_ref() != Some(layout.content_packs())
             || files.evidence_identity.as_ref() != Some(layout.evidence_pack())
         {
             return Err(Self::corruption(
                 "prepared payload packs do not match this generation's authenticated layout",
             ));
         }
-        let content = layout.content_pack();
-        let evidence = layout.evidence_pack();
-        let mut verified: Option<(&ManifestDigest, u64)> = None;
-        for (digest, size_bytes) in [
-            (&content.digest, content.size_bytes),
-            (&evidence.digest, evidence.size_bytes),
-        ] {
+        let mut verified: Option<(ManifestDigest, u64)> = None;
+        for identity in layout.pack_identities() {
+            let SealedGenerationSegmentIdentityV1 { digest, size_bytes } = identity;
             self.seal_checkpoint()?;
-            if let Some((prior_digest, prior_size)) = verified
-                && prior_digest == digest
+            if let Some((prior_digest, prior_size)) = &verified
+                && prior_digest == &digest
             {
-                if prior_size != size_bytes {
+                if *prior_size != size_bytes {
                     return Err(Self::corruption(
                         "prepared pack carries conflicting extents",
                     ));

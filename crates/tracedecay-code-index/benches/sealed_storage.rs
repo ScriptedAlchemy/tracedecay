@@ -47,10 +47,10 @@ use tracedecay_code_index::{
         CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
         CodeIndexSealedGenerationV1, CodeIndexSealedPublicationV1, MemoryCodeIndexPreparationV1,
         MemorySealedPublicationStoreV1, SealedGenerationContentPackV1,
-        SealedGenerationPackReadFactoryV1, SealedGenerationPackReadPassV1,
-        SealedGenerationSegmentIdentityV1, SealedGenerationSegmentPublicationV1,
-        SealedSegmentReaderV1, SharedDecodedContentPoolV1, VerifiedSealedLexicalPageReadV1,
-        VerifiedSealedLexicalPageSourceV1,
+        SealedGenerationContentRosterV1, SealedGenerationPackReadFactoryV1,
+        SealedGenerationPackReadPassV1, SealedGenerationSegmentIdentityV1,
+        SealedGenerationSegmentPublicationV1, SealedSegmentReaderV1, SharedDecodedContentPoolV1,
+        VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
     },
 };
 use tracedecay_domain::{
@@ -614,7 +614,7 @@ impl CodeIndexPreparationPort for ObservedPreparationV1 {
     fn finalize_content_pack(
         &mut self,
         segments: &[SealedGenerationSegmentIdentityV1],
-    ) -> Result<SealedGenerationContentPackV1, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<SealedGenerationContentRosterV1, CodeIndexPublicationStoreErrorV1> {
         self.inner.finalize_content_pack(segments)
     }
 

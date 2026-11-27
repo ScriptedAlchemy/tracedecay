@@ -52,21 +52,20 @@ use super::super::publication_store::{
 use super::{
     EIGHT_DAYS_SECS, GitFixture, RETAINED_REVISION_0, atomic_replace_fixture_pointer,
     execute_proof_bound_scope_retention, persist_fixture_pointer, published,
-    remove_historical_pointer_entries, retention_generations, scheduler, seeded_scope,
-    test_project_id, unix_now_secs, with_untouched_fillers,
+    remove_historical_pointer_entries, replace_scheduler_chunker_revision, retention_generations,
+    scheduler, seeded_scope, test_project_id, unix_now_secs, with_untouched_fillers,
 };
 use crate::code_index_scheduler::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
     CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
 };
-#[cfg(target_os = "linux")]
-use tracedecay_code_index::production::SealedGenerationPackLayoutV1;
 use tracedecay_code_index::production::{
     CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1,
     CodeIndexInterruptionV1, CodeIndexPreparationPort, CodeIndexProductionErrorV1,
     CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-    SEALED_GENERATION_FORMAT_REVISION_V1, SealedGenerationSegmentReadV1,
-    SharedDecodedContentPoolV1, UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
+    DAEMON_CODE_INDEX_CHUNKER_REVISION, SEALED_GENERATION_FORMAT_REVISION_V1,
+    SealedGenerationPackLayoutV1, SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
+    UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
 };
 
 struct PublicationFixture {
@@ -697,17 +696,9 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
         .publication
         .seal_encoded_segment_bytes
         .load(std::sync::atomic::Ordering::Relaxed);
-    let second_existing_segment_bytes_read = scheduler
-        .publication
-        .seal_existing_segment_bytes_read
-        .load(std::sync::atomic::Ordering::Relaxed);
     assert!(
         second_encoded_segment_bytes.saturating_mul(4) < first_encoded_segment_bytes,
         "one-file increment encoded {second_encoded_segment_bytes} segment bytes after the cold generation encoded {first_encoded_segment_bytes}"
-    );
-    assert!(
-        second_existing_segment_bytes_read > 0,
-        "a self-contained successor copies retained logical extents from its bound parent"
     );
     let second_pointer: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&pointer_path).expect("read second pointer"))
@@ -771,7 +762,24 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
     let first_components = component_sizes(&first_manifest_path);
     let second_components = component_sizes(&second_manifest_path);
     assert_eq!(first_components.len(), 2);
-    assert_eq!(second_components.len(), 2);
+    assert_eq!(second_components.len(), 3);
+    let first_content_pack = first_manifest["generation"]["content_packs"]["packs"][0]["digest"]
+        .as_str()
+        .expect("first content pack digest")
+        .to_owned();
+    assert!(
+        second_components.contains_key(&first_content_pack),
+        "the successor must inherit its parent's content pack by reference"
+    );
+    let second_new_pack_bytes = second_components
+        .iter()
+        .filter(|(digest, _)| !first_components.contains_key(*digest))
+        .map(|(_, size)| *size)
+        .sum::<u64>();
+    assert!(
+        second_new_pack_bytes.saturating_mul(8) < first_components[&first_content_pack],
+        "the successor's new packs must hold only the edited bytes, not the generation"
+    );
     let first_evidence_pack = first_manifest["generation"]["generation_evidence"]["segment_digest"]
         .as_str()
         .expect("first evidence pack digest")
@@ -785,20 +793,14 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
     let second_generation_growth = std::fs::metadata(&second_manifest_path)
         .expect("second manifest metadata")
         .len()
-        .saturating_add(
-            second_components
-                .iter()
-                .filter(|(digest, _)| !first_components.contains_key(*digest))
-                .map(|(_, size)| *size)
-                .sum::<u64>(),
-        );
+        .saturating_add(second_new_pack_bytes);
     let full_second_bytes = std::fs::metadata(&second_manifest_path)
         .expect("second manifest metadata")
         .len()
         .saturating_add(second_components.values().sum::<u64>());
-    assert_eq!(
-        second_generation_growth, full_second_bytes,
-        "both changed packs are self-contained; sparse logical encoding still rewrites the full physical generation"
+    assert!(
+        second_generation_growth.saturating_mul(4) < full_second_bytes,
+        "a one-file successor must grow the store by its changed bytes alone"
     );
     let segment_sizes = std::fs::read_dir(&segment_root)
         .expect("list content-addressed segments")
@@ -987,7 +989,7 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
             .expect("read reclaimed segment directory")
             .count(),
         second_components.len(),
-        "only segments referenced by the active manifest may remain"
+        "only segments referenced by the active manifest may remain, including the inherited pack"
     );
 }
 
@@ -1242,10 +1244,14 @@ fn multi_page_evidence_uses_one_durable_pack_and_survives_restart() {
             .expect("evidence page descriptors");
         assert!(pages.len() > 1, "the production fixture must span pages");
         let segments_root = store.path().join("code-generation-segments-v1");
-        for descriptor in [
-            &manifest["generation"]["content_pack"]["digest"],
-            &manifest["generation"]["generation_evidence"]["segment_digest"],
-        ] {
+        let mut descriptors = manifest["generation"]["content_packs"]["packs"]
+            .as_array()
+            .expect("content pack roster")
+            .iter()
+            .map(|pack| &pack["digest"])
+            .collect::<Vec<_>>();
+        descriptors.push(&manifest["generation"]["generation_evidence"]["segment_digest"]);
+        for descriptor in descriptors {
             let digest = sha256_hex_suffix(descriptor.as_str().expect("pack digest"))
                 .expect("tagged pack digest");
             assert!(
@@ -1797,10 +1803,27 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
     );
 
     std::fs::remove_file(&colliding_pack).expect("remove injected collision");
+    // Re-staging this generation writes its own manifest, whose state digest
+    // names its immutable path. Learn that path from a scratch publication so
+    // the collision lands on the exact file the real commit will address.
+    let scratch_store = TempDir::new().expect("scratch publication store root");
+    let restaged_manifest_file = {
+        let mut scratch = opened_publication(&fixture, scratch_store.path());
+        publish_generation(&mut scratch, &generation, None).expect("scratch re-publication");
+        let pointer: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(scratch_store.path().join("active-code-generation-v1.json"))
+                .expect("read scratch pointer"),
+        )
+        .expect("decode scratch pointer");
+        pointer["generation_file"]
+            .as_str()
+            .expect("scratch generation manifest path")
+            .to_owned()
+    };
     let colliding_manifest = failed_store
         .path()
         .join("code-generations-v1")
-        .join(&source_generation_file);
+        .join(&restaged_manifest_file);
     std::fs::write(&colliding_manifest, b"wrong immutable generation manifest")
         .expect("seed corrupt immutable generation target");
     let error = publish_generation(&mut publication, &generation, None)
@@ -2090,6 +2113,297 @@ fn code_generation_retention_keeps_only_the_active_and_marked_generations() {
             "only the active generation and the marked sources survive collection"
         );
     }
+}
+
+#[test]
+fn a_one_file_successor_writes_only_its_changed_bytes_and_inherits_the_rest() {
+    let unchanged = (0..192).fold(String::new(), |mut source, index| {
+        writeln!(
+            source,
+            "// stable unchanged body padding xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        )
+        .expect("write generated fixture padding");
+        writeln!(source, "pub fn unchanged_{index}() -> usize {{ {index} }}")
+            .expect("write generated fixture source");
+        source
+    });
+    let fixture = GitFixture::new(&[
+        ("src/large.rs", unchanged.as_str()),
+        ("src/edited.rs", "pub fn edited() -> usize { 1 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let manifest_path = |generation: &CodeGenerationId| -> PathBuf {
+        let pointer: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(store.path().join("active-code-generation-v1.json"))
+                .expect("read active pointer"),
+        )
+        .expect("decode active pointer");
+        assert_eq!(
+            pointer["generation_id"].as_str(),
+            Some(generation.as_str()),
+            "the active pointer must name the generation under test"
+        );
+        store
+            .path()
+            .join("code-generations-v1")
+            .join(pointer["generation_file"].as_str().expect("manifest file"))
+    };
+    let layout = |generation: &CodeGenerationId| {
+        SealedGenerationPackLayoutV1::open(
+            &std::fs::read(manifest_path(generation)).expect("read manifest"),
+        )
+        .expect("parse the canonical pack layout")
+    };
+    let parent = published(
+        scheduler
+            .reconcile_now()
+            .expect("publish the parent generation"),
+    )
+    .generation_id;
+    assert_eq!(
+        layout(&parent).content_packs().packs.len(),
+        1,
+        "a cold generation writes exactly one content pack"
+    );
+    let parent_pack = layout(&parent).content_packs().packs[0].clone();
+
+    fixture.edit("src/edited.rs", "pub fn edited() -> usize { 2 }\n");
+    scheduler.notify_hook_paths([PathBuf::from("src/edited.rs")]);
+    let successor = published(
+        scheduler
+            .reconcile_now()
+            .expect("publish the one-file successor"),
+    )
+    .generation_id;
+    assert_ne!(parent, successor, "the edit must publish a new generation");
+    let successor_layout = layout(&successor);
+    let roster = successor_layout.content_packs();
+    assert_eq!(
+        roster.packs.len(),
+        2,
+        "the successor addresses its parent's pack and one new pack"
+    );
+    let inherited = roster
+        .packs
+        .iter()
+        .find(|pack| pack.digest == parent_pack.digest)
+        .expect("the successor inherits its parent's content pack");
+    assert_eq!(
+        inherited.size_bytes, parent_pack.size_bytes,
+        "an inherited pack keeps its parent's physical identity"
+    );
+    let written = roster
+        .packs
+        .iter()
+        .find(|pack| pack.digest != parent_pack.digest)
+        .expect("the successor writes one new pack");
+    assert!(
+        written.size_bytes.saturating_mul(4) < parent_pack.size_bytes,
+        "the new pack holds only the changed bytes and pages ({} bytes) beside a {}-byte parent",
+        written.size_bytes,
+        parent_pack.size_bytes
+    );
+
+    // Every carried file still resolves, through the successor's own
+    // authenticated map, into the inherited parent pack at the parent's
+    // address; only the edited file resolves into the new pack.
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(manifest_path(&successor)).expect("read successor manifest"),
+    )
+    .expect("decode successor manifest");
+    let segments = manifest["generation"]["file_segments"]
+        .as_array()
+        .expect("successor file segments");
+    assert_eq!(segments.len(), 2);
+    let mut resolved_into_parent = 0;
+    let mut resolved_into_new = 0;
+    for segment in segments {
+        let digest = ManifestDigest::new(
+            segment["segment_digest"]
+                .as_str()
+                .expect("segment digest")
+                .to_owned(),
+        )
+        .expect("segment digest identity");
+        let size_bytes = segment["segment_size_bytes"]
+            .as_u64()
+            .expect("segment size");
+        let resolved = successor_layout
+            .resolve(SealedGenerationSegmentReadV1::Whole {
+                digest: &digest,
+                size_bytes,
+            })
+            .expect("resolve the logical segment through the successor");
+        let SealedGenerationSegmentReadV1::Range {
+            digest: physical, ..
+        } = resolved
+        else {
+            panic!("a content extent must resolve into a physical pack range")
+        };
+        if physical == &parent_pack.digest {
+            resolved_into_parent += 1;
+        } else {
+            assert_eq!(
+                physical, &written.digest,
+                "a non-inherited extent must resolve into the new pack"
+            );
+            resolved_into_new += 1;
+        }
+    }
+    assert_eq!(
+        (resolved_into_parent, resolved_into_new),
+        (1, 1),
+        "the unchanged file resolves into the inherited pack and the edit into the new pack"
+    );
+}
+
+#[test]
+fn retention_reclaims_a_superseded_pack_only_once_no_live_successor_needs_it() {
+    let fixture = GitFixture::new(&[
+        ("src/carried.rs", "pub fn carried() -> usize { 0 }\n"),
+        ("src/edited.rs", "pub fn edited() -> usize { 0 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    // Read the active generation's pack roster straight from its canonical
+    // manifest, the same bytes a restart decodes.
+    let active_roster = || {
+        let pointer: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(store.path().join("active-code-generation-v1.json"))
+                .expect("read active pointer"),
+        )
+        .expect("decode active pointer");
+        let manifest = std::fs::read(
+            store
+                .path()
+                .join("code-generations-v1")
+                .join(pointer["generation_file"].as_str().expect("manifest file")),
+        )
+        .expect("read active manifest");
+        SealedGenerationPackLayoutV1::open(&manifest)
+            .expect("parse the canonical pack layout")
+            .content_packs()
+            .packs
+            .iter()
+            .map(|pack| pack.digest.clone())
+            .collect::<BTreeSet<_>>()
+    };
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("publish the parent generation"),
+    );
+    let parent_roster = active_roster();
+    assert_eq!(parent_roster.len(), 1, "a cold generation writes one pack");
+    let parent_pack = parent_roster
+        .iter()
+        .next()
+        .cloned()
+        .expect("the parent's single pack");
+    let segment_root = store.path().join("code-generation-segments-v1");
+    let pack_path = |digest: &ManifestDigest| {
+        segment_root.join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(digest.as_str()).expect("tagged pack digest")
+        ))
+    };
+    assert!(pack_path(&parent_pack).exists());
+
+    fixture.edit("src/edited.rs", "pub fn edited() -> usize { 1 }\n");
+    scheduler.notify_hook_paths([PathBuf::from("src/edited.rs")]);
+    let successor = published(
+        scheduler
+            .reconcile_now()
+            .expect("publish the one-file successor"),
+    )
+    .generation_id;
+    let successor_roster = active_roster();
+    assert!(
+        successor_roster.contains(&parent_pack),
+        "the live successor still needs its parent's pack: {successor_roster:?}"
+    );
+
+    // The parent is superseded, but its pack is still addressed by the live
+    // successor: the manifest may retire while the pack must survive.
+    let report = run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(10_000),
+        None,
+    )
+    .expect("apply retention over the superseded parent");
+    assert_eq!(report.deleted_generations.len(), 1);
+    assert!(
+        pack_path(&parent_pack).exists(),
+        "a pack addressed by the live successor must not be reclaimed"
+    );
+    assert!(
+        scheduler
+            .publication
+            .load_generation(&successor)
+            .expect("reload the live successor")
+            .is_some(),
+        "the live successor must remain readable after its parent retired"
+    );
+
+    // A chunker revision change is a rebuild trigger, so the next generation
+    // is built cold: every extent is written into one new pack and nothing
+    // is inherited. Once it is the only live generation the parent's pack has
+    // no remaining reader and is swept.
+    replace_scheduler_chunker_revision(
+        &mut scheduler,
+        &format!("{DAEMON_CODE_INDEX_CHUNKER_REVISION}-release-parent-pack"),
+    );
+    let released = published(
+        scheduler
+            .reconcile_now()
+            .expect("publish the cold rebuild that releases the parent's pack"),
+    )
+    .generation_id;
+    let released_roster = active_roster();
+    assert_eq!(
+        released_roster.len(),
+        1,
+        "a cold rebuild writes one pack and inherits none: {released_roster:?}"
+    );
+    assert!(
+        !released_roster.contains(&parent_pack),
+        "the cold rebuild must not address the parent's pack"
+    );
+    let report = run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(20_000),
+        None,
+    )
+    .expect("apply retention after the successor was superseded");
+    assert!(
+        !report.deleted_generations.is_empty(),
+        "every superseded generation must be collectable once the parent's pack was released"
+    );
+    assert!(
+        !pack_path(&parent_pack).exists(),
+        "a pack no live generation addresses must be reclaimed"
+    );
+    assert!(
+        scheduler
+            .publication
+            .load_generation(&released)
+            .expect("reload the live cold rebuild")
+            .is_some(),
+        "the live cold rebuild must remain readable"
+    );
 }
 
 #[test]
@@ -2946,18 +3260,25 @@ fn restart_never_serves_a_corrupt_partitioned_file_segment() {
     let logical_digest = manifest["generation"]["file_segments"][0]["segment_digest"]
         .as_str()
         .expect("file segment digest");
-    let extent = manifest["generation"]["content_pack"]["extents"]
+    let (pack, extent) = manifest["generation"]["content_packs"]["packs"]
         .as_array()
-        .expect("content extent roster")
+        .expect("content pack roster")
         .iter()
-        .find(|extent| extent["digest"].as_str() == Some(logical_digest))
-        .expect("the file is covered by the canonical pack");
+        .find_map(|pack| {
+            pack["extents"]
+                .as_array()
+                .expect("content extent roster")
+                .iter()
+                .find(|extent| extent["digest"].as_str() == Some(logical_digest))
+                .map(|extent| (pack, extent))
+        })
+        .expect("the file is covered by the canonical roster");
     let offset =
         usize::try_from(extent["offset"].as_u64().expect("extent offset")).expect("offset");
     let length =
         usize::try_from(extent["size_bytes"].as_u64().expect("extent length")).expect("length");
     assert!(length > 0);
-    let segment_digest = manifest["generation"]["content_pack"]["digest"]
+    let segment_digest = pack["digest"]
         .as_str()
         .and_then(sha256_hex_suffix)
         .expect("content pack digest");
@@ -3767,7 +4088,7 @@ fn stale_pointer_commit_does_not_replace_a_changed_active_pointer() {
 
 struct ActiveSegmentDigests {
     files: BTreeSet<String>,
-    content: String,
+    content: Vec<String>,
     evidence: String,
 }
 
@@ -3796,7 +4117,12 @@ fn active_segment_digests_by_kind(scope: &Path) -> ActiveSegmentDigests {
             .iter()
             .map(|segment| digest(&segment["segment_digest"]))
             .collect(),
-        content: digest(&manifest["generation"]["content_pack"]["digest"]),
+        content: manifest["generation"]["content_packs"]["packs"]
+            .as_array()
+            .expect("content pack roster")
+            .iter()
+            .map(|pack| digest(&pack["digest"]))
+            .collect(),
         evidence: digest(&manifest["generation"]["generation_evidence"]["segment_digest"]),
     }
 }
@@ -3804,7 +4130,9 @@ fn active_segment_digests_by_kind(scope: &Path) -> ActiveSegmentDigests {
 /// Every physical payload role named by one scope's active manifest.
 fn active_segment_digests(scope: &Path) -> Vec<String> {
     let packs = active_segment_digests_by_kind(scope);
-    vec![packs.content, packs.evidence]
+    let mut all = packs.content;
+    all.push(packs.evidence);
+    all
 }
 
 fn segment_files(segments_root: &Path) -> BTreeSet<String> {
@@ -3975,12 +4303,9 @@ fn linked_worktrees_keep_logical_file_identity_with_two_pack_roles_per_generatio
         "the fixture must publish shared file segments"
     );
     assert_ne!(first.evidence, linked.evidence);
-    let expected = BTreeSet::from([
-        first.content,
-        first.evidence,
-        linked.content,
-        linked.evidence,
-    ]);
+    let mut expected = BTreeSet::from([first.evidence, linked.evidence]);
+    expected.extend(first.content);
+    expected.extend(linked.content);
     assert_eq!(
         segment_files(&segments_root),
         expected,

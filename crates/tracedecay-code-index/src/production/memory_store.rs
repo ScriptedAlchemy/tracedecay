@@ -5,7 +5,7 @@
 //! pack, and each scope's active manifest. Logical segments exist only in an
 //! unpublished preparation; committed readers resolve their packed extents.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::mem::size_of;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -18,7 +18,8 @@ use super::{
     CodeIndexAtomicPublicationPort, CodeIndexGenerationScopeV1, CodeIndexPreparationPort,
     CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
     CodeIndexSealedGenerationV1, CodeIndexSealedPublicationV1, ConstructionMemoryV1,
-    SealedGenerationContentExtentV1, SealedGenerationContentPackV1, SealedGenerationPackLayoutV1,
+    MAX_SEALED_GENERATION_CONTENT_PACKS_V1, SealedGenerationContentExtentV1,
+    SealedGenerationContentPackV1, SealedGenerationContentRosterV1, SealedGenerationPackLayoutV1,
     SealedGenerationPackReadFactoryV1, SealedGenerationSegmentIdentityV1,
     SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1, SealedSegmentReaderV1,
     SharedDecodedContentPoolV1,
@@ -188,7 +189,7 @@ struct MemoryPreparationStateV1 {
     segments: BTreeMap<ManifestDigest, Arc<[u8]>>,
     packs: BTreeMap<ManifestDigest, Arc<[u8]>>,
     parent: Option<Arc<MemoryCommittedPayloadsV1>>,
-    content_pack: Option<SealedGenerationContentPackV1>,
+    content_packs: Option<SealedGenerationContentRosterV1>,
     committed_payloads: Option<Arc<MemoryCommittedPayloadsV1>>,
     evidence: Vec<u8>,
     evidence_pages: u32,
@@ -238,7 +239,7 @@ impl MemoryPreparationStateV1 {
             segments: BTreeMap::new(),
             packs: BTreeMap::new(),
             parent: None,
-            content_pack: None,
+            content_packs: None,
             committed_payloads: None,
             evidence: Vec::new(),
             evidence_pages: 0,
@@ -267,9 +268,9 @@ impl MemoryPreparationStateV1 {
             .saturating_add(map(&self.packs))
             .saturating_add(self.evidence.capacity())
             .saturating_add(
-                self.content_pack
+                self.content_packs
                     .as_ref()
-                    .map_or(0, SealedGenerationContentPackV1::retained_bytes),
+                    .map_or(0, SealedGenerationContentRosterV1::retained_bytes),
             )
             .saturating_add(
                 self.evidence_identity
@@ -364,7 +365,7 @@ impl MemoryCodeIndexPreparationV1 {
         state.segments.clear();
         state.packs.clear();
         state.parent = None;
-        state.content_pack = None;
+        state.content_packs = None;
         state.evidence_identity = None;
         state.evidence = Vec::new();
         drop(state.memory.charge.take());
@@ -425,7 +426,7 @@ impl CodeIndexPreparationPort for MemoryCodeIndexPreparationV1 {
         publication: SealedGenerationSegmentPublicationV1<'_>,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.closed || state.content_pack.is_some() {
+        if state.closed || state.content_packs.is_some() {
             return Err(Self::unavailable(
                 "publication preparation is closed or finalized",
             ));
@@ -550,24 +551,14 @@ impl CodeIndexPreparationPort for MemoryCodeIndexPreparationV1 {
     fn finalize_content_pack(
         &mut self,
         segments: &[SealedGenerationSegmentIdentityV1],
-    ) -> Result<SealedGenerationContentPackV1, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<SealedGenerationContentRosterV1, CodeIndexPublicationStoreErrorV1> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.closed || state.content_pack.is_some() || state.evidence_identity.is_none() {
+        if state.closed || state.content_packs.is_some() || state.evidence_identity.is_none() {
             return Err(Self::unavailable(
                 "content pack finalization is not admitted",
             ));
         }
-        let digest_bytes = state
-            .evidence_identity
-            .as_ref()
-            .ok_or_else(|| Self::unavailable("generation evidence is not finalized"))?
-            .digest
-            .as_str()
-            .len();
         let mut previous = None;
-        let mut total = 0_usize;
-        let mut largest = 0_usize;
-        let mut descriptors = size_of::<SealedGenerationContentPackV1>();
         for identity in segments {
             if previous.is_some_and(|digest| digest >= &identity.digest) {
                 return Err(Self::unavailable(
@@ -575,6 +566,69 @@ impl CodeIndexPreparationPort for MemoryCodeIndexPreparationV1 {
                 ));
             }
             previous = Some(&identity.digest);
+        }
+        // Mirror the durable store: a pack the bound parent already holds is
+        // inherited by reference, verbatim, so its digest stays reproducible;
+        // only the rest is written to a new pack.
+        let mut inherited: BTreeSet<usize> = BTreeSet::new();
+        let mut written: Vec<SealedGenerationSegmentIdentityV1> = Vec::new();
+        for identity in segments {
+            let located = state.parent.as_ref().and_then(|parent| {
+                parent
+                    .layout
+                    .content_packs()
+                    .packs
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, pack)| {
+                        let position = pack
+                            .extents
+                            .binary_search_by(|extent| extent.digest.cmp(&identity.digest))
+                            .ok()?;
+                        (pack.extents[position].size_bytes == identity.size_bytes).then_some(index)
+                    })
+            });
+            match located {
+                Some(index) => {
+                    inherited.insert(index);
+                }
+                None => written.push(identity.clone()),
+            }
+        }
+        let overflow = inherited
+            .len()
+            .saturating_add(1)
+            .saturating_sub(MAX_SEALED_GENERATION_CONTENT_PACKS_V1);
+        for index in inherited.iter().copied().take(overflow).collect::<Vec<_>>() {
+            inherited.remove(&index);
+            let parent = state
+                .parent
+                .as_ref()
+                .and_then(|parent| parent.layout.content_packs().packs.get(index))
+                .ok_or_else(|| {
+                    Self::unavailable("folded content pack is absent from the bound parent")
+                })?;
+            written.extend(
+                parent
+                    .extents
+                    .iter()
+                    .map(|extent| SealedGenerationSegmentIdentityV1 {
+                        digest: extent.digest.clone(),
+                        size_bytes: extent.size_bytes,
+                    }),
+            );
+        }
+        written.sort_unstable_by(|left, right| left.digest.cmp(&right.digest));
+        let mut total = 0_usize;
+        let mut largest = 0_usize;
+        let mut descriptors = size_of::<SealedGenerationContentRosterV1>()
+            .saturating_add(size_of::<SealedGenerationContentPackV1>())
+            .saturating_add(
+                inherited
+                    .len()
+                    .saturating_mul(size_of::<SealedGenerationContentPackV1>()),
+            );
+        for identity in &written {
             let length = usize::try_from(identity.size_bytes)
                 .map_err(|_| Self::unavailable("content pack extent exceeds address space"))?;
             total = total
@@ -585,10 +639,37 @@ impl CodeIndexPreparationPort for MemoryCodeIndexPreparationV1 {
                 .saturating_add(size_of::<SealedGenerationContentExtentV1>())
                 .saturating_add(identity.digest.as_str().len());
         }
+        for index in &inherited {
+            let parent = state
+                .parent
+                .as_ref()
+                .and_then(|parent| parent.layout.content_packs().packs.get(*index))
+                .ok_or_else(|| {
+                    Self::unavailable("inherited content pack is absent from the bound parent")
+                })?;
+            descriptors = descriptors
+                .saturating_add(
+                    size_of::<SealedGenerationContentExtentV1>()
+                        .saturating_mul(parent.extents.len()),
+                )
+                .saturating_add(parent.extents.iter().fold(0_usize, |bytes, extent| {
+                    bytes.saturating_add(extent.digest.as_str().len())
+                }));
+        }
+        let digest_bytes = state
+            .evidence_identity
+            .as_ref()
+            .ok_or_else(|| Self::unavailable("generation evidence is not finalized"))?
+            .digest
+            .as_str()
+            .len();
         // Vec-to-Arc conversion retains both allocations. Segment scratch and
         // the returned and retained descriptor copies coexist with them.
         let map = btree_bytes(
-            state.packs.len().saturating_add(1),
+            state
+                .packs
+                .len()
+                .saturating_add(inherited.len().saturating_add(1)),
             size_of::<(ManifestDigest, Arc<[u8]>)>(),
         );
         state.reserve(
@@ -610,10 +691,10 @@ impl CodeIndexPreparationPort for MemoryCodeIndexPreparationV1 {
             .map_err(|error| Self::unavailable(&error.to_string()))?;
         let mut extents = Vec::new();
         extents
-            .try_reserve_exact(segments.len())
+            .try_reserve_exact(written.len())
             .map_err(|error| Self::unavailable(&error.to_string()))?;
         let read_pack = self.store.pack_reader();
-        for identity in segments {
+        for identity in &written {
             state
                 .read_logical(
                     SealedGenerationSegmentReadV1::Whole {
@@ -639,14 +720,13 @@ impl CodeIndexPreparationPort for MemoryCodeIndexPreparationV1 {
             });
             bytes.extend_from_slice(&scratch);
         }
-        let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&bytes))
-            .map_err(|error| Self::unavailable(&error.to_string()))?;
-        let content_pack = SealedGenerationContentPackV1 {
-            digest,
+        let new_pack = SealedGenerationContentPackV1 {
+            digest: ManifestDigest::from_sha256_bytes(&Sha256::digest(&bytes))
+                .map_err(|error| Self::unavailable(&error.to_string()))?,
             size_bytes: bytes.len() as u64,
             extents,
         };
-        if let Some(existing) = state.packs.get(&content_pack.digest) {
+        if let Some(existing) = state.packs.get(&new_pack.digest) {
             if existing.as_ref() != bytes.as_slice() {
                 return Err(Self::unavailable(
                     "payload pack content address has conflicting bytes",
@@ -655,10 +735,41 @@ impl CodeIndexPreparationPort for MemoryCodeIndexPreparationV1 {
         } else {
             state
                 .packs
-                .insert(content_pack.digest.clone(), Arc::from(bytes));
+                .insert(new_pack.digest.clone(), Arc::from(bytes));
         }
-        state.content_pack = Some(content_pack.clone());
-        Ok(content_pack)
+        let mut packs = Vec::with_capacity(inherited.len().saturating_add(1));
+        for index in inherited {
+            let inherited_pack = state.parent.as_ref().and_then(|owner| {
+                let pack = owner.layout.content_packs().packs.get(index)?;
+                let bytes = owner.packs.get(&pack.digest)?;
+                Some((pack.clone(), Arc::clone(bytes)))
+            });
+            let Some((parent, bytes)) = inherited_pack else {
+                return Err(Self::unavailable(
+                    "inherited content pack is absent from the bound parent",
+                ));
+            };
+            match state.packs.get(&parent.digest) {
+                Some(existing) if existing.as_ref() == bytes.as_ref() => {}
+                Some(_) => {
+                    return Err(Self::unavailable(
+                        "payload pack content address has conflicting bytes",
+                    ));
+                }
+                None => {
+                    state.packs.insert(parent.digest.clone(), bytes);
+                }
+            }
+            packs.push(parent);
+        }
+        packs.push(new_pack);
+        packs.sort_unstable_by(|left, right| left.digest.cmp(&right.digest));
+        let content_packs = SealedGenerationContentRosterV1 { packs };
+        content_packs
+            .validate(segments)
+            .map_err(|error| Self::unavailable(&error.to_string()))?;
+        state.content_packs = Some(content_packs.clone());
+        Ok(content_packs)
     }
 
     fn pack_reader(&self) -> Arc<SealedSegmentReaderV1> {
@@ -678,7 +789,12 @@ impl CodeIndexPreparationPort for MemoryCodeIndexPreparationV1 {
             }
             if let Some(owner) = state.committed_payloads.as_ref() {
                 let digest = request_digest(request);
-                if &owner.layout.content_pack().digest == digest
+                if owner
+                    .layout
+                    .content_packs()
+                    .packs
+                    .iter()
+                    .any(|pack| &pack.digest == digest)
                     || &owner.layout.evidence_pack().digest == digest
                 {
                     return published(request, buffer);
@@ -803,7 +919,7 @@ impl CodeIndexAtomicPublicationPort for MemorySealedPublicationStoreV1 {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if prepared.closed
-            || prepared.content_pack.is_none()
+            || prepared.content_packs.is_none()
             || prepared.evidence_identity.is_none()
             || !prepared.evidence.is_empty()
             || prepared.evidence_pages != 0
@@ -813,7 +929,7 @@ impl CodeIndexAtomicPublicationPort for MemorySealedPublicationStoreV1 {
             ));
         }
         let source_layout = publication.pack_layout();
-        if prepared.content_pack.as_ref() != Some(source_layout.content_pack())
+        if prepared.content_packs.as_ref() != Some(source_layout.content_packs())
             || prepared.evidence_identity.as_ref() != Some(source_layout.evidence_pack())
         {
             return Err(MemoryCodeIndexPreparationV1::unavailable(
@@ -828,7 +944,15 @@ impl CodeIndexAtomicPublicationPort for MemorySealedPublicationStoreV1 {
                 .retained_bytes()
                 .saturating_add(size_of::<MemoryCommittedPayloadsV1>())
                 .saturating_add(ARC_HEADER_BYTES)
-                .saturating_add(source_layout.content_pack().digest.as_str().len())
+                .saturating_add(
+                    source_layout
+                        .content_packs()
+                        .packs
+                        .iter()
+                        .fold(0_usize, |bytes, pack| {
+                            bytes.saturating_add(pack.digest.as_str().len())
+                        }),
+                )
                 .saturating_add(source_layout.evidence_pack().digest.as_str().len()),
         )?;
         let layout = source_layout.clone();
@@ -847,16 +971,8 @@ impl CodeIndexAtomicPublicationPort for MemorySealedPublicationStoreV1 {
         {
             return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
         }
-        for (digest, size_bytes) in [
-            (
-                &layout.content_pack().digest,
-                layout.content_pack().size_bytes,
-            ),
-            (
-                &layout.evidence_pack().digest,
-                layout.evidence_pack().size_bytes,
-            ),
-        ] {
+        for identity in layout.pack_identities() {
+            let (digest, size_bytes) = (&identity.digest, identity.size_bytes);
             let bytes = prepared.packs.get(digest).ok_or_else(|| {
                 MemoryCodeIndexPreparationV1::unavailable(
                     "prepared publication references a pack absent from its preparation",
@@ -871,7 +987,7 @@ impl CodeIndexAtomicPublicationPort for MemorySealedPublicationStoreV1 {
         let packs = std::mem::take(&mut prepared.packs);
         prepared.segments.clear();
         prepared.parent = None;
-        prepared.content_pack = None;
+        prepared.content_packs = None;
         prepared.evidence_identity = None;
         prepared.evidence = Vec::new();
         let mut memory = std::mem::replace(&mut prepared.memory, retained_preparation_memory);
