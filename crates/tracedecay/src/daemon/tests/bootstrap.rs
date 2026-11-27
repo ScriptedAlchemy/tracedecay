@@ -16,8 +16,6 @@ use tracedecay_mcp::JsonRpcResponse;
 #[cfg(unix)]
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
-static PRODUCTION_DASHBOARD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 fn project_open_test_route(name: &str) -> ProjectRouteKey {
     ProjectRouteKey {
         profile_root: std::path::PathBuf::from(format!("/profiles/{name}")),
@@ -3544,7 +3542,9 @@ async fn production_composition_harness_dispatches_application_invocations_in_pr
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_composition_dashboard_persists_project_settings_over_http() {
-    let _dashboard_guard = PRODUCTION_DASHBOARD_TEST_LOCK.lock().await;
+    let _dashboard_guard = crate::mcp::tools::handlers::dashboard::DASHBOARD_TEST_LOCK
+        .lock()
+        .await;
     let temp = TempDir::new().expect("temp dir");
     let project = temp.path().join("project");
     std::fs::create_dir_all(project.join("src")).expect("source dir");
@@ -3581,9 +3581,12 @@ async fn production_composition_dashboard_persists_project_settings_over_http() 
     let authority = origin
         .strip_prefix("http://")
         .expect("dashboard HTTP origin");
+    let dashboard_addr = authority
+        .parse::<std::net::SocketAddr>()
+        .expect("dashboard socket address");
     let base_url = format!("http://tracedecay:{token}@{authority}");
 
-    tokio::task::spawn_blocking(move || {
+    let assertions = tokio::task::spawn_blocking(move || {
         fn response_json(
             mut response: ureq::http::Response<ureq::Body>,
         ) -> (u16, serde_json::Value) {
@@ -3711,18 +3714,31 @@ async fn production_composition_dashboard_persists_project_settings_over_http() 
         assert_eq!(unchanged["project"]["config"]["max_file_size"], 2048);
         assert_eq!(unchanged["project"]["config"]["track_call_sites"], true);
     })
-    .await
-    .expect("dashboard HTTP assertions");
-
-    harness
+    .await;
+    // This fixture created the dashboard on its unique project root. Stop
+    // that listener before retiring the composition, even when an HTTP
+    // assertion failed; generic harness cleanup cannot claim every dashboard
+    // sharing a root. Report both results only after the stores are released.
+    let stopped = harness
         .call_tool(
             &project,
             "tracedecay_dashboard",
             json!({"action": "stop", "format": "json"}),
         )
-        .await
-        .expect("stop production dashboard");
+        .await;
     harness.shutdown().await;
+    let still_serving = tokio::task::spawn_blocking(move || {
+        std::net::TcpStream::connect_timeout(&dashboard_addr, std::time::Duration::from_secs(4))
+            .is_ok()
+    })
+    .await;
+    assertions.expect("dashboard HTTP assertions");
+    stopped.expect("stop production dashboard");
+    let still_serving = still_serving.expect("probe joined dashboard listener");
+    assert!(
+        !still_serving,
+        "the fixture must join its hosted dashboard before releasing its stores"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1,22 +1,33 @@
 //! Response-handle payload I/O and writer lock tenure on large handles.
 //!
 //! Inventory and expiry selection are answered from the covering index, so
-//! their SQLite work follows the row count and never the payload size. A
+//! their result does not require materializing valid payload text. A
 //! replay of live content writes no rows. Its writer lock tenure is measured
 //! independently of the fresh publication's duration. A page read still loads
-//! and digests the whole record: a large `TEXT` value is an overflow chain, and slicing it in
-//! SQL walks that chain, which costs more than reading it once.
+//! and digests the whole record. Timings below are measurements, not test
+//! thresholds: scheduler delays are not evidence of payload I/O.
 
 use std::time::Instant;
 
+use tracedecay_runtime_core::db::engine::params;
+
 use crate::RegisteredGlobalDb;
 use crate::response_handles::{
-    RESPONSE_HANDLE_TTL_SECS, ResponseHandleError, ResponseHandleLookup, ResponseHandleRecord,
+    RESPONSE_HANDLE_TTL_SECS, ResponseHandleError, ResponseHandleInventory, ResponseHandleLookup,
+    ResponseHandleRecord,
 };
 use crate::tests::harness::{RegisteredGlobalDbHarness, writer_telemetry};
 
 const NOW: i64 = 1_000_000;
 const LARGE_HANDLE_BYTES: usize = 8 * 1024 * 1024;
+
+fn large_unicode_content() -> String {
+    const TOKEN: &str = "é🦀";
+    let mut content = TOKEN.repeat(LARGE_HANDLE_BYTES / TOKEN.len());
+    content.push_str(&"x".repeat(LARGE_HANDLE_BYTES % TOKEN.len()));
+    assert_eq!(content.len(), LARGE_HANDLE_BYTES);
+    content
+}
 
 async fn publish(
     database: &RegisteredGlobalDb,
@@ -63,46 +74,86 @@ fn reader_execution(database: &RegisteredGlobalDb) -> u64 {
         .reader_execution_micros
 }
 
-/// Inventory reads the covering index only, so its reader work is the same
-/// whether the namespace holds one tiny handle or one 8 MiB handle.
+/// Inventory returns exact metadata for large handles without materializing
+/// their text. Invalid UTF-8 is a deterministic tripwire: a content read
+/// fails even when the elapsed time would happen to fit a timing ratio.
 #[tokio::test(flavor = "multi_thread")]
-async fn inventory_work_does_not_follow_payload_size() {
+async fn inventory_measures_large_handles_without_materializing_content() {
     let harness = RegisteredGlobalDbHarness::open("response-handle-inventory-cost").await;
     let database = &harness.registered;
     publish(database, "tiny", NOW).await.unwrap();
     let tiny = reader_execution_micros(database, || async {
-        database.inventory_response_handles().await.unwrap();
+        assert_eq!(
+            database.inventory_response_handles().await.unwrap(),
+            ResponseHandleInventory {
+                record_count: 1,
+                total_bytes: 4,
+                oldest_expires_at: Some(NOW + RESPONSE_HANDLE_TTL_SECS),
+                newest_expires_at: Some(NOW + RESPONSE_HANDLE_TTL_SECS),
+            }
+        );
     })
     .await;
 
-    publish(database, &"é🦀".repeat(LARGE_HANDLE_BYTES / 7), NOW)
+    let record = publish(database, &large_unicode_content(), NOW + 1)
         .await
         .unwrap();
+    let expected = ResponseHandleInventory {
+        record_count: 2,
+        total_bytes: 4 + LARGE_HANDLE_BYTES as u64,
+        oldest_expires_at: Some(NOW + RESPONSE_HANDLE_TTL_SECS),
+        newest_expires_at: Some(NOW + 1 + RESPONSE_HANDLE_TTL_SECS),
+    };
     let large = reader_execution_micros(database, || async {
-        database.inventory_response_handles().await.unwrap();
+        assert_eq!(
+            database.inventory_response_handles().await.unwrap(),
+            expected
+        );
     })
     .await;
 
     eprintln!("inventory reader execution µs: tiny={tiny} large={large}");
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "UPDATE response_handles SET content = CAST(x'80' AS TEXT) WHERE handle = ?1",
+            params![record.handle.as_str()],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
     assert!(
-        large <= tiny.max(1) * 8,
-        "inventory must not read payload bytes as handles grow: tiny={tiny} large={large}"
+        matches!(
+            database
+                .lookup_response_handle(&record.handle, NOW + 1)
+                .await,
+            Err(ResponseHandleError::Store(_))
+        ),
+        "the payload tripwire must reject a content read"
+    );
+    assert_eq!(
+        database.inventory_response_handles().await.unwrap(),
+        expected,
+        "inventory must use metadata even when the content cannot be decoded"
     );
 }
 
-/// Expiry selection reads the covering index only: sweeping a namespace that
-/// holds one expired 8 MiB handle costs the same writer work as sweeping one
-/// expired tiny handle.
+/// Removing one expired handle uses the same number of SQLite VM steps for
+/// tiny and 8 MiB payloads. VM steps measure SQL execution, not disk I/O.
 #[tokio::test(flavor = "multi_thread")]
 async fn expiry_selection_does_not_follow_payload_size() {
     let expired_at = NOW + RESPONSE_HANDLE_TTL_SECS;
 
     async fn sweep(database: &RegisteredGlobalDb, expired_at: i64) -> (u64, u64) {
         writer_work(database, || async {
-            database
-                .cleanup_expired_response_handles(expired_at)
-                .await
-                .unwrap();
+            assert_eq!(
+                database
+                    .cleanup_expired_response_handles(expired_at)
+                    .await
+                    .unwrap(),
+                1,
+                "the measured sweep must remove its expired handle"
+            );
         })
         .await
     }
@@ -120,7 +171,7 @@ async fn expiry_selection_does_not_follow_payload_size() {
     eprintln!("expiry sweep VM steps: tiny={tiny_steps} large={large_steps}");
     assert_eq!(
         tiny_steps, large_steps,
-        "expiry selection must not read payload bytes as handles grow"
+        "the expired-row deletion must keep the same VM work as handles grow"
     );
 }
 
@@ -130,7 +181,7 @@ async fn expiry_selection_does_not_follow_payload_size() {
 async fn replay_does_not_rewrite_a_live_handle() {
     let harness = RegisteredGlobalDbHarness::open("response-handle-replay-cost").await;
     let database = &harness.registered;
-    let content = "é🦀".repeat(LARGE_HANDLE_BYTES / 7);
+    let content = large_unicode_content();
 
     let started = Instant::now();
     let mut fresh_record = None;
@@ -163,10 +214,9 @@ async fn replay_does_not_rewrite_a_live_handle() {
     assert_eq!(replay_record.content, content);
 }
 
-/// A page read loads and digests the whole record, so its cost follows the
-/// payload size. This is the measurement that rules out slicing in SQL:
-/// `substr` on an overflow-chain `TEXT` value walks that chain, which costs
-/// more than one sequential read of the value. The lookup is still exact.
+/// A page read loads and digests the whole record. Compare observed lookup
+/// times without asserting a scheduler-dependent ratio. This measures the
+/// current lookup path; it does not compare alternative SQL slicing paths.
 #[tokio::test(flavor = "multi_thread")]
 async fn lookup_reads_the_whole_record_per_page() {
     let harness = RegisteredGlobalDbHarness::open("response-handle-lookup-cost").await;
