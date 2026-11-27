@@ -776,30 +776,7 @@ fn persist_source_commit(
             None => slim::slim_mutation(mutation, &binding)?,
         };
         let native_object = mutation.observation().native_object();
-        let changed = savepoint.execute_cached(
-            "INSERT OR IGNORE INTO external_source_mutations_v1 (
-                binding_id, mutation_digest, native_object_digest,
-                revision_digest, mutation_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                binding.binding_id.as_str(),
-                mutation.mutation_digest().as_str(),
-                native_object.digest().as_str(),
-                mutation.observation().revision().digest().as_str(),
-                mutation_json,
-            ],
-        )?;
-        if changed == 0 {
-            verify_encoded_row(
-                savepoint,
-                "SELECT mutation_json FROM external_source_mutations_v1
-                 WHERE binding_id = ?1 AND mutation_digest = ?2",
-                binding.binding_id.as_str(),
-                mutation.mutation_digest().as_str(),
-                &mutation_json,
-                "external source mutation collision",
-            )?;
-        }
+        persist_mutation(savepoint, &binding, mutation, &mutation_json)?;
         savepoint.execute_cached(
             "INSERT INTO external_source_objects_v2 (
                 binding_id, native_object_digest, partition_digest, mutation_digest
@@ -1036,27 +1013,48 @@ fn persist_projection(
         .zip(projection.effects())
         .enumerate()
     {
+        // The executor verified this entire projection against the canonical
+        // expansion of the exact pending receipt. That expansion keeps the
+        // receipt's explicit mutations as a prefix and appends only absence
+        // tombstones derived from its complete snapshot and prior projection.
+        if index < source_receipt.mutations().len() {
+            // Explicit source mutations must already be durable. Do not repair
+            // missing source history while publishing its projection.
+            let mutation_recorded = savepoint
+                .prepare_cached(
+                    "SELECT 1 FROM external_source_mutations_v1
+                     WHERE binding_id = ?1 AND mutation_digest = ?2",
+                )?
+                .exists(params![
+                    binding.binding_id.as_str(),
+                    mutation.mutation_digest().as_str()
+                ])?;
+            if !mutation_recorded {
+                return Err(invalid(
+                    "external source projection names a mutation absent from history",
+                ));
+            }
+        } else {
+            let completion = source_receipt.snapshot_completion().ok_or_else(|| {
+                invalid("external source derived mutation has no complete snapshot")
+            })?;
+            if mutation.evidence().snapshot_completion_digest()
+                != Some(completion.completion_digest())
+            {
+                return Err(invalid(
+                    "external source derived mutation has mismatched snapshot evidence",
+                ));
+            }
+            // Absence tombstones first become known at projection time. Keep
+            // them in the same collision-checked mutation history, atomically
+            // with their effects, projected objects and projection frontier.
+            let mutation_json = slim::slim_mutation(mutation, binding)?;
+            persist_mutation(savepoint, binding, mutation, &mutation_json)?;
+        }
         let index = i64::try_from(index).map_err(|_| {
             invalid("external source projection effect index exceeds SQLite INTEGER")
         })?;
         let effect_json = encode(effect)?;
-        // The projection applies the commit's own mutations, so each one is
-        // already in the history table under this binding; a digest with no
-        // history row is a corrupt projection, refused before any row lands.
-        let mutation_recorded = savepoint
-            .prepare_cached(
-                "SELECT 1 FROM external_source_mutations_v1
-                 WHERE binding_id = ?1 AND mutation_digest = ?2",
-            )?
-            .exists(params![
-                binding.binding_id.as_str(),
-                mutation.mutation_digest().as_str()
-            ])?;
-        if !mutation_recorded {
-            return Err(invalid(
-                "external source projection names a mutation absent from history",
-            ));
-        }
         savepoint.execute_cached(
             "INSERT INTO external_source_projection_effects_v2 (
                 binding_id, projection_digest, effect_index,
@@ -1147,6 +1145,39 @@ fn persist_projection(
         &[source_receipt.receipt_digest().as_str()],
         displaced_projection.as_deref().as_slice(),
     )
+}
+
+fn persist_mutation(
+    savepoint: &Savepoint<'_>,
+    binding: &SourceBindingIdentityV1,
+    mutation: &SourceObjectMutationV1,
+    mutation_json: &str,
+) -> rusqlite::Result<()> {
+    let changed = savepoint.execute_cached(
+        "INSERT OR IGNORE INTO external_source_mutations_v1 (
+            binding_id, mutation_digest, native_object_digest,
+            revision_digest, mutation_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            binding.binding_id.as_str(),
+            mutation.mutation_digest().as_str(),
+            mutation.observation().native_object().digest().as_str(),
+            mutation.observation().revision().digest().as_str(),
+            mutation_json,
+        ],
+    )?;
+    if changed == 0 {
+        verify_encoded_row(
+            savepoint,
+            "SELECT mutation_json FROM external_source_mutations_v1
+             WHERE binding_id = ?1 AND mutation_digest = ?2",
+            binding.binding_id.as_str(),
+            mutation.mutation_digest().as_str(),
+            mutation_json,
+            "external source mutation collision",
+        )?;
+    }
+    Ok(())
 }
 
 #[tracing::instrument(

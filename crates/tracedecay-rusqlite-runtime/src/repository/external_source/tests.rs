@@ -916,13 +916,134 @@ fn projection_window_rolls_back_earlier_heads_when_a_successor_fails() {
         .unwrap();
     let projector = ComponentVersion::new("external-source-projector-v1").unwrap();
     let first_projection = build_source_projection(&pending, projector.clone()).unwrap();
+    let after_first =
+        match apply_source_projection(&before, &pending, first_projection.clone()).unwrap() {
+            SourceProjectionApplyOutcomeV1::Projected(state) => state,
+            other => panic!("expected first projection, got {other:?}"),
+        };
+    let second_pending = SourcePendingProjectionV1::from_state(
+        &after_first,
+        before.definition().clone(),
+        before.binding().clone(),
+        before.receipt().clone(),
+    )
+    .unwrap();
+    let second_projection = build_source_projection(&second_pending, projector.clone()).unwrap();
     let batch = SourceProjectionBatchV1::new(
         binding.clone(),
-        projector,
+        projector.clone(),
         pending.receipt().receipt_digest().clone(),
         2,
     )
     .unwrap();
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let mut savepoint = transaction.savepoint().unwrap();
+        savepoint
+            .execute(
+                "DELETE FROM external_source_mutations_v1 WHERE mutation_digest = ?1",
+                [first.mutations()[0].mutation_digest().as_str()],
+            )
+            .unwrap();
+        let error = writer
+            .execute_projection_batch(&savepoint, &batch)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("receipt names a mutation absent from history"),
+            "missing explicit source history must remain a refusal: {error:?}"
+        );
+        assert_eq!(
+            savepoint
+                .query_row(
+                    "SELECT COUNT(*) FROM external_source_mutations_v1",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .unwrap(),
+            0,
+            "projection must not recreate missing source history"
+        );
+        savepoint.rollback().unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let mut savepoint = transaction.savepoint().unwrap();
+        writer
+            .execute_projection_write(&savepoint, &first_projection)
+            .unwrap();
+        let omitted_object = SourcePendingProjectionV1::new(
+            before.definition().clone(),
+            before.binding().clone(),
+            before.receipt().clone(),
+            Some(first_projection.source_frontier().clone()),
+            Vec::new(),
+        )
+        .unwrap();
+        let forged = build_source_projection(&omitted_object, projector).unwrap();
+        forged.validate().unwrap();
+        assert!(forged.effects().is_empty());
+        let error = writer
+            .execute_projection_write(&savepoint, &forged)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not match the oldest pending receipt"),
+            "a validly encoded projection cannot omit the required tombstone: {error:?}"
+        );
+        savepoint.rollback().unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let mut savepoint = transaction.savepoint().unwrap();
+        let derived = &second_projection.mutations()[0];
+        let conflicting_json = slim::slim_mutation(&first.mutations()[0], &binding).unwrap();
+        savepoint
+            .execute(
+                "INSERT INTO external_source_mutations_v1 (
+                     binding_id, mutation_digest, native_object_digest,
+                     revision_digest, mutation_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    binding.binding_id.as_str(),
+                    derived.mutation_digest().as_str(),
+                    derived.observation().native_object().digest().as_str(),
+                    derived.observation().revision().digest().as_str(),
+                    conflicting_json,
+                ],
+            )
+            .unwrap();
+        let error = writer
+            .execute_projection_batch(&savepoint, &batch)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("external source mutation collision"),
+            "a derived revision cannot replace conflicting history: {error:?}"
+        );
+        let retained_json: String = savepoint
+            .query_row(
+                "SELECT mutation_json FROM external_source_mutations_v1
+                 WHERE binding_id = ?1 AND mutation_digest = ?2",
+                params![
+                    binding.binding_id.as_str(),
+                    derived.mutation_digest().as_str()
+                ],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained_json, conflicting_json);
+        savepoint.rollback().unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
     connection
         .execute_batch(
             "CREATE TRIGGER fail_second_projection
@@ -942,7 +1063,8 @@ fn projection_window_rolls_back_earlier_heads_when_a_successor_fails() {
         assert!(
             error
                 .to_string()
-                .contains("injected second projection failure")
+                .contains("injected second projection failure"),
+            "projection window failed before the injected successor failure: {error:?}"
         );
         let first_published: String = savepoint
             .query_row(
@@ -972,6 +1094,7 @@ fn projection_window_rolls_back_earlier_heads_when_a_successor_fails() {
     );
     for (table, expected) in [
         ("external_source_pending_projections_v1", 2_i64),
+        ("external_source_mutations_v1", 1),
         ("external_source_projection_publications_v2", 0),
         ("external_source_projection_effects_v2", 0),
         ("external_source_projection_lineage_v1", 0),
@@ -1006,11 +1129,27 @@ fn projection_window_rolls_back_earlier_heads_when_a_successor_fails() {
     );
     let object = fixture_object();
     let observed = projected.observed_object(&object).unwrap().unwrap();
+    assert_eq!(observed.content_state(), SourceContentStateV1::Live);
+    assert_eq!(projected.projection(), Some(&second_projection));
+    let tombstone = projected.projected_objects().get(&object).unwrap();
     assert_eq!(
-        observed.content_state(),
+        tombstone.content_state(),
         SourceContentStateV1::AuthoritativeDeleted
     );
-    assert_eq!(projected.projected_objects().get(&object), Some(observed));
+    assert_ne!(tombstone.revision(), observed.revision());
+    assert_eq!(second_projection.effects().len(), 1);
+    assert_eq!(tombstone, second_projection.effects()[0].observation());
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM external_source_mutations_v1",
+                [],
+                |row| { row.get::<_, i64>(0) }
+            )
+            .unwrap(),
+        2,
+        "the derived tombstone must be durable beside the source mutation"
+    );
     assert!(
         load_next_pending_projection(&connection, &binding)
             .unwrap()
