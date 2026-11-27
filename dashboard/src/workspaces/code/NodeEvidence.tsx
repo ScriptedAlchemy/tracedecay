@@ -111,7 +111,7 @@ export function NodeEvidence({ nodeId, nodeName }: { nodeId: string; nodeName: s
 }
 
 /**
- * One card. Absence is a first-class rendering with the producer's own words
+ * One card. Absence is rendered as its own state with the producer's own words
  * in it, not a blank and never a zero, the distinction this whole panel is
  * built to preserve dies here if it dies anywhere.
  */
@@ -193,7 +193,7 @@ function Count({
  * Facts.
  *
  * `facts` inside each arm is `Vec<Value>` on the wire, so schemars types it as
- * `unknown` and this surface genuinely cannot render a fact's contents without
+ * `unknown` and this surface cannot render a fact's contents without
  * inventing a shape for it. It counts them and says that is what it is doing;
  * the Knowledge workspace is where facts are read.
  */

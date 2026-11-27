@@ -60,14 +60,14 @@ import {
  * Three further dimensions have a real, mounted source on the attempt and
  * graph reads, and those are the cards this module adds to the landed lens:
  *
- *   concurrency        `operation.work.views` →
+ *   concurrency        `operation.work.views`, read as
  *                      `WorkWorkloadProjectionV1.requested_concurrency` and
  *                      `.actual_concurrency`, both nullable because the
  *                      authority withholds them unless the runtime projection
  *                      covered every attempt. Two of the mandate's five rungs;
  *                      accepted, admitted and useful width have no field and
  *                      say so.
- *   runtime reruns     `operation.work.list_attempts` → each attempt's
+ *   runtime reruns     `operation.work.list_attempts`, read as each attempt's
  *                      `WorkRecoveryStateV1`, bucketed by its
  *                      `WorkRestartReasonV1`. This is the RUNTIME family only:
  *                      test and CI reruns are a different population with no

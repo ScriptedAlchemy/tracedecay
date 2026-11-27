@@ -362,7 +362,7 @@ function HubCard({
   rank: number;
   /** Directory the symbol lives in, trailing slash included. */
   module: string;
-  /** File name alone, the part that actually disambiguates. */
+  /** File name alone, the part that disambiguates. */
   file: string;
   /** Another card in this set carries the same name. */
   ambiguous: boolean;

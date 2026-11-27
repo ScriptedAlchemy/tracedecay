@@ -22,7 +22,7 @@ vi.mock('./BrainField.tsx', () => ({
  * the generated contracts by `stories/fixtures/data.test.ts`. Taking them from
  * there rather than restating them means these five reads cannot drift into
  * shapes the daemon does not send, and each test overrides only the figures its
- * assertions actually name.
+ * assertions name.
  */
 const wire = (path: string) => resolveFixture(path) as Record<string, unknown>;
 
@@ -308,7 +308,7 @@ describe('ScopedBrain', () => {
    * The mirror of the case above, at the readout. Zero totals on a 200 are
    * counts that were really taken (`get_stats` runs `SELECT COUNT(*)`, and a
    * failure 500s), so withholding them printed a dash for a project that had
-   * genuinely been measured as empty. The old rule was worse than that: it
+   * been measured as empty. The old rule was worse than that: it
    * blanked all three figures whenever ANY one was zero, so an indexed graph
    * with no edges lost its node and file counts too.
    */

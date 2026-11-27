@@ -21,7 +21,7 @@ interface Dominance {
   /** Sum of every row's events, the denominator the shares are taken against. */
   total: number;
   leader: UsageRow | null;
-  /** The leader's share of `total`, 0–1. Null when there is nothing to divide. */
+  /** The leader's share of `total`, 0 to 1. Null when there is nothing to divide. */
   leaderShare: number | null;
   /** Leader events divided by the smallest non-zero row's events. */
   spread: number | null;
@@ -76,7 +76,7 @@ export function percent(share: number | null | undefined): number | null {
 }
 
 interface EventWindow {
-  /** How many events the endpoint actually counted. */
+  /** How many events the endpoint counted. */
   events: number | null;
   /** Whether that count is the endpoint's own cap rather than the true total. */
   capped: boolean;
@@ -145,7 +145,7 @@ interface FamilyNote {
 }
 
 /**
- * What each family actually is, read off `record_tool_family` in
+ * What each family is, read off `record_tool_family` in
  * src/analytics.rs. A bare list of four snake_case identifiers told a reader
  * nothing they could act on; these are the substitutions the hint engine is
  * measuring, stated in the terms of the tools involved.
@@ -183,7 +183,7 @@ interface FamilyVerdict {
  * `underused = missed_events > 0` where `missed = relevant − usage`, so a
  * family with no relevance detector is pinned at `false` forever regardless of
  * behaviour. Reporting that as "not under-used" alongside families that are
- * genuinely measured would be a false equivalence; it gets its own state.
+ * measured would be a false equivalence; it gets its own state.
  */
 export function familyVerdict(row: FamilyRow): FamilyVerdict {
   const note = FAMILY_NOTES[row.family];

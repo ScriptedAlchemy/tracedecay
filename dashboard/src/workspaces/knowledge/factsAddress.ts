@@ -81,7 +81,7 @@ export function useFactsAddress(): {
   const seenScopeKey = useRef<string | null>(null);
   useEffect(() => {
     if (seenScopeKey.current === null) {
-      // The store, not the render closure: the shell's URL→scope sync runs in
+      // The store, not the render closure: the shell's URL-to-scope sync runs in
       // the same commit and may already have applied a deep link's scope that
       // this render has not seen yet. Adopting the closure's value would make
       // that first reconciliation look like a scope change and drop the fact

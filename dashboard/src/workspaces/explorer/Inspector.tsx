@@ -1,5 +1,5 @@
 /**
- * Explorer's inspector: everything the daemon actually returned about one
+ * Explorer's inspector: everything the daemon returned about one
  * result, graded, plus the two session reads a transcript row can be
  * expanded into once it is selected.
  *

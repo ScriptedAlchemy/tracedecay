@@ -9,8 +9,8 @@
  * both expose relationships in the canonical fact store without persisting a
  * vector authority.
  *
- * The load-bearing honesty here is `method`. The daemon emits `"pca"` only when
- * it actually decomposed at least two equal-width encodings. One eligible fact
+ * The honesty rule here turns on `method`. The daemon emits `"pca"` only when
+ * it decomposed at least two equal-width encodings. One eligible fact
  * returns one origin point; no encodable facts or a failed decomposition return
  * no points. A scatter drawn from `none` would misstate either condition as a
  * real projection, so this surface refuses to draw one and says why instead.

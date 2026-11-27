@@ -39,7 +39,7 @@
  * NOTHING HERE EVER RETURNS 0 AS A READING OF ABSENCE. Zero rows in a complete
  * window is a genuine observation and it is still under the suppression floor,
  * so it too renders withheld. The only number this module emits is a count of
- * five or more that the daemon actually reported.
+ * five or more that the daemon reported.
  */
 import type { AnalyticsEventKindCountV1 } from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';

@@ -48,7 +48,7 @@ type FailKind = keyof typeof GUIDANCE;
  * is its own state with its own icon, label and guidance, so a 401 and a 403
  * are already two different readings without a status code to tell them apart.
  * They were both `error · HTTP 4xx` until the taxonomy's `unauthorized` and
- * `denied` states were actually wired to them.
+ * `denied` states were wired to them.
  *
  * The last two rows deliberately declare the same reading. `PayloadResult`
  * carries a `detail` only on `error`, so a body that is not JSON and a body the

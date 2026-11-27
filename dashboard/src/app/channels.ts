@@ -111,7 +111,7 @@ export function paletteMatchesQuery(searchText: string, query: string): boolean 
     .every((term) => searchText.includes(term));
 }
 
-/** Zero-padded channel number for a workspace path (`code` → `06`). Unknown
+/** Zero-padded channel number for a workspace path (`code` becomes `06`). Unknown
  * paths get `--`: the instrument never invents a channel it does not have. */
 export function channelNumber(path: string): string {
   const index = CHANNELS.findIndex((channel) => channel.path === path);

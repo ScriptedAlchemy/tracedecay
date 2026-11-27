@@ -45,7 +45,7 @@ import {
  */
 
 /** How many attempts a page asks for. The contract admits 1..=1000; the daemon
- * decides what it can actually return and says so in `coverage`. */
+ * decides what it can return and says so in `coverage`. */
 const WORK_ATTEMPT_PAGE_SIZE = 250;
 
 /** The product-visible accounting window. It is finite so the backend can

@@ -74,8 +74,8 @@ function coverageBlocker(source: ExplorerSourceProgressV1): string | null {
       unit,
     )}`;
   }
-  // Nothing to examine is legitimately complete; refusing this would make a
-  // genuinely empty index permanently unable to report itself as empty.
+  // Nothing to examine is legitimately complete; refusing this would make an
+  // empty index permanently unable to report itself as empty.
   if (denominator === 0) return null;
 
   if (coverage.examined === 0) {

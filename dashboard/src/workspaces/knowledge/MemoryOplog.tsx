@@ -79,7 +79,7 @@ function OplogBody({ data }: { data: MemoryOplogPayloadV1 }) {
       </p>
       {/* The log is the one thing on this view that scrolls, and it holds no
         * focusable content of its own, so it takes the tab stop and carries
-        * the accessible name on the node that actually scrolls (WCAG 2.1.1). */}
+        * the accessible name on the node that scrolls (WCAG 2.1.1). */}
       <ol
         role="region"
         aria-label="Memory operations"

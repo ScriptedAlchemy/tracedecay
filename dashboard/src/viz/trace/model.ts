@@ -1,7 +1,7 @@
 /**
- * Measurement → model for the TRACE surface.
+ * Measurement to model for the TRACE surface.
  *
- * This module turns what `GET /api/plugins/graph/node/{id}/neighbors` actually
+ * This module turns what `GET /api/plugins/graph/node/{id}/neighbors`
  * returns into a `TraceModel`. It is pure, DOM-free and deterministic, and it
  * is where every honesty decision about the picture is made and recorded, so a
  * test can hold the caption to the data.
@@ -43,10 +43,10 @@ import type {
 } from './types.ts';
 
 /**
- * Drawing budget. The plan caps a readable subgraph at 80–250 nodes; this
+ * Drawing budget. The plan caps a readable subgraph at 80 to 250 nodes; this
  * surface sits far below that on purpose, because every node here carries a
  * name and a degree in type and a row of ten labels collides at any width the
- * workspace actually offers. Whatever these rules exclude is COUNTED, never
+ * workspace offers. Whatever these rules exclude is COUNTED, never
  * silently dropped.
  */
 export const TRACE_BUDGET = Object.freeze({
@@ -379,7 +379,7 @@ function directionOf(ringA: number, ringB: number): TraceChannelDirection {
  * Everything the field is NOT showing, counted from rows in hand.
  *
  * Every clause is conditional on a measured figure, so the caption shortens
- * when there is genuinely nothing to disclose rather than reciting boilerplate.
+ * when there is nothing to disclose rather than reciting boilerplate.
  */
 export function coverageCaption(model: TraceModel): string {
   const c = model.coverage;

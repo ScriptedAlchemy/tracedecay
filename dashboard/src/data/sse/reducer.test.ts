@@ -272,7 +272,7 @@ describe("SSE reducer, canonical refresh transaction", () => {
     expect(failed.refetchReason).toBe("overflow");
     // The identical refresh is not retried on the next tick...
     expect(failed.canonicalRefreshOutstanding).toBe(false);
-    // ...but a genuinely newer signal is a new attempt.
+    // ...but a newer signal is a new attempt.
     r.ingest(ev({ generation: 2, event_revision: 1, event_id: "g2-e1" }));
     expect(r.stats().canonicalRefreshOutstanding).toBe(true);
   });
@@ -330,7 +330,7 @@ describe("SSE reducer, housekeeping", () => {
       if (revision % MAX_QUEUED_EVENTS === 0) r.takeBatch();
     }
     r.takeBatch();
-    // The cap has to hold through half a ceiling of evictions, not just at the
+    // The cap has to hold through half a ceiling of evictions, not only at the
     // first one: an eviction cursor that stalls after its first advance would
     // leave the identity set growing without bound from here on.
     expect(r.stats().observedIdentities).toBe(MAX_OBSERVED_IDENTITIES);

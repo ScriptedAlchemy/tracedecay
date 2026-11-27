@@ -1,7 +1,7 @@
 /**
  * The readings the memory panels draw, computed once and away from JSX.
  *
- * Every function here turns one wire payload into the thing a panel actually
+ * Every function here turns one wire payload into the thing a panel
  * states, and each of them exists because the naive rendering of that payload
  * would have said something untrue:
  *
@@ -76,7 +76,7 @@ export function trustHistoryReading(payload: MemoryTrustHistoryPayloadV1): Trust
 }
 
 /** The state a feedback event's detail is in. `available` is not a state chip , 
- * the detail is simply shown, so this is only called for the other two. */
+ * the detail is shown, so this is only called for the other two. */
 export function trustDetailState(
   availability: MemoryFeedbackDetailsAvailabilityV1,
 ): DomainStateKind | null {
@@ -157,7 +157,7 @@ interface SimilarityReading {
   readonly encoded: number;
   /** Pairs scored above the computation's own floor, before this request's. */
   readonly scored: number;
-  /** Pairs this request actually returned, after floor and cap. */
+  /** Pairs this request returned, after floor and cap. */
   readonly returned: number;
   /**
    * Threshold-match coverage at the request cap. `false` proves the response

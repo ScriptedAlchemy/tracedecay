@@ -19,7 +19,7 @@ import { attentionCode, headJoin, isVerificationSource } from './rendererModel.t
 
 /**
  * Renderer B, the journey transit: one pull request read as a left-to-right
- * chain of four stations, agent session → code change → CI / review → next
+ * chain of four stations: agent session, code change, CI / review, then next
  * action. A station the joined authorities did not serve is kept as a NO
  * EVIDENCE band carrying the daemon's reason; it is never skipped, and no
  * agent reasoning is reconstructed to fill it. "Next action" prints only the

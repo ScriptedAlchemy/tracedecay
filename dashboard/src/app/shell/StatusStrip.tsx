@@ -174,7 +174,7 @@ function WorkspaceRegisters() {
 }
 
 /**
- * Where the readings on screen actually come from, so the strip cannot lie by
+ * Where the readings on screen come from, so the strip cannot lie by
  * omission: a healthy plate over a dead link is a CAPTURED read, not a live
  * one.
  *

@@ -136,7 +136,7 @@ export interface JourneyRelation {
   /** Epoch seconds of the recorded event that evidences the relation. */
   readonly time: number | null;
   readonly grade: EvidenceGrade;
-  /** The stated basis, e.g. `parent_session_id · parent_tool_use_id toolu_01`. */
+  /** The stated basis, for example `parent_session_id · parent_tool_use_id toolu_01`. */
   readonly basis: string;
   /** The parent-lane event the relation leaves from: the loaded tool call
    * whose tool-use id the child recorded. */

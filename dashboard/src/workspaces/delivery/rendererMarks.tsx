@@ -83,7 +83,7 @@ export const HATCH_STYLE: CSSProperties = {
     'repeating-linear-gradient(135deg, color-mix(in oklab, var(--raw-graph-edge) 45%, transparent) 0 1px, transparent 1px 6px)',
 };
 
-/** Names amber and every attention code the field actually draws. */
+/** Names amber and every attention code the field draws. */
 export function AttentionLegend({
   sources,
   unevaluated,

@@ -20,7 +20,7 @@ import { CanvasRenderer } from 'echarts/renderers';
 
 use([LineChart, ScatterChart, GridComponent, TooltipComponent, CanvasRenderer]);
 
-/** Series types this build can actually draw. Keep in step with `use` above. */
+/** Series types this build can draw. Keep in step with `use` above. */
 const REGISTERED_SERIES = ['line', 'scatter'] as const;
 
 type RegisteredSeries = (typeof REGISTERED_SERIES)[number];

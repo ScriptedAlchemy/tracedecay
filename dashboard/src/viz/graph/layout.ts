@@ -63,16 +63,16 @@ export function prepareField({
   // renders far larger on a sparse graph than on a dense one: forty symbols
   // read correctly on Code while seven filled the Brain canvas with discs.
   // Normalising the radius against node count keeps a node the same apparent
-  // object however much of the graph is on screen -- degree still sets the
+  // object however much of the graph is on screen. Degree still sets the
   // relative sizes within a graph, which is the only comparison that means
   // anything. The dense case is left exactly where it was.
   const density = Math.min(1, Math.max(0.45, Math.sqrt(nodes.length / 40)));
   // The second half of the same problem: node radius is in screen pixels but
   // the SPACING between nodes is not, so the identical graph that reads
   // correctly in a 1060px canvas becomes a solid mass of overlapping discs in
-  // a 270px one. Measuring the canvas area each node actually gets lets a
+  // a 270px one. Measuring the canvas area each node gets lets a
   // narrow viewport shrink the bodies instead of fusing them. It only ever
-  // reduces -- a roomy canvas is already correct.
+  // reduces, because a roomy canvas is already correct.
   const perNode = (viewport.width * viewport.height) / Math.max(nodes.length, 1);
   const roominess = Math.min(1, Math.sqrt(perNode / 8000));
   // A dense connected component (many edges per node) settles into a
@@ -80,7 +80,7 @@ export function prepareField({
   // after the repulsion tuning below, so its bodies need to shrink
   // further or they fuse into an undifferentiated mass regardless of how
   // roomy the canvas is. Average degree is a cheap, whole-graph proxy for
-  // that packing pressure -- exact per-component density is not worth the
+  // that packing pressure. Exact per-component density is not worth the
   // extra pass here.
   const edgeDensity = nodes.length > 0 ? (2 * edges.length) / nodes.length : 0;
   const densityShrink = Math.min(1, 1.8 / (1 + edgeDensity * 0.55));

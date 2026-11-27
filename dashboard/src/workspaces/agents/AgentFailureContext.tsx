@@ -147,8 +147,8 @@ export function AgentFailureContext({
 /**
  * Attempts, from the runtime projection on the work-product graph read.
  *
- * The coverage reading is load-bearing and is checked before any count is
- * printed. `unavailable` means the daemon observed no attempt at all, which is
+ * The coverage reading is checked before any count is printed, because the
+ * counts mean nothing without it. `unavailable` means the daemon observed no attempt at all, which is
  * a statement about the observation and not about the attempts.
  */
 function AttemptFailures({ reading }: { reading: AttemptFailureReading }) {

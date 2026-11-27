@@ -38,7 +38,7 @@ export function EnvelopeTruth({
       {/* The authorization outcome is a second, independent axis: a read can be
         * `partial` because a source was slow and separately `redacted` because
         * the identity behind it may not see the content. Folding one into the
-        * other loses which of the two is actually blocking the reader. */}
+        * other loses which of the two is blocking the reader. */}
       {authorizationChip ? (
         <StateChip kind={authorizationChip} detail="read authorization" />
       ) : null}

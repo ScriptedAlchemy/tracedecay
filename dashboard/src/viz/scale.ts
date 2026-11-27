@@ -8,7 +8,7 @@
  */
 
 /**
- * A value's position on a log-scaled band, 0–1, or null when there is no band.
+ * A value's position on a log-scaled band, 0 to 1, or null when there is no band.
  *
  * `log1p` rather than `log` so a count of zero maps to zero instead of negative
  * infinity, and so the scale is defined for every non-negative value an endpoint

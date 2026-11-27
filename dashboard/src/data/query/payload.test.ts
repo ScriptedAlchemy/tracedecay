@@ -5,7 +5,7 @@
  * something else: a generic `error` the reader can only retry, or, worse, a
  * successful empty payload. The project gateway answers a write against a
  * non-active project with 405 and a body naming the cause, and that is the one
- * refusal a control can actually act on, so it gets its own outcome and its
+ * refusal a control can act on, so it gets its own outcome and its
  * own tests.
  *
  * Every case asserts the negative too. A malformed 405 must never produce a
@@ -128,7 +128,7 @@ describe('fetchPayload', () => {
 });
 
 /**
- * The statuses the canonical project routes actually answer with.
+ * The statuses the canonical project routes answer with.
  *
  * Verbatim from `src/dashboard/projects.rs`: 503 for `missing_registry` and
  * `registry_unavailable`, 404 for `not_found`, each with the generated payload

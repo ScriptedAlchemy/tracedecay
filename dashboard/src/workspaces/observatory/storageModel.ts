@@ -201,7 +201,7 @@ export function tableGrowthPresentation(growth: TableGrowthDimensionV1): Dimensi
 interface TableGrowthOmissionPresentation {
   kind: TableGrowthOmissionV1['kind'];
   table: string;
-  /** The headline figure this omission actually has: a measured delta for a
+  /** The headline figure this omission has: a measured delta for a
    * compared table, or the current size for one with nothing to compare to. */
   figure: string;
   /** The byte window behind the figure, or the reason no window exists. A

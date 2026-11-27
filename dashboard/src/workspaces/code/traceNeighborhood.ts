@@ -78,7 +78,7 @@ interface TraceNeighborhood {
   readonly result: EnvelopeResult<GraphNeighborsPayloadV1> | undefined;
   /**
    * Hop-1 payloads of the expanded neighbours, keyed by neighbour id. A
-   * neighbour that failed is simply absent, which the model counts.
+   * neighbour that failed is absent, which the model counts.
    */
   readonly expanded: ReadonlyMap<string, GraphNeighborsPayloadV1>;
   /** At least one expansion is still in flight. */
@@ -125,7 +125,7 @@ export function useTraceNeighborhood(focusId: string): TraceNeighborhood {
 
   // `useQueries` returns a fresh array every render, so memoising on it would
   // rebuild the model, and therefore tear down and re-seed the simulation,
-  // sixty times a second. The identity that actually matters is which ids have
+  // sixty times a second. The identity that matters is which ids have
   // settled, which is exactly what this signature carries.
   const signature = hop1.map((id, i) => `${id}:${expansions[i]?.status ?? 'idle'}`).join('|');
   const expanded = useMemo(() => {

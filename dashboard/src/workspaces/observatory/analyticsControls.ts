@@ -125,7 +125,7 @@ export const DECLARED_RETENTION_LIFECYCLES: readonly DeclaredRetentionLifecycle[
 
 export interface RetentionBacklogReading {
   state: DomainStateKind;
-  /** Entries the finding source actually observed, or `null` when the source
+  /** Entries the finding source observed, or `null` when the source
    * publishes no count. Never coerced to 0. */
   observedEntries: number | null;
   /** The source's own reason, verbatim. */

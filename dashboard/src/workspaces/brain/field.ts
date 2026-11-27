@@ -23,7 +23,7 @@
  *       neighbouring column, an offset within a column costs nothing, an
  *       offset across one would be a lie about when the project was last seen.
  *
- *   y, indexed mass: how much TraceDecay actually holds for the project
+ *   y, indexed mass: how much TraceDecay holds for the project
  *       (stores + graph scopes + artifacts), on a log scale because the
  *       registry spans one artifact to several hundred.
  *
@@ -31,7 +31,7 @@
  *   brightness, recency again (`vitality`), so the left-hand columns burn and
  *       the dormant right-hand column sinks toward the substrate.
  *
- * A repository hub is materialised only when the repository genuinely has more
+ * A repository hub is materialised only when the repository has more
  * than one checkout. Then, and only then, the edges to its checkouts state
  * something real: these working copies share one git directory. The hub sits at
  * its checkouts' centroid, which is the honest position for "these ones".
@@ -93,12 +93,12 @@ interface FieldColumn {
   id: string;
   /** Axis tick label. */
   label: string;
-  /** The measurement the column actually bounds. */
+  /** The measurement the column bounds. */
   bound: string;
   count: number;
 }
 
-/** What the mass axis actually holds, so the caption can state the shape the
+/** What the mass axis holds, so the caption can state the shape the
  * axis has rather than leaving the reader to infer it from a crowd of bodies
  * along the bottom. */
 interface MassSummary {
@@ -212,7 +212,7 @@ const MAX_VITALITY_HORIZON_DAYS = 90;
  * and collapse every other project back to indistinguishable full brightness , 
  * which is the exact compression this parameter exists to remove, reintroduced
  * by a single outlier. At the ninetieth percentile the scale is set by the bulk
- * of the registry and the handful older than it simply rest at the floor,
+ * of the registry and the handful older than it rest at the floor,
  * which is what "dormant" should look like anyway.
  */
 export function vitalityHorizon(
@@ -257,7 +257,7 @@ const PACK_MIN = 4;
 /** Width of a packed cell's grid, inside the column's own half-width. */
 const PACK_WIDTH = 2 * COLUMN_HALF_WIDTH * 0.95;
 /** A body's drawn radius in field units, so the clearance test knows how much
- * room each one actually takes. The scene sizes bodies by the square root of
+ * room each one takes. The scene sizes bodies by the square root of
  * mass, and this mirrors that curve, otherwise the two heaviest projects in a
  * column, which are also the two largest crowns, are the pair most likely to be
  * left overlapping by a clearance tuned for the small ones. */
@@ -279,7 +279,7 @@ export function composeRegistryField(
     (max, project) => Math.max(max, indexedMass(project)),
     0,
   );
-  // The axis runs between the lightest and heaviest projects actually present.
+  // The axis runs between the lightest and heaviest projects present.
   // Anchoring the floor at zero instead would spend a quarter of the field on a
   // mass no registered project can have, every project holds at least one
   // store, and squash the range that carries the reading.
@@ -299,7 +299,7 @@ export function composeRegistryField(
   }));
 
   // Place column by column so the anti-overlap pass only ever compares bodies
-  // that could actually collide, and so its result cannot depend on the order
+  // that could collide, and so its result cannot depend on the order
   // repositories happen to arrive in.
   const byColumn = new Map<number, ProjectRegistryEntry[]>();
   for (const project of projects) {
@@ -395,7 +395,7 @@ export function composeRegistryField(
 
   // Shared-checkout repositories, and only those. The hub is the git directory
   // itself; its edges say "these working copies are the same repository", which
-  // is the one relation this registry actually knows.
+  // is the one relation this registry knows.
   const edges: FieldEdge[] = [];
   let sharedRepoCount = 0;
   for (const group of groups) {
@@ -415,7 +415,7 @@ export function composeRegistryField(
       label: group.label,
       kind: 'repository',
       // A hub carries no mass of its own; it is sized by how many working
-      // copies it actually binds together.
+      // copies it binds together.
       degree: group.projects.length,
       // Lit by its most recently seen checkout, the repository is exactly as
       // live as the liveliest copy of it.
@@ -437,7 +437,7 @@ export function composeRegistryField(
   // Margins in field units so a body's own radius has room inside the frame
   // rather than being cropped by the bezel.
   //
-  // The vertical margins are DERIVED from the bodies that actually sit at the
+  // The vertical margins are DERIVED from the bodies that sit at the
   // two ends rather than being a flat allowance. A flat 0.55 spent a fifth of
   // the frame's height on clearance the largest body (radius 0.24) does not
   // need and the smallest (0.09) needs far less of, which read as an axis
@@ -579,7 +579,7 @@ function channel(label: string, values: readonly number[]): HoldingChannel {
 }
 
 /**
- * What the registry rail's per-project counts are actually worth.
+ * What the registry rail's per-project counts are worth.
  *
  * Every row printed "1 st · 4 art", and on a real registry that is very nearly
  * literal: `store_count` is 1 for all forty-four projects and `artifact_count`

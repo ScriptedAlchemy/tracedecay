@@ -22,7 +22,7 @@ const FOCUS: TraceFocus = {
   degree: 24,
 };
 
-/** Requests actually issued, so the depth claim can be checked against them. */
+/** Requests issued, so the depth claim can be checked against them. */
 let requested: string[] = [];
 
 function mockFetch(override?: (url: string) => Response | undefined) {

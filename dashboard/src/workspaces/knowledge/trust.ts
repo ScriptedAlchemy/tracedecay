@@ -19,10 +19,10 @@ import {
 } from '../../contracts/generated.ts';
 
 interface TrustBand {
-  /** Printed label, e.g. `0.75–1.00`. */
+  /** Printed label, for example `0.75–1.00`. */
   label: string;
   count: number;
-  /** Inclusive lower edge, 0–1. */
+  /** Inclusive lower edge, 0 to 1. */
   lower: number;
   /** Exclusive upper edge (inclusive at 1). */
   upper: number;
@@ -34,7 +34,7 @@ export interface TrustDistribution {
   source: TrustSource;
   bands: TrustBand[];
   total: number;
-  /** How many bands actually hold facts. */
+  /** How many bands hold facts. */
   occupied: number;
   /**
    * Every fact is in one band, so there is no shape to draw. The view states
@@ -67,7 +67,7 @@ function finish(source: TrustSource, bands: TrustBand[]): TrustDistribution {
 }
 
 /**
- * Pick the finest-grained trust distribution that actually carries mass.
+ * Pick the finest-grained trust distribution that carries mass.
  *
  * Order is deliberate. The ten-bucket histogram is the most informative when
  * it works, so it is tried first; the four status bands are coarser but count
@@ -120,7 +120,7 @@ export function composeTrustDistribution(
   );
 }
 
-/** What the counts in a distribution actually cover, for the plate's caption.
+/** What the counts in a distribution cover, for the plate's caption.
  * Never guessed, each source has one true answer. */
 export function trustSourceNote(source: TrustSource): string {
   switch (source) {
@@ -151,13 +151,13 @@ export interface LoadedTrust {
   spread: number | null;
   /**
    * True when the loaded facts are packed tightly enough that a per-row rail
-   * scaled 0–1 is the same length on every row. Below this the rail is not a
+   * scaled 0 to 1 is the same length on every row. Below this the rail is not a
    * ranking, it is decoration on a column of identical values.
    */
   flat: boolean;
 }
 
-/** The trust spread across the facts actually on screen. `null` when there is
+/** The trust spread across the facts on screen. `null` when there is
  * nothing loaded to measure. */
 export function summarizeLoadedTrust(
   facts: ReadonlyArray<Pick<MemoryFactRowV1, 'trust_score'>>,

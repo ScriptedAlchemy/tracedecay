@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { z } from 'zod';
 
 /**
- * Whether the selected project is the one the daemon is actually serving.
+ * Whether the selected project is the one the daemon is serving.
  *
  * This is a scope fact, not a cosmetic one: the project gateway
  * (`crates/tracedecay-dashboard-api/src/project_gateway.rs`) refuses mutations
@@ -10,7 +10,7 @@ import { z } from 'zod';
  * that can write under one selected project cannot write under another, and
  * the difference is invisible from the project id alone.
  *
- * `unresolved` is the third state and it is load-bearing. A deep link carries
+ * `unresolved` is the third state and it must stay distinct. A deep link carries
  * an opaque id and nothing else, so until the registry has been read the
  * dashboard does not know which of the other two this is, and must not guess,
  * in either direction: guessing `active` offers a write that will be refused,
@@ -135,7 +135,7 @@ export function activationFor(reading: RegistryReading): ProjectActivation {
  * What this project is called, preferring the registry over the caller.
  *
  * A deep link's `scopeLabel` is an unverified claim: it can be stale from
- * before a rename, or simply be whatever text was pasted next to a real
+ * before a rename, or be whatever text was pasted next to a real
  * project id. It is a display string that reaches prose about what a write
  * will affect, so once the registry has named the project, that name is the
  * label, anything else lets a URL choose what the dashboard calls a project it
@@ -279,7 +279,7 @@ export function explorerReadScope(scope: DashboardScope): ScopeWritability {
  * One exhaustive switch for all of them. The two refusing states are answered
  * with the authority's own `reason`, reworded per call site they would drift
  * apart, and the reason is the same fact everywhere, while `writable` is the
- * only state whose wording is genuinely local, because what is being written
+ * only state whose wording is local, because what is being written
  * differs (a scheduler toggle or settings change) and the target has to be
  * named.
  *
@@ -400,7 +400,7 @@ export const UNSCOPED_CACHE_KEY = 'unscoped';
  * scope, so asking it collapses every route into the unscoped bucket there and
  * stops agreeing with `scopeKey`, which lets a writer put a fresh reading into
  * a key no reader is watching. So a scoped route keys by scope in every scope,
- * including `all`, and only the genuinely unscoped routes share one entry.
+ * including `all`, and only the unscoped routes share one entry.
  */
 export function requestScopeKey(scope: DashboardScope, url: string): string {
   return unscopedRoute(url) ? UNSCOPED_CACHE_KEY : scopeKey(scope);

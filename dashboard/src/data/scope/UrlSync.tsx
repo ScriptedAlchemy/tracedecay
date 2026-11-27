@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router';
 import { useScope } from './store.ts';
 
-/** Bidirectional URL <-> scope binding (plan 11: deep links capture opaque
+/** Two-way binding between URL and scope (plan 11: deep links capture opaque
  * scope; plan 11a: narrowing updates the URL). The URL carries only the
  * opaque project id and display label, never paths or payloads. A missing
  * param is the all-projects default; an unknown id still renders as a chip
@@ -14,7 +14,7 @@ export function ScopeUrlSync() {
   const selectAllProjects = useScope((s) => s.selectAllProjects);
   const applyingFromUrl = useRef(false);
 
-  // URL -> store (initial load and back/forward navigation).
+  // URL to store (initial load and back/forward navigation).
   useEffect(() => {
     const id = searchParams.get('scope');
     // Read the store rather than the closure: this effect does not depend on
@@ -52,7 +52,7 @@ export function ScopeUrlSync() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
-  // Store -> URL (user selections), replace-not-push to keep history calm.
+  // Store to URL (user selections), replace-not-push to keep history calm.
   useEffect(() => {
     if (applyingFromUrl.current) return;
     // Stale-render guard: on mount (and any lagging render) this closure can

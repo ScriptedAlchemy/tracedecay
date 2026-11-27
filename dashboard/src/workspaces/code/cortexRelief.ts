@@ -184,7 +184,7 @@ export interface CortexModel {
   readonly regions: readonly CortexRegion[];
   readonly drawnRegions: readonly CortexRegion[];
   readonly world: { readonly width: number; readonly height: number };
-  /** Strata actually laid out, bedrock first. */
+  /** Strata laid out, bedrock first. */
   readonly strata: readonly {
     readonly depth: number;
     readonly y: number;

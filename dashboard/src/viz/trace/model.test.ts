@@ -101,7 +101,7 @@ describe('buildTraceModel', () => {
     const drawn = new Set(built.nodes.map((node) => node.id));
     for (const membrane of built.membranes) {
       // An enclosure a reader can see flow enter and leave needs ≥2 members,
-      // and every member must be a symbol actually on the field.
+      // and every member must be a symbol on the field.
       expect(membrane.of.length).toBeGreaterThanOrEqual(2);
       for (const member of membrane.of) expect(drawn.has(member)).toBe(true);
     }

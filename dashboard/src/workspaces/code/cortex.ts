@@ -75,7 +75,7 @@ export function densityReading(totals: GraphTotalsV1): RegisterReading {
 /**
  * The seven cells of the register, in order. Nodes, edges and files are the
  * served totals; modules and density derive from them; layout and rank name
- * the drawing rule the field beneath actually uses, which is a property of the
+ * the drawing rule the field beneath uses, which is a property of the
  * renderer and not of the read.
  */
 export function cortexRegister(payload: {

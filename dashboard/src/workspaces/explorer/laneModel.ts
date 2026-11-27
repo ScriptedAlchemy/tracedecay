@@ -11,7 +11,7 @@
  * Everything here is derived by parsing the generated contract types
  * (`ExplorerSourceProgressV1`, `ExplorerResultPageV1`, `ExplorerSourceOutcomeV1`)
  * rather than by poking at fields on an `unknown`. The one place the wire is
- * genuinely untyped, the result rows, is isolated in `narrowPageRows` below,
+ * untyped, the result rows, is isolated in `narrowPageRows` below,
  * which documents the backend change that would delete it.
  */
 import type { EvidenceQuality } from '../../ui/EvidencePattern.tsx';
@@ -276,7 +276,7 @@ export function laneFromSourceProgress(
   switch (source.outcome) {
     case 'ready': {
       // `page` is nullable on every outcome in the Rust type, so a `ready`
-      // source that arrived without one has genuinely returned nothing to
+      // source that arrived without one has returned nothing to
       // show, which is not the same as an error, and not the same as never
       // having answered.
       const page = source.page;
@@ -451,7 +451,7 @@ export function browseLane<T>(
   };
 }
 
-/** Rows the lane actually delivered. Empty for every state but `ready` and
+/** Rows the lane delivered. Empty for every state but `ready` and
  * `partial`, where emptiness means the source answered with nothing. */
 export function laneHits(read: ExplorerLaneReadModel): readonly Hit[] {
   return read.state === 'ready' || read.state === 'partial' ? read.hits : [];

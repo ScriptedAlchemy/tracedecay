@@ -89,7 +89,7 @@ export function kindColor(kind: string, light: boolean): string {
 /**
  * Both sides of the same hue, for DOM marks. Sigma has to be handed one
  * resolved colour because a canvas cannot read CSS variables, but an HTML mark
- * can simply carry both and let the stylesheet pick, which is how the rest of
+ * can carry both and let the stylesheet pick, which is how the rest of
  * this console answers a theme flip (see the `[data-theme=light]` variants in
  * the shell). Returned as custom-property values so the caller styles with
  * `bg-[var(--kind-dark)]` and a `[[data-theme=light]_&]` variant, with no

@@ -33,7 +33,7 @@
  *                         mechanically rather than by reading the stylesheet.
  *   the type system       the resolved font family and numeric behaviour of the
  *                         display, body, mono and legend tiers, read off live
- *                         elements. Tabular figures are the load-bearing one:
+ *                         elements. Tabular figures matter most here:
  *                         digits must not change width between renders.
  *
  * Env:
@@ -164,7 +164,7 @@ async function setTheme(page: Page, theme: Theme): Promise<void> {
 
 async function setMotion(page: Page, preference: 'system' | 'reduced' | 'full'): Promise<void> {
   // Driven through the surface's own radio group when it is on screen, so this
-  // exercises the control a reader actually uses rather than reaching past it
+  // exercises the control a reader uses rather than reaching past it
   // into storage.
   const radio = page.getByRole('radio', {
     name: preference === 'system' ? /^System/ : preference === 'reduced' ? 'Reduced' : 'Full',
@@ -255,7 +255,7 @@ async function hoverField(page: Page): Promise<boolean> {
 }
 
 /**
- * The typographic system as the browser actually resolved it.
+ * The typographic system as the browser resolved it.
  *
  * Read from live elements rather than from the stylesheet, because the question
  * is not what was written but what the cascade produced.
@@ -485,7 +485,7 @@ async function main(): Promise<void> {
     await gotoSurface(page, '/code');
     typography = await readTypography(page);
 
-    // Does the app's own control actually reach the stylesheet?
+    // Does the app's own control reach the stylesheet?
     await openTrace(page);
     await setMotion(page, 'reduced');
     const reducedState = await page.evaluate(() => ({

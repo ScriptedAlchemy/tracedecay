@@ -1,5 +1,5 @@
 /**
- * The memory readings, proved against the shapes their handlers actually emit.
+ * The memory readings, proved against the shapes their handlers emit.
  *
  * Every case here is a lie the naive rendering of one of these payloads would
  * have told. The model exists to make each of them a compile-and-test-time
@@ -119,8 +119,8 @@ describe('trustHistoryReading', () => {
         trustEvent({ details_availability: 'unknown' }),
       ]),
     );
-    // The zero is as load-bearing as the counts: "0 of 3 available" is what
-    // lets the panel say how much of the audit it can actually show.
+    // The zero matters as much as the counts: "0 of 3 available" is what
+    // lets the panel say how much of the audit it can show.
     expect(reading.availability).toEqual({
       available: 0,
       redacted: 1,

@@ -273,7 +273,7 @@ function VolumeField({
   inspectedBucket: string | null;
   onInspectBucket: (key: string | null) => void;
 }) {
-  // Sorted oldest→newest so "last" is "newest" whatever `coverage.ordering`
+  // Sorted oldest to newest so "last" is "newest" whatever `coverage.ordering`
   // the route answered with; the keys are ISO-prefixed and sort as strings.
   const buckets = useMemo(() => [...payload.buckets].sort(compareKeys), [payload.buckets]);
   const count = buckets.length;

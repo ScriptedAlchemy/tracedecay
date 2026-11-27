@@ -68,7 +68,7 @@ export function TelemetryReadModel({
 
 /** Aggregate table-growth coverage for the whole read. The store cards below
  * carry per-store detail; this is the only place that says how much of the
- * fleet the per-table view actually covers, so a run where four of five stores
+ * fleet the per-table view covers, so a run where four of five stores
  * never produced a comparison cannot read as a complete picture. */
 function TableGrowthFleetCoverage({ coverage }: { coverage: DashboardCoverageV1 }) {
   const complete = coverage.completeness === 'complete';

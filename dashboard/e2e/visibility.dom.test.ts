@@ -4,7 +4,7 @@ import { VISIBILITY_PROBE, assertVisibilityReport, type VisibilityReport } from 
 /**
  * The probe ships as source text so `page.evaluate` can take it as an
  * expression; evaluating that same string here means the test covers the
- * artifact the harness actually runs, not a re-typed copy of it.
+ * artifact the harness runs, not a re-typed copy of it.
  */
 function probe(): VisibilityReport {
   // eslint-disable-next-line no-new-func -- exercising the shipped source text

@@ -93,7 +93,7 @@ function expectValue(schema: ZodType<unknown>, value: unknown, what: string): vo
 }
 
 /**
- * Exact fixture route → the generated schema for the Rust handler bound to it
+ * Exact fixture route to the generated schema for the Rust handler bound to it
  * (route bindings in `src/dashboard/mod.rs`).
  */
 const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {

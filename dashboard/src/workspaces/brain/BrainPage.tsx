@@ -29,7 +29,7 @@ import {
   type ProjectRepoGroup,
 } from '../../contracts/generated.ts';
 
-/** Brain. Two surfaces, because the question genuinely changes when a project
+/** Brain. Two surfaces, because the question changes when a project
  * is selected.
  *
  * Unscoped, the question is "what does this daemon look after?" and the answer
@@ -528,10 +528,10 @@ function ProjectRow({
       )}
     >
       {/* Five columns on one line asked for roughly 385px inside a 296px rail,
-       * so the age column was simply clipped off the right edge of every row in
+       * so the age column was clipped off the right edge of every row in
        * the registry. The same five facts stack into three lines that fit:
        * identity and age, then where it lives, then what it holds. Dense, but
-       * composed -- nothing here is allowed to run off its own card. */}
+       * composed: nothing here may run off its own card. */}
       <span className="flex w-full items-baseline gap-2">
         <RecencyDot lastSeenAt={project.last_seen_at} className="self-center" />
         <span className="min-w-0 flex-1 truncate text-xs font-medium text-text-primary">
@@ -563,7 +563,7 @@ function ProjectRow({
           </span>
         ) : null}
         <span aria-hidden className="td-rule" />
-        {/* The row carries the channel that actually varies across the
+        {/* The row carries the channel that varies across the
           * registry, graph scopes span 0 to 242 here, plus any other channel
           * that departs from what the rail stated above it. A project holding
           * five artifacts where everything else holds four IS a reading, and

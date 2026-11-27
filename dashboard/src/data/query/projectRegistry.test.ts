@@ -10,7 +10,7 @@
  * offered.
  *
  * So the assertions here are about reachability rather than shape: every key a
- * registry reader uses must be one the invalidation actually matches.
+ * registry reader uses must be one the invalidation matches.
  */
 import { QueryClient } from '@tanstack/react-query';
 import { afterEach, describe, expect, it, vi } from 'vitest';

@@ -26,7 +26,7 @@ import {
 } from './workAccountingModel.ts';
 
 /**
- * The five cards this build can actually source, and the one matrix card.
+ * The five cards this build can source, and the one matrix card.
  *
  * Three dimensions have a mounted read behind them (concurrency and blocked
  * effort off the work-product graph; reruns and duplicate effects off the

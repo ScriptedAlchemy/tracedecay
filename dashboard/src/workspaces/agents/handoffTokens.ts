@@ -14,7 +14,7 @@ import type { WorkResult, WorkRoute } from '../work/workApi.ts';
  * `handoff.ts` reads `WorkItemV1.handoffs` off the work-product graph: the
  * record of one actor having handed a task to another, with the evidence it
  * reached and the questions it left. That is history, and it is complete only
- * for handoffs that actually happened.
+ * for handoffs that happened.
  *
  * This module reads the daemon's grant store instead, through
  * `operation.handoff.list_task_handoffs` (`POST /api/application/handoff/list-task`).

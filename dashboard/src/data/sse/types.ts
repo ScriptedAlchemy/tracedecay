@@ -82,7 +82,7 @@ export interface SseBatch<TPayload = unknown> {
   refetch: boolean;
   /**
    * True when the projection is marked stale (overflow). Stale is sticky until
-   * a canonical refresh actually succeeds, see {@link ReseedToken}.
+   * a canonical refresh succeeds, see {@link ReseedToken}.
    */
   stale: boolean;
 }
@@ -112,7 +112,7 @@ export interface ReseedToken {
 /**
  * What settling a transaction did. Success and failure are separate variants on
  * purpose: treating a rejected refresh as a successful one is what silently
- * forgave staleness the client had never actually refetched.
+ * forgave staleness the client had never refetched.
  */
 export type ReseedOutcome =
   /** The refresh was the newest truth; the state it superseded is cleared. */

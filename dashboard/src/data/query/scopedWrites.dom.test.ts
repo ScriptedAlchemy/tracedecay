@@ -92,7 +92,7 @@ describe('writes under a scope that does not accept them', () => {
     });
 
     /**
-     * Settings refuses before its *refresh*, not merely before its PATCH. The
+     * Settings refuses before its *refresh* as well as before its PATCH. The
      * mutation re-reads settings to recheck the held revision, and once the
      * control is disabled that read is work nobody asked for, and it would make
      * a disabled control look like it had begun something.

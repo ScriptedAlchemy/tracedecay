@@ -67,7 +67,7 @@ const handlers = [
 /* ==========================================================================
  * HTTP fault injection
  *
- * The transport failures a workspace read can actually suffer, named after
+ * The transport failures a workspace read can suffer, named after
  * what went wrong on the wire rather than after the state they happen to
  * produce today. Tests assert the mapping from one to the other, so encoding
  * the expected state here would make those assertions circular.

@@ -110,7 +110,7 @@ describe('shared shell truthfulness', () => {
       state: 'writable',
       target: 'Canonical project',
     });
-    // Not merely outvoted, gone. The claim is not left anywhere on the bar.
+    // The claim is gone, not outvoted: nothing is left anywhere on the bar.
     expect(queryByText('fabricated label')).toBeNull();
   });
 
@@ -426,7 +426,7 @@ function projectRecord(projectId: string, label: string): PublicCodeProject {
 }
 
 /**
- * A `GET /api/projects/{id}` body the daemon would actually send.
+ * A `GET /api/projects/{id}` body the daemon would send.
  *
  * Parsed through the generated schema rather than hand-shaped, so a body this
  * dashboard could not read cannot masquerade as a successful reading, the stub
@@ -460,7 +460,7 @@ function entryPayload({
  * `{status}` stub they were once written as. The distinction is the whole
  * point of these cases, a hand-shortened body fails schema validation and
  * arrives as a build mismatch, which is a different reading from the one the
- * daemon is actually reporting.
+ * daemon is reporting.
  */
 function failurePayload(status: string, error: string | null = null): ProjectContextPayloadV1 {
   return ProjectContextPayloadV1Schema.parse({
@@ -478,7 +478,7 @@ function failurePayload(status: string, error: string | null = null): ProjectCon
  *
  * The shape the daemon sends for a profile with more projects than the page
  * holds, `truncated: true`, `limit` entries, and any project past the end
- * simply missing. Reconciliation must not consult this at all, which the test
+ * missing. Reconciliation must not consult this at all, which the test
  * using it asserts directly by checking the route is never requested.
  */
 function truncatedListing(): ProjectsPayloadV1 {

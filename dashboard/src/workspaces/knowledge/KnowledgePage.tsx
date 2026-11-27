@@ -80,7 +80,7 @@ export function KnowledgePage() {
     // allowed its natural height: pinned to the viewport it squeezed the
     // aperture and the ledger to nothing and painted them through the summary
     // bay beneath. The shell's `main` is the scroll container, so giving the
-    // stack its real height simply makes the page scroll; from `lg` the panes
+    // stack its real height makes the page scroll; from `lg` the panes
     // split the viewport and each owns its overflow again.
     <div className="flex min-h-full flex-col lg:h-full lg:min-h-0">
       {/* `flex-wrap`, because the note under the camera is prose and the
@@ -500,7 +500,7 @@ function LedgerBay({
         <FactSortControl sort={sort} onSort={onSort} />
       </div>
       {/* Named, because internal scrolling is licensed for LABELLED regions
-        * only, and this is the element that actually scrolls. Empty and refused
+        * only, and this is the element that scrolls. Empty and refused
         * readings render no focusable rows, so it stays keyboard-operable. */}
       <div role="region" aria-label="Fact rows" tabIndex={0} className="min-h-0 flex-1 overflow-auto">
         {body}
@@ -768,7 +768,7 @@ function TrustDistributionPlate({ distribution }: { distribution: TrustDistribut
       </div>
       {/* Bands with no facts keep their row and print their zero: an absent
        * band drawn as a missing row would read as a narrower scale than the
-       * one actually measured. */}
+       * one measured. */}
       <figcaption className="text-3xs leading-relaxed text-text-muted">
         {distribution.total.toLocaleString()} facts across {distribution.bands.length} bands,{' '}
         {distribution.occupied} of them occupied · {trustSourceNote(distribution.source)}
@@ -777,7 +777,7 @@ function TrustDistributionPlate({ distribution }: { distribution: TrustDistribut
   );
 }
 
-/** "2026-05-08" -> "May 8". The growth caption prints a date beside a facts
+/** "2026-05-08" becomes "May 8". The growth caption prints a date beside a facts
  * count in a narrow rail; the full ISO stamp alone (10 chars) leaves no room
  * for the count next to it before the two end labels collide. The full date
  * stays in the chart's `ariaLabel`, this is a display-only compaction, not a
@@ -791,7 +791,7 @@ function formatShortDate(iso: string): string {
 /** One category's share of the loaded fact set, read the same way the fact
  * list itself is: a printed count for precision, a rail scaled to the busiest
  * category on screen for ranking. No fabricated denominator, the rail
- * measures against the largest category actually present, not an assumed
+ * measures against the largest category present, not an assumed
  * total. */
 function CategoryBar({ row, ceiling }: { row: MemoryCategoryCountV1; ceiling: number }) {
   const fraction = ceiling > 0 ? row.count / ceiling : null;

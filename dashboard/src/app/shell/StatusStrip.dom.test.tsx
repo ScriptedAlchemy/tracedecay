@@ -111,7 +111,7 @@ describe('StatusStrip', () => {
 });
 
 /**
- * What is actually announced, as opposed to what is on screen.
+ * What is announced, as opposed to what is on screen.
  *
  * The feed reading changes with no user action, which is why it is a live region
  * at all. `role="status"` sat on the state word alone and the sentence saying

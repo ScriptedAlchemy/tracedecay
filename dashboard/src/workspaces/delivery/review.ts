@@ -18,7 +18,7 @@ import type { EvidenceGrade } from './evidence.ts';
  * `source_url` and the Code workspace's Compare view.
  */
 
-/** `refs/heads/feature/x` → `feature/x`; Compare resolves branch names. */
+/** `refs/heads/feature/x` becomes `feature/x`; Compare resolves branch names. */
 function branchName(branchRef: string): string {
   return branchRef.startsWith('refs/heads/') ? branchRef.slice('refs/heads/'.length) : branchRef;
 }

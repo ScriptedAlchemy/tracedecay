@@ -139,7 +139,7 @@ export function AgentsPage() {
     setSelection(id === selectedId ? null : node);
   };
 
-  // The token frontier is read for a session this page can actually name: the
+  // The token frontier is read for a session this page can name: the
   // selected one, or, with nothing selected, the newest top of the tree, and
   // the inspector says which. Without a session there is no question to ask,
   // and the surface says so rather than drawing an empty frontier.

@@ -8,7 +8,7 @@
  *
  * `throughput.test.ts` proves the reducer's side of that arithmetic. This file
  * proves the part only React can answer: how many times a *view* function body
- * actually runs while the stream is saturated.
+ * runs while the stream is saturated.
  *
  * What "renders/s/view" counts here: every invocation of a component function
  * that subscribes to the live event stream through `useLiveActivity` and

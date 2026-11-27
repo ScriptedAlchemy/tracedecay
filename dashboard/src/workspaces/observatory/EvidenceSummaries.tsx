@@ -52,7 +52,7 @@ import { formatBytes, storageFindingLabel } from './storageModel.ts';
 /**
  * The compact read-out inside each overview panel.
  *
- * Every body draws the instrument the authority actually supports and nothing
+ * Every body draws the instrument the authority supports and nothing
  * more: a dimension the projector did not publish is a labelled row with an
  * em dash and an empty track, never a bar at zero; a read that produced no
  * payload is the daemon's word, not a skeleton that looks like data.

@@ -202,7 +202,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-/** Trust as what it is: one measured quantity on the 0–1 scale, printed and
+/** Trust as what it is: one measured quantity on the 0 to 1 scale, printed and
  * given the same length every other readout in the product uses, with the
  * method named beside it. */
 function TrustBlock({ subject }: { subject: MemoryFactRowV1 | undefined }) {
@@ -457,7 +457,7 @@ function Term({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-/** Helpful vs unhelpful feedback as one proportional split bar. */
+/** Helpful versus unhelpful feedback as one proportional split bar. */
 export function FeedbackSplit({
   helpful,
   unhelpful,

@@ -9,7 +9,7 @@
  * The invariant they carry forward is the one that mattered: a refusal is never
  * a board. Every failure the daemon can return is asserted to render as its own
  * stated reason, and the empty-board case is asserted to be reachable *only*
- * from a product graph that actually said the board was empty.
+ * from a product graph that said the board was empty.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';

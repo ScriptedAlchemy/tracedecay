@@ -4,7 +4,7 @@
  * The graph's dependency layering: how deep the import/dependency chains run,
  * and which directories form the clusters those chains cross. Where the spine
  * beside it ranks symbols by how *connected* they are, this ranks directories
- * by how *entangled* they are, which is the measurement that actually predicts
+ * by how *entangled* they are, which is the measurement that predicts
  * what a change will drag with it.
  *
  * The reading that matters is `max_depth` against `ideal_depth`: the producer
@@ -12,10 +12,10 @@
  * has beyond what its own structure requires.
  *
  * Truthfulness. This is a BUDGETED scan, `scan` carries the file and edge caps
- * it ran under, how many it actually examined, and whether the answer came from
+ * it ran under, how many it examined, and whether the answer came from
  * cache. A depth computed over a truncated file set is a floor, not a depth, so
  * a capped scan says so on the same line as the number rather than underneath
- * it. Nothing here reports a total the scan did not actually reach.
+ * it. Nothing here reports a total the scan did not reach.
  */
 import {
   StructureReadV12Schema as StrataReadSchema,

@@ -116,7 +116,7 @@ export function EffectiveConfigTable({
 
   // Focus returns to the edited row when a save resolves and the control the
   // reader was on, Retry or Load current values, unmounts. Only when focus was
-  // actually lost to the document:
+  // lost to the document:
   // a keystroke in another scope's input also ends a pending save, and that
   // input must keep its focus.
   const status = editor.state.status;

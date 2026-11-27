@@ -1,8 +1,8 @@
 /**
  * Reduced-motion preference for the felt surfaces.
  *
- * The sensory contract makes reduced motion a first-class rendering mode, not
- * a degradation, so it needs a first-class control: the OS preference is the
+ * The sensory contract makes reduced motion a full rendering mode, not
+ * a degradation, so it needs its own control: the OS preference is the
  * default, and a reader can pin it either way from the surface itself. The
  * choice persists, because being made to re-assert it on every visit is the
  * accessibility failure this is meant to answer.

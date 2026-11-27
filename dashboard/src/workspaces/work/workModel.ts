@@ -4,7 +4,7 @@ import type { WorkTaskCoverage, WorkTaskView } from './workProductView.ts';
 /**
  * What a Work projection says about itself.
  *
- * Every stage below is read off a field the contract actually carries,
+ * Every stage below is read off a field the contract carries,
  * `accepted_proposal`, `task_accepted`, `execution_admitted`, and whether the
  * graph version's runtime projection contains a terminal attempt. Nothing here
  * is a lane.
@@ -75,7 +75,7 @@ export function stageState(stage: WorkStage): DomainStateKind {
 }
 
 /**
- * How much of the board this page is actually showing.
+ * How much of the board this page is showing.
  *
  * The current product graph is one complete, immutable head rather than a
  * paginated projection. `returned` and `total` are therefore identical; the

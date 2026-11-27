@@ -309,7 +309,7 @@ describe('CommandPalette keyboard operation', () => {
     await user.keyboard('{ArrowDown}');
     const second = activeOptionLabel();
     expect(second).not.toBe(first);
-    // Announced, not merely styled: a highlight with no activedescendant is
+    // The highlight must be announced as well as styled: a highlight with no activedescendant is
     // invisible to a screen reader.
     expect(document.getElementById(
       document.querySelector('input[role="combobox"]')!.getAttribute('aria-activedescendant')!,
@@ -381,7 +381,7 @@ describe('CommandPalette keyboard operation', () => {
     // `is_active` is optional on the wire. Reading its absence as `false`
     // would disable writes on the active project and tell the reader, in a
     // full sentence, that it is not the active one, a confident wrong answer
-    // built out of a field the daemon simply did not send.
+    // built out of a field the daemon did not send.
     const user = userEvent.setup();
     stubListing(listing([registryEntry('proj-quiet', 'Unstated', undefined)]));
     const { findByText } = renderPalette();

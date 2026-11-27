@@ -1,36 +1,36 @@
 # Visual audit baselines
 
-This directory holds the **committed reference screenshots** the visual audit
-diffs against. It ships empty on purpose. Baselines are established
-deliberately, not auto-generated, so a diff always compares against a reviewed
-image.
+This directory holds the committed reference screenshots that the visual audit
+diffs against. It ships empty on purpose. A person establishes baselines after
+reviewing them, and nothing generates them automatically, so a diff always
+compares against a reviewed image.
 
-## How it works
+## How the audit works
 
 `pnpm run visual:audit` renders every registered surface
-(`stories/registry.ts`) across light+dark themes at 320 / 768 / 1440 widths and
-writes PNGs + `manifest.json` to `../audit-gallery/` (generated,
-git-ignored).
+(`stories/registry.ts`) in the light and dark themes at widths of 320, 768, and
+1440 px. It writes PNGs and `manifest.json` to `../audit-gallery/`, which is
+generated and git-ignored.
 
-`pnpm run visual:audit -- --diff` re-runs the capture and, for each screenshot,
-runs [pixelmatch](https://github.com/mapbox/pixelmatch) against the baseline of
-the **same filename** in this directory:
+`pnpm run visual:audit -- --diff` re-runs the capture. For each screenshot it
+runs [pixelmatch](https://github.com/mapbox/pixelmatch) against the baseline
+with the same filename in this directory:
 
 | baseline state        | manifest `diff.status` |
 | --------------------- | ---------------------- |
 | file present, equal   | `match`                |
-| file present, differs | `diff` (+ diff PNG in `audit-gallery/diffs/`) |
+| file present, differs | `diff` (and a diff PNG in `audit-gallery/diffs/`) |
 | file absent           | `no-baseline`          |
 | dimensions differ     | `size-mismatch`        |
 
-## Establishing / updating baselines
+## Establishing and updating baselines
 
 1. Run `pnpm run visual:audit` and review `../audit-gallery/`.
 2. When the surfaces look correct, copy the approved PNGs here:
    ```sh
    cp ../audit-gallery/*.png .
    ```
-3. Commit the baselines. Subsequent `--diff` runs flag any drift.
+3. Commit the baselines. Later `--diff` runs flag any change.
 
 Filenames follow `<surface-id>__<theme>__<width>.png`
-(e.g. `observatory__dark__1440.png`).
+(for example `observatory__dark__1440.png`).

@@ -3,7 +3,7 @@
  *
  * What this suite protects is not the picture, it is the four claims that make
  * the picture admissible: a region is placed at a depth one of its own files
- * actually has, area carries the file count, a contour is a real interval of a
+ * has, area carries the file count, a contour is a real interval of a
  * real quantity, and nothing the drawing cap folds out disappears from the
  * model the table reads.
  */

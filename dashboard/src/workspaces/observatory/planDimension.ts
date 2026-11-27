@@ -23,7 +23,7 @@
  *                card says so in those words rather than borrowing the read's
  *                frame and implying a measurement was attempted.
  *
- * The distinction between the last two is load-bearing. `unmeasured` says the
+ * The last two must stay distinct. `unmeasured` says the
  * daemon looked and could not answer; `unpublished` says nothing on the wire
  * answers this question yet. Collapsing them would turn a missing server
  * capability into an apparent measurement failure.
@@ -238,7 +238,7 @@ export function planDimensionPresentation(
   };
 }
 
-/** How many dimensions of a set actually carry a figure. A header that said
+/** How many dimensions of a set carry a figure. A header that said
  * "13 budgets" over eleven unavailable cards would be a claim the read cannot
  * support. */
 function measuredCount(dimensions: readonly PlanDimension[]): number {

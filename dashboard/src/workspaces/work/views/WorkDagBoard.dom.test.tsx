@@ -22,7 +22,7 @@ import { WorkPage } from '../WorkPage.tsx';
 /**
  * A graph with two strata under one root, a soft relation of each kind, a
  * task the authority left without a kanban card, and a critical path the
- * authority weighted over root → middle → leaf.
+ * authority weighted over root, middle, then leaf.
  */
 const GRAPH: WorkGraphVersionSpec = {
   tasks: [

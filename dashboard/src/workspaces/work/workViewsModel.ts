@@ -34,7 +34,7 @@ import type { WorkTaskView } from './workProductView.ts';
 
 /**
  * The four Work projections, derived from the reads this build can
- * actually make.
+ * make.
  *
  * Each projection maps onto a grammar the app has already proved:
  * the DAG onto transit strata, the timeline onto the loom weave, the causal
@@ -448,7 +448,7 @@ export interface WorkWeaveReading {
  * Distinct from `channelGap` on purpose. These are not schema absences, the
  * contract carries the measurement, so reporting them as `unsupported_schema`
  * would tell a reader the build cannot do something it can. Each one is the
- * state the read actually returned, in that state's own words.
+ * state the read returned, in that state's own words.
  */
 export function attemptChannelGap(
   reading: WorkAttemptReading,

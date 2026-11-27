@@ -5,9 +5,9 @@
  * stand left and its callees right as bars on one call-site scale, two hops
  * deep, with every drawn call link as a connector between row ports.
  *
- *   `viz/trace/model.ts`  wire payload → model and counts. Every figure
+ *   `viz/trace/model.ts`  wire payload to model and counts. Every figure
  *                         printed on this surface comes from there.
- *   `viz/trace/plate.ts`  model → geometry. Decides no number.
+ *   `viz/trace/plate.ts`  model to geometry. Decides no number.
  *
  * DEPTH is not decided here. `traceNeighborhood.ts` is the only module that
  * knows a two-hop neighbourhood costs more than one request, and it says why
@@ -44,7 +44,7 @@ import { useTraceNeighborhood } from './traceNeighborhood.ts';
  * graph routes, while a click inside the trace field holds only what the
  * plate carries, id, kind, name, file and line. A `GraphNodeV1` satisfies
  * this, so the richer sources pass straight through; the trace field states
- * what it actually knows instead of padding the rest of the wire shape with
+ * what it knows instead of padding the rest of the wire shape with
  * nulls it never received.
  */
 export interface TraceFocus {

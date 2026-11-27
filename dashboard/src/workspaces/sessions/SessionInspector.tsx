@@ -624,7 +624,7 @@ function TranscriptMessages({
    * Focus lands on the range line rather than the first row, because the
    * range line is the answer a reader who just paged is holding, which page
    * am I on now, and it renders in every state, including an empty page.
-   * Only when focus was actually orphaned.
+   * Only when focus was orphaned.
    */
   useEffect(() => {
     if (pageRequest === 0) return;

@@ -43,8 +43,8 @@ interface AgentHandoff {
   readonly handedOffAtMicros: number;
   /** Evidence the handing-off actor had reached and is passing on. */
   readonly evidenceFrontier: readonly string[];
-  /** Questions the handing-off actor did NOT answer. The load-bearing half of
-   * the record: an unknown carried across a handoff is a stated gap, and a
+  /** Questions the handing-off actor did NOT answer. The half of
+   * the record that must not be dropped: an unknown carried across a handoff is a stated gap, and a
    * surface that printed only the evidence would show a handoff as complete
    * work. */
   readonly unknowns: readonly string[];

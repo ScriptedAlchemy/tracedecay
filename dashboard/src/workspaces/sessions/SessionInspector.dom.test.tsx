@@ -38,8 +38,8 @@ describe('Session transcript drill-down', () => {
     expect(screen.queryByRole('list', { name: 'Transcript messages' })).toBeNull();
   });
 
-  /** The two governed refusals the LCM read routes actually serve
-   * (`DashboardLcmReadStateV1::Locked` / `::Redacted` → the envelope's own
+  /** The two governed refusals the LCM read routes serve
+   * (`DashboardLcmReadStateV1::Locked` / `::Redacted` become the envelope's own
    * `domain_state` with a null payload). Each renders as its own chip with the
    * daemon's reason, never as an empty transcript. */
   it.each([

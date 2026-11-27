@@ -60,7 +60,7 @@ describe('the graph read as a reading', () => {
 
   /** The authority's ordering is not restated as an assumption: the newest
    * entry is chosen by comparing the versions, so a timeline delivered oldest
-   * first still reduces to the version that is actually newest. */
+   * first still reduces to the version that is newest. */
   it('reduces a timeline to its newest version by valid_at, not by position', () => {
     const reading = workGraphReading(
       timeline([

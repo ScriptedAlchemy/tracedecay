@@ -225,7 +225,7 @@ describe('Chart registered-series guard', () => {
     );
 
     // One registered series does not license drawing the option: the pie would
-    // simply be missing from a chart that otherwise looks complete.
+    // be missing from a chart that otherwise looks complete.
     expect(getByText(/cannot draw a pie series/i)).toBeTruthy();
   });
 });

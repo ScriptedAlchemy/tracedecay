@@ -356,7 +356,7 @@ describe('searchLane', () => {
 
     expect(clientOffline).toEqual({ state: 'offline', lane: 'code' });
     expect(sourceUnavailable.state).toBe('unavailable');
-    // Different chips, not merely different sentences: the taxonomy carries a
+    // The chips differ, not only the sentences: the taxonomy carries a
     // source-level unavailability state, so a reachable daemon reporting that
     // one source cannot serve is never drawn as a lost connection.
     expect(laneStateKind(clientOffline)).toBe('offline');
