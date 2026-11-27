@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.114](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.113...v1.0.0-beta.114) (2026-11-27)
+
+
+### Features
+
+* **code-index:** make the full grammar tier opt-in ([4baa310](https://github.com/ScriptedAlchemy/tracedecay/commit/4baa310af1ba47da63a8c5572786751745f648fa))
+* **code-index:** make the full grammar tier opt-in ([1cd08cc](https://github.com/ScriptedAlchemy/tracedecay/commit/1cd08cc616409f6e3e746779433130aa175c9895))
+
+
+### Bug Fixes
+
+* **build:** align index benchmarks with the shipped grammar profile ([53d0aeb](https://github.com/ScriptedAlchemy/tracedecay/commit/53d0aebf4bba9ea641a7226d4a0c26dc7ed280d2))
+* **build:** distinguish Full CLI from benchmark binaries ([2739339](https://github.com/ScriptedAlchemy/tracedecay/commit/2739339642b84940ec89fa00438251e15725c1e3))
+* **build:** keep generated-file cleanup inside the checkout ([2e79aff](https://github.com/ScriptedAlchemy/tracedecay/commit/2e79affb4623fc2bac6bf5510ee6fd435b29ec6e))
+* **build:** keep opt-out benchmarks in default compilation ([8e52c12](https://github.com/ScriptedAlchemy/tracedecay/commit/8e52c12cb7976646c8aa69d2e03dd1ebbc2d24dd))
+* **code-index:** preserve inherited pack integrity and reclamation ([220d1c5](https://github.com/ScriptedAlchemy/tracedecay/commit/220d1c5f1a7b3508e68d611be9ea97a77d85e713))
+* **code-index:** retain core grammars and expose Full builds ([b88c416](https://github.com/ScriptedAlchemy/tracedecay/commit/b88c416f50542127effb30510d963c3552170619))
+* **daemon:** honor stream disposition after saturation ([496c578](https://github.com/ScriptedAlchemy/tracedecay/commit/496c578296235a77fb9db420916599a0ed8af2c9))
+* **daemon:** nice the launchd daemon instead of Background class ([5ad5477](https://github.com/ScriptedAlchemy/tracedecay/commit/5ad54779c45e9c6ebbf6230b141f526901181845))
+* **daemon:** nice the launchd daemon instead of Background class ([a0bf425](https://github.com/ScriptedAlchemy/tracedecay/commit/a0bf42548cf3f16a0a16bde93055a91ab4fcec14))
+* **daemon:** pool admitted streams after mounting refusals ([19c365c](https://github.com/ScriptedAlchemy/tracedecay/commit/19c365c2c374d35029625a236b24dd200afe7f1c))
+* **daemon:** preserve profile warmup retries and clean up prose ([a25c358](https://github.com/ScriptedAlchemy/tracedecay/commit/a25c358546a97f7bb9cd604acf5b48ea5cc39197))
+* **daemon:** preserve typed profile warmup retries ([9109dc4](https://github.com/ScriptedAlchemy/tracedecay/commit/9109dc494405f2f597b240ca4a87c196c8863654))
+* **diagnostics:** recheck dependent when reference listing changes ([56e250a](https://github.com/ScriptedAlchemy/tracedecay/commit/56e250aca261ee87add5956ea99b1aa382c9093c))
+* **diagnostics:** recheck when the compiler's program listing changes ([39383b8](https://github.com/ScriptedAlchemy/tracedecay/commit/39383b8c48ded7f115a87a8630aa882f5df8ebf6))
+* **diagnostics:** recheck when the compiler's program listing changes ([98dd891](https://github.com/ScriptedAlchemy/tracedecay/commit/98dd8918a789cf7707290ff19643dc765341c799)), closes [#4440](https://github.com/ScriptedAlchemy/tracedecay/issues/4440)
+* **diagnostics:** validate current reference evidence before reuse ([1b8d6f4](https://github.com/ScriptedAlchemy/tracedecay/commit/1b8d6f473f25c0295aaa14d289995c855163ee0b))
+* **global-db:** replace empty earlier Work journals instead of resetting ([b5f6dd2](https://github.com/ScriptedAlchemy/tracedecay/commit/b5f6dd2e35b055a6c6cb7d952d9ccb94566213da))
+* **sessions:** persist verified snapshot absence mutations ([0b00853](https://github.com/ScriptedAlchemy/tracedecay/commit/0b00853cc41991ae9be0792d3bbce2a3722f673c))
+* **sessions:** report projection work only after commit ([b2260e6](https://github.com/ScriptedAlchemy/tracedecay/commit/b2260e6c54637dc24b39d79bc7f0d19c039dc322))
+* **stack:** preserve drift identity across runtime restarts ([7dc3e32](https://github.com/ScriptedAlchemy/tracedecay/commit/7dc3e3244d150c4773eb06a8d6576fee7f8eb70e))
+* **stack:** preserve drift identity across runtime restarts ([7810abe](https://github.com/ScriptedAlchemy/tracedecay/commit/7810abe77f3778b9cf6d253ae70b1315137bc1cf))
+* **work:** make each selection its own Work version line ([5e5d59f](https://github.com/ScriptedAlchemy/tracedecay/commit/5e5d59f00035855103b34d9dacf12a54984e5834))
+* **work:** make each selection its own Work version line ([07e28d4](https://github.com/ScriptedAlchemy/tracedecay/commit/07e28d4cf7fd55554d78dfc1358eec54d3801857))
+* **work:** order proposal comparisons by journal sequence ([d4b371c](https://github.com/ScriptedAlchemy/tracedecay/commit/d4b371c77f2f1c9357603bd03d4a055fc49cee1e))
+* **work:** preserve historical selection ancestry ([eb5795a](https://github.com/ScriptedAlchemy/tracedecay/commit/eb5795a441cd916357e292403394b193ed624ad1))
+* **work:** root unwritten lines on one head and fence on its sequence ([bf69b10](https://github.com/ScriptedAlchemy/tracedecay/commit/bf69b103260afb79554c594543fda1bba3291708))
+
+
+### Performance Improvements
+
+* **code-index:** inherit unchanged extents from parent content packs ([d9e757c](https://github.com/ScriptedAlchemy/tracedecay/commit/d9e757cbaefccbc6aa7ad7834073e0e348468c6c))
+* **code-index:** inherit unchanged extents from parent content packs ([fff2e2f](https://github.com/ScriptedAlchemy/tracedecay/commit/fff2e2f392264109afb0c33a34556a9164b9be80))
+* **sessions:** batch external-source projection replay per window ([e4d8245](https://github.com/ScriptedAlchemy/tracedecay/commit/e4d82451e786992e8388a9a083a7d2ea0e3a65de))
+* **sessions:** batch external-source projection replay per window ([2bfc9af](https://github.com/ScriptedAlchemy/tracedecay/commit/2bfc9af3ea40049821f06e0cf89316754128b446)), closes [#4756](https://github.com/ScriptedAlchemy/tracedecay/issues/4756)
+* **sessions:** load each pending head once and drain per binding ([2259ca6](https://github.com/ScriptedAlchemy/tracedecay/commit/2259ca6071953f82140224ea8beb223a833202d3)), closes [#4756](https://github.com/ScriptedAlchemy/tracedecay/issues/4756)
+* **work:** trace Work and workflow attach and recovery boundaries ([0964c0c](https://github.com/ScriptedAlchemy/tracedecay/commit/0964c0c4015681bc3087daf0c7d2e66e5146cc78))
+* **work:** trace Work and workflow attach and recovery boundaries ([da2b204](https://github.com/ScriptedAlchemy/tracedecay/commit/da2b2049956967e19f64bc073e9823a1a5378d33)), closes [#4223](https://github.com/ScriptedAlchemy/tracedecay/issues/4223)
+
 ## [1.0.0-beta.113](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.112...v1.0.0-beta.113) (2026-11-26)
 
 
