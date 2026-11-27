@@ -300,7 +300,7 @@ fn snapshot_through_database(
 /// deferred-activation route. Whichever route arrives first wins the single
 /// binding cell, so every later rebind of the same runtime, resolved or
 /// deferred, must stay an idempotent no-op instead of a conflict, and the
-/// installed route must actually resolve to the mounted runtime rather than
+/// installed route must resolve to the mounted runtime rather than
 /// merely exist.
 #[tokio::test]
 async fn mount_installs_the_project_graph_binding_and_rebinds_stay_idempotent() {

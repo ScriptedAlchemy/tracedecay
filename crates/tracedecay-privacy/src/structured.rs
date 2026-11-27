@@ -436,7 +436,7 @@ fn parse_json_document(
             return Err(StructuredTextParseFailureV1::Malformed);
         }
         // `[` opens a JSON array and a TOML table header alike, so a leading
-        // bracket is not evidence of JSON -- only a successful parse is. When
+        // bracket is not evidence of JSON. Only a successful parse is. When
         // the parse fails, hand the document to the formats that have not had
         // their turn instead of quarantining a perfectly good TOML table. `{`
         // is not shared with any format here, so a broken object stays a

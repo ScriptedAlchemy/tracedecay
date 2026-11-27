@@ -7,7 +7,7 @@ use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTest
 /// Mirrors the canonical fixture's summary lineage as the relation graph
 /// publishes it: the parent's sources are `[summary-child, raw 12]` and the
 /// child's are `[raw 11]`, with every raw source carried as the anchor the
-/// graph actually stores.
+/// graph stores.
 fn canonical_fixture_relations() -> Vec<SummaryRelationRead> {
     let anchor = |id: &str| RetrievalAnchorId::new(id).expect("retrieval anchor");
     vec![

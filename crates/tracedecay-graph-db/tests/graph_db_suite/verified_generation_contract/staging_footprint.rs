@@ -38,7 +38,7 @@ fn receipt_for_generation(root: &Path, generation: &str) -> Option<String> {
         .find(|receipt| receipt.contains(&format!("\"generation\": \"{generation}\"")))
 }
 
-/// One entity in the shape the code-graph projector actually stages: a
+/// One entity in the shape the code-graph projector stages: a
 /// readable marker plus an opaque `Bytes` payload (its packed symbol record).
 /// The `Bytes` variant is what the recovered-digest proof has to read back
 /// byte-for-byte out of a reopened container, so the fixtures that stand in
@@ -1640,12 +1640,12 @@ impl RuntimeRequestProbeV1 for CancelAfterPolls {
 /// next mount has to end up serving the generation: either the rows are all
 /// there and prove, or they are all gone and the sealed artifact serves. A
 /// row set that is neither hashes to something the head never named, and the
-/// generation is quarantined even though nothing about it is actually wrong.
+/// generation is quarantined even though nothing about it is wrong.
 ///
 /// Fails if any cancellation point leaves a row set neither recovery nor the
 /// canonical republication can serve. The printed
 /// `cancelled_release_partial_row_sets_observed` says whether the sweep
-/// actually produced a partial set at this fixture's page geometry; the
+/// produced a partial set at this fixture's page geometry; the
 /// contract is the same either way, and the loop starts catching the partial
 /// case the moment a release page can commit without its siblings.
 #[test]
@@ -1744,7 +1744,7 @@ fn a_cancelled_release_never_leaves_a_row_set_recovery_cannot_serve() {
         }
     }
     // Not an assertion about the fixture's size, only a record of what the
-    // sweep can actually produce here; the contract above holds either way.
+    // sweep can produce here; the contract above holds either way.
     eprintln!("cancelled_release_partial_row_sets_observed={observed_partial}");
 }
 
@@ -1860,7 +1860,7 @@ fn a_partially_released_generation_is_repaired_from_its_manifest_and_swept() {
     //
     // The budget is measured in cancellation *polls*, and a release page polls
     // once per row it enumerates before it commits `MAX_VERIFIED_GENERATION_BATCH_MUTATIONS` of
-    // them -- so the first durable page costs on the order of the whole row
+    // them. So the first durable page costs on the order of the whole row
     // count in polls, not the few dozen a short linear walk reaches. Start at
     // that scale and double: the first budget that commits cannot reach a
     // second page (which costs another full enumeration), so the fixture

@@ -33,7 +33,7 @@ pub struct ModelPrice {
 
 /// A loaded pricing table plus provenance for honest UI labeling.
 pub struct PriceTable {
-    /// `OpenRouter` slug (e.g. `anthropic/claude-fable-5`) → per-MTok prices.
+    /// `OpenRouter` slug (e.g. `anthropic/claude-fable-5`) to per-MTok prices.
     pub models: BTreeMap<String, ModelPrice>,
     /// Whether the bundled authority parsed into at least one usable row.
     pub available: bool,
@@ -159,7 +159,7 @@ fn price_per_mtok(pricing: &Value, key: &str) -> Option<f64> {
 }
 
 /// Parses an `OpenRouter` `/api/v1/models` response (or the bundled snapshot,
-/// which uses the identical shape) into a slug → price map. Returns `None`
+/// which uses the identical shape) into a map from slug to price. Returns `None`
 /// when nothing usable was found, so callers never cache garbage.
 pub fn parse_openrouter_json(body: &str) -> Option<BTreeMap<String, ModelPrice>> {
     let parsed: Value = serde_json::from_str(body).ok()?;

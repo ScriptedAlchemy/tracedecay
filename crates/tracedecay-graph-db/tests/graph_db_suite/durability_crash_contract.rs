@@ -113,7 +113,7 @@ fn control_and_probe() -> (RuntimeRequestControlV1, Probe) {
 }
 
 /// In-memory stand-in for the relational publication authority. Only the
-/// surface the verified publication and recovery paths actually call is
+/// surface the verified publication and recovery paths call is
 /// implemented; the replay-garbage-collection surface is unreachable here and
 /// panics loudly rather than inventing semantics.
 #[derive(Default)]

@@ -51,7 +51,7 @@ pub struct MonitorEntry {
 }
 
 impl MonitorEntry {
-    /// Display label: `prefix - project - tool_name`
+    /// Display label in the form `prefix - project - tool_name`.
     pub fn label(&self) -> String {
         format!("{} - {} - {}", self.prefix, self.project, self.tool_name)
     }

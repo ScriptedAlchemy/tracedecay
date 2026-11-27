@@ -236,7 +236,7 @@ fn a_root_reached_through_a_symlink_still_contains_its_fixtures() {
         under_isolated_root(&reported.join("fixture.db"), reported.clone()),
         "a fixture under the reported root must be recognized as isolated"
     );
-    // The mixed spellings the two APIs actually produce, in both directions.
+    // The mixed spellings the two APIs produce, in both directions.
     assert!(under_isolated_root(
         &reported.join("fixture.db"),
         resolved.clone()

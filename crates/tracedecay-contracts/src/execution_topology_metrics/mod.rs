@@ -71,7 +71,7 @@ pub const EXECUTION_TOPOLOGY_PROJECTOR_REVISION_V1: &str = "execution-topology-p
 
 /// The persisted execution-topology event family, in the exact event-kind
 /// spelling the domain contract stamps. Only these kinds feed topology
-/// descriptors; the read additionally consumes the cross-cutting telemetry
+/// descriptors; the read also consumes the cross-cutting telemetry
 /// drop receipt solely for producer-loss coverage.
 pub const EXECUTION_TOPOLOGY_EVENT_KINDS_V1: [&str; 11] = [
     "work.execution_topology.sampled.v1",

@@ -411,7 +411,7 @@ impl Deref for CredentialPatternSet {
     }
 }
 
-/// A single Aho–Corasick scan maps every keyword hit back to the rules whose
+/// A single Aho-Corasick scan maps every keyword hit back to the rules whose
 /// precondition it satisfies. `None` is the truthful empty-keyword case: those
 /// rules all run and no matcher needs to scan the source.
 struct KeywordMatcher {
@@ -485,8 +485,8 @@ impl KeywordMatcher {
 
 /// One compiled credential rule.
 ///
-/// The surface is unchanged from the hand-written era. [`Self::kind`],
-/// [`Self::is_match`], `Self::ranges`, so every caller kept working. What
+/// The public methods are unchanged from the hand-written era: [`Self::kind`],
+/// [`Self::is_match`], and `Self::ranges`. Every caller kept working. What
 /// changed is behind it: matches now pass a rule's entropy floor and its
 /// allowlists before they count.
 pub struct CredentialPattern {
@@ -550,7 +550,7 @@ impl CredentialPattern {
                 .any(|keyword| contains_ignore_ascii_case(text, keyword))
     }
 
-    /// Test-only direct range surface. The whole match, not just the secret
+    /// Test-only direct access to the matched ranges. The whole match, not just the secret
     /// group: a sanitizer must not leave secret bytes behind, and the context
     /// a rule matched on is itself worth removing.
     #[cfg(test)]
@@ -895,7 +895,7 @@ fn compile_allowlist(
         .as_deref()
         .is_some_and(|condition| condition.eq_ignore_ascii_case("AND"));
     // An AND allowlist over a path criterion can never be satisfied here. Left
-    // in, it would excuse nothing and cost a scan; dropped, TraceDecay simply
+    // in, it would excuse nothing and cost a scan; dropped, TraceDecay
     // redacts where upstream would have excused. That is the safe direction.
     if all_of && (!allowlist.paths.is_empty() || allowlist.path.is_some()) {
         return None;

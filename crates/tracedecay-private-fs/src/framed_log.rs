@@ -1,4 +1,4 @@
-//! Crash-safe filesystem primitives for hook and host-admission framed logs.
+//! Crash-safe filesystem operations for hook and host-admission framed logs.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -33,15 +33,15 @@ thread_local! {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DirectorySyncPolicy {
-    /// Surface every fsync failure.
+    /// Return every fsync failure.
     Strict,
-    /// Surface genuine IO failures but tolerate unsupported directory fsync.
+    /// Return genuine IO failures but tolerate unsupported directory fsync.
     TolerateUnsupported,
 }
 
 /// Flush a directory's metadata so a preceding create/rename/remove is durable.
 /// Windows replacement durability is requested by the write-through rename
-/// primitive itself rather than this POSIX directory barrier.
+/// rename itself rather than this POSIX directory barrier.
 #[tracing::instrument(
     name = "private_fs.framed_log.sync_directory",
     level = "trace",
@@ -86,7 +86,7 @@ pub fn sync_parent_directory(path: &Path, policy: DirectorySyncPolicy) -> io::Re
 /// their barriers into shared log commits instead of paying one per segment.
 /// Flushing uses retained writer handles without reopening member pathnames;
 /// Windows pathname identity checks still open each member. The batch never
-/// holds a descriptor per segment of a large seal. Linux additionally starts
+/// holds a descriptor per segment of a large seal. Linux also starts
 /// each member's writeback as soon as it is admitted. [`Self::sync`] flushes
 /// the final window and checks that earlier members still name the same
 /// immutable files. It never flushes unrelated filesystem data. Unix
@@ -989,7 +989,7 @@ pub fn replace_via_rename(temporary: &Path, destination: &Path) -> io::Result<()
 /// occupied destination name.
 ///
 /// An occupied destination fails with `AlreadyExists` and keeps its bytes.
-/// Platforms without a no-replace primitive fail closed with `Unsupported`:
+/// Platforms without an atomic no-replace rename fail closed with `Unsupported`:
 /// retaining bytes is always preferable to risking a replacement.
 pub fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
     platform_rename_noreplace(source, destination)

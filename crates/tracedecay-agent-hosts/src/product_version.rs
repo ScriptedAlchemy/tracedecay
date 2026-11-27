@@ -5,7 +5,7 @@
 //! version of the `tracedecay` product a user installed. Every plugin
 //! manifest, cache path, staleness warning, and provenance header this crate
 //! writes is compared by hosts (and by the root crate's tests) against the
-//! product version, so the sub-crate version there is simply wrong.
+//! product version, so the sub-crate version there is wrong.
 //!
 //! [`PRODUCT_VERSION`] is that product version. `build.rs` reads
 //! `[workspace.package].version` out of the workspace-root `Cargo.toml`, the single

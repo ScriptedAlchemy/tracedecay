@@ -1,5 +1,5 @@
 //! Sealed-generation verification is proven once per set of container bytes,
-//! not once per open -- without ever weakening what a failed proof means.
+//! not once per open, without ever weakening what a failed proof means.
 //!
 //! The full proof streams every stored row of a generation, canonicalizes it,
 //! and SHA-256s the stream. It is the only evidence that the rows about to be
@@ -91,7 +91,7 @@ fn marker_path(root: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// A publication proves the generation in full and files that proof, so the
-/// marker is on disk once the store closes. Nothing is skipped here -- this is
+/// marker is on disk once the store closes. Nothing is skipped here. This is
 /// the write that makes the *next* open cheap.
 #[test]
 fn publishing_and_closing_writes_the_verified_marker() {
@@ -147,7 +147,7 @@ fn a_restart_over_unchanged_bytes_hits_the_marker_and_enumerates_nothing() {
 /// The fail-closed case: a marker left beside corrupted bytes must not let
 /// them through.
 ///
-/// Worth recording what actually catches this, because it is not the marker
+/// Worth recording what catches this, because it is not the marker
 /// and it is not TraceDecay's SHA-256 proof. Grafeo CRC-32s every section of a
 /// `.grafeo` container when it reads it, so a byte flipped anywhere in the
 /// container fails the *open*, well before any generation is verified. That
@@ -194,8 +194,8 @@ fn a_byte_flip_under_a_stale_marker_is_still_caught() {
 /// The identity gate is about the container the engine loads, not the file
 /// the path happens to name.
 ///
-/// Republishing the container byte-for-byte through a fresh inode -- a
-/// backup restore, an atomic replace by a copy -- changes every OS-level file
+/// Republishing the container byte-for-byte through a fresh inode, as a
+/// backup restore or an atomic replace by a copy does, changes every OS-level file
 /// identity and none of the bytes. The engine reads the same header from the
 /// same bytes, so the marker written against them still applies: the proof it
 /// records ran over exactly these rows. What the marker binds to is what the
@@ -229,8 +229,8 @@ fn a_byte_identical_container_through_a_fresh_inode_is_the_same_container() {
 ///
 /// The expected digest comes from the relational authority on every path, and
 /// the marker is only asked whether *that* digest was already proven. A forged
-/// record therefore misses, the full proof runs, and -- because the rows on
-/// disk are genuinely intact -- recovery still succeeds. The forgery bought
+/// record therefore misses, the full proof runs, and, because the rows on
+/// disk are intact, recovery still succeeds. The forgery bought
 /// nothing except the work it was trying to skip.
 #[test]
 fn a_marker_forged_for_a_different_digest_is_refused_and_the_proof_runs() {
@@ -274,8 +274,8 @@ fn a_marker_forged_for_a_different_digest_is_refused_and_the_proof_runs() {
 /// Measurement harness: activation wall with and without the marker, over one
 /// store, one set of bytes, and one warm page cache.
 ///
-/// The two recovers differ in exactly one thing -- whether the marker beside
-/// the container is present -- so the gap between them *is* the verify
+/// The two recovers differ in exactly one thing, whether the marker beside
+/// the container is present, so the gap between them *is* the verify
 /// component, isolated without a profiler and without comparing across builds.
 /// The "no marker" number is what every open cost before this change.
 ///

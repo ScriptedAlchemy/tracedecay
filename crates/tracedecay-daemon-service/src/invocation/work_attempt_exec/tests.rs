@@ -83,7 +83,7 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 /// argv the module maps onto each admitted `(backend, protocol)` pair. These
 /// literals live in `provider_arguments`; the spawn tests assert the child
-/// actually observed them.
+/// observed them.
 const CLAUDE_STREAM_JSON_ARGV: [&str; 4] =
     ["--print", "--output-format", "stream-json", "--verbose"];
 #[cfg(unix)]
@@ -1364,7 +1364,7 @@ fn overflow_classification_names_the_channel_and_yields_to_cancellation() {
 /// and leave the shell waiting without running its trap.
 /// This test spends the real `CANCELLATION_GRACE` window on purpose, a
 /// virtual clock would let the grace expire without proving the child
-/// actually survived it.
+/// survived it.
 #[cfg(unix)]
 #[test]
 fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record() {
@@ -1450,7 +1450,7 @@ fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record() {
             () = driver => unreachable!("the driver never settles"),
         }
 
-        // The graceful rung really was delivered to the child, and really was
+        // The graceful rung was delivered to the child, and was
         // survived: the trap fired and the grace window elapsed in full.
         assert!(
             interrupted_marker.exists(),
@@ -2258,7 +2258,7 @@ async fn a_disqualified_app_server_falls_back_to_codex_cli_and_says_so_in_the_ev
     )
     .await;
 
-    // The CLI really ran, on the CLI's own argv.
+    // The CLI ran, on the CLI's own argv.
     assert_eq!(
         std::fs::read_to_string(&argv_marker).unwrap(),
         CODEX_EXEC_JSON_ARGV.join(" ")
@@ -2622,7 +2622,7 @@ async fn the_process_registry_admits_one_live_owner_per_attempt() {
         "a second claim must not displace the live owner"
     );
 
-    // The registered channel really reaches the live owner.
+    // The registered channel reaches the live owner.
     let waiter = tokio::spawn(async move { cancel.notified().await });
     while !waiter.is_finished() {
         registry.signal_test_cancellation(fixture.identity());

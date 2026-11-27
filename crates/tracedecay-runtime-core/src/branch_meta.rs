@@ -115,7 +115,7 @@ pub enum BranchGraphSourceRollbackOutcomeV1 {
 pub struct BranchMeta {
     /// The auto-detected or configured default branch name.
     pub default_branch: String,
-    /// Map of branch name → entry.
+    /// Map of branch name to entry.
     #[serde(serialize_with = "serialize_branches")]
     pub branches: HashMap<String, BranchEntry>,
 }

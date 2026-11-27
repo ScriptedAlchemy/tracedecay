@@ -103,7 +103,7 @@ mod safe_config_tests {
 
     #[test]
     fn full_install_cycle_preserves_existing_config() {
-        // Simulate the full install cycle: strict load → mutate → safe write.
+        // Simulate the full install cycle: strict load, mutate, safe write.
         // Existing keys must be preserved and no copy of the prior bytes kept.
         let dir = tmpdir();
         let path = dir.path().join("config.json");
@@ -171,7 +171,7 @@ mod path_normalize_tests {
     /// `cfg(unix)` is a compile gate, not a filesystem capability: APFS
     /// refuses such a name outright with `EILSEQ`, so a macOS run failed at
     /// the fixture instead of exercising the lookup. Probing keeps the
-    /// coverage everywhere the bytes are really accepted and makes the skip
+    /// coverage everywhere the bytes are accepted and makes the skip
     /// visible where they are not.
     #[cfg(unix)]
     fn non_utf8_file_names_supported(directory: &Path) -> bool {

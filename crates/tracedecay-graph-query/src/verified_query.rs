@@ -744,7 +744,7 @@ impl VerifiedGraphQuery {
 ///
 /// The composition-root adapter closes over those ports; this function never
 /// names a root type, and the source authority is frozen from the supplied
-/// context before the query exists, no later surface accepts a runtime,
+/// context before the query exists, no later entry point accepts a runtime,
 /// root, or database.
 #[tracing::instrument(name = "usecases.graph.open_verified", level = "trace", skip_all)]
 pub async fn open_verified_graph_query(

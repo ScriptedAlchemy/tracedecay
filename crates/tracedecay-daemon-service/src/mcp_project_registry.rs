@@ -37,7 +37,7 @@ impl DaemonProjectRegistryReadService {
     /// Resolves the served root's registered `project_id`, the same identity
     /// lookup the `tracedecay projects` CLI performs for its own active
     /// project. An unregistered root, or a projectless read with no served
-    /// root, simply has no active id.
+    /// root, has no active id.
     async fn active_project_id(
         &self,
         active_project_root: Option<&Path>,

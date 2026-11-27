@@ -1,4 +1,4 @@
-//! Post-hoc correlation of emitted tool hints with what the model actually did.
+//! Post-hoc correlation of emitted tool hints with what the model did.
 //!
 //! Hooks record a `hint_emitted` analytics event (carrying a first-class
 //! `hint_id`, `hint_category`, `session_id`, and `hook_<agent>` provider) every
@@ -243,7 +243,7 @@ fn resolve(
 }
 
 /// True when a fired tool name satisfies one of a category's expected tools,
-/// tolerating MCP prefixes (`mcp__tracedecay__…`, plugin-namespaced variants)
+/// tolerating MCP prefixes (`mcp__tracedecay__...`, plugin-namespaced variants)
 /// and hyphen/underscore/case differences. The `_`-boundary check avoids
 /// matching an unrelated tool that merely ends with the same letters.
 fn tool_matches_expected(fired: &str, expected: &[&str]) -> bool {

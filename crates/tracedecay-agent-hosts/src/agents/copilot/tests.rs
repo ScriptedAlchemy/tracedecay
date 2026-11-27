@@ -31,7 +31,7 @@ fn fake_copilot_cli(bin: &Path, log: &Path, body: &str) {
 }
 
 /// Body for a fake `copilot` that emulates the registry's own writes, so a
-/// test can observe that TraceDecay's removal really reverses its install.
+/// test can observe that TraceDecay's removal reverses its install.
 ///
 /// The `--` guard is load-bearing: Copilot's non-interactive form puts the
 /// server's launch command line *after* a separator, and a registration that

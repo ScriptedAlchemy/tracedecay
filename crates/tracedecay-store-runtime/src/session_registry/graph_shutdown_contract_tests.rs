@@ -131,7 +131,7 @@ async fn healthy_shutdown_joins_workers_then_closes_every_retained_graph_without
         .await
         .expect("project sessions authority");
     // Exercise a real reconciliation pass so the shutdown below joins a
-    // worker that actually published into the memory graph.
+    // worker that published into the memory graph.
     add_fact(
         &project_memory,
         &FactOwnerV1::Project { project_id },

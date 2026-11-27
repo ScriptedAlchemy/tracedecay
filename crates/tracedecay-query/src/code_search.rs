@@ -36,7 +36,7 @@ pub struct CodeIndexSearchRequestV1 {
     /// cursor continuation must repeat the routing that produced its frozen
     /// candidate set; a different routing is a typed cursor set mismatch.
     pub lexical_routing: LexicalRoutingV1,
-    /// MCP→executor admission envelope. The type-erased
+    /// Admission envelope from the MCP layer to the executor. The type-erased
     /// [`CodeIndexSearchExecutor`] authenticates this value; keep it on the
     /// request even when local analysis cannot see through `Arc<dyn Fn…>`.
     pub authority: Option<CodeIndexSearchAuthorityV1>,
@@ -407,7 +407,7 @@ pub struct CodeIndexSearchWindowV1 {
 pub enum CodeIndexSearchSiteV1 {
     /// Inclusive 0-based line extent of the named symbol's declaration
     /// from the published generation's extraction-attested lineage
-    /// record — the reported `symbols[]` location, distinct from the
+    /// record. This is the reported `symbols[]` location, distinct from the
     /// byte interval code serving verifies.
     SymbolLines {
         start_line: u32,
@@ -470,7 +470,7 @@ pub struct CodeIndexSearchCompletedV1 {
         tracedecay_contracts::retrieval::SearchDisplayUnavailableV1,
     >,
     pub next_cursor: Option<tracedecay_domain::RetrievalCursor>,
-    /// Which lanes actually answered. Additive metadata only: it never
+    /// Which lanes answered. Additive metadata only: it never
     /// participates in ranking identity, so a warm response carries the same
     /// candidates, fallback bytes, and cursor it always did.
     pub coverage: CodeIndexSearchCoverageV1,

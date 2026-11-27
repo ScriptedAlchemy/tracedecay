@@ -210,7 +210,7 @@ fn symbol_context_value(
 
 /// Selects the symbols a context payload should show, ordered nearest-first.
 ///
-/// Returns the selection plus whether the requested range was actually applied.
+/// Returns the selection plus whether the requested range was applied.
 /// A range narrows the selection only when at least one symbol publishes a
 /// usable line span; otherwise the whole page is returned so the caller can
 /// degrade instead of failing.

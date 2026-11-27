@@ -173,7 +173,7 @@ fn finite_nonzero_bytes(value: u64) -> NonZeroU64 {
 /// are alternative protections, not stacked discounts. The reserve applies
 /// when the process can otherwise spend the machine. A finite cgroup already
 /// reserved the rest of the machine, so the hard ceiling is
-/// `min(host allowance, memory.max)` — or `memory.high` only when max is
+/// `min(host allowance, memory.max)`, or `memory.high` only when max is
 /// unlimited. `memory.high` below that ceiling is the reclaim watermark, not
 /// a second cut. An explicit override replaces the host reserve and is still
 /// capped by the hard ceiling.
@@ -406,8 +406,8 @@ fn cgroup_headroom_bytes_v1(proc_self_cgroup: &Path, cgroup_root: &Path) -> Opti
 ///
 /// Windows reads the same contract through `GetProcessMemoryInfo`:
 /// `WorkingSetSize` is every resident page (`resident_bytes`), and
-/// `PrivateUsage` is the private commit charge — resident and paged-out
-/// private pages together, which is the kernel figure a memory kill line
+/// `PrivateUsage` is the private commit charge: resident and paged-out
+/// private pages together. That is the kernel figure a memory kill line
 /// would count. It fills `unreclaimable_bytes` so `admission_bytes` compares
 /// the same quantity `/proc` reports as `RssAnon + RssShmem + VmSwap`.
 ///

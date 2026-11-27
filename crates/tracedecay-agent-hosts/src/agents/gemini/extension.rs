@@ -221,7 +221,7 @@ pub(super) fn stage_dir_is_tracedecay(stage_dir: &Path) -> bool {
 
 // Installed-extension observation
 
-/// What TraceDecay can actually see of the host's installed extension.
+/// What TraceDecay can see of the host's installed extension.
 ///
 /// Deliberately a three-way answer: "the manifest is unreadable" is not the
 /// same fact as "there is no extension", and reporting either as the other

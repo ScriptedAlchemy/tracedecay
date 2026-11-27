@@ -3104,7 +3104,7 @@ where
 
 /// The catalog warm that follows a publication reserves what it builds from
 /// the daemon's resident-memory authority, so admission sees it, and gives
-/// the reservation back once the catalog serves as its own measured owner.
+/// the reservation back once the catalog is its own measured owner.
 ///
 /// Fails if the warm builds the catalog without a reservation (#4559) or
 /// keeps it after the catalog is published.

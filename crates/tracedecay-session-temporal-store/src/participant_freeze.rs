@@ -27,7 +27,7 @@ use super::sql::TemporalSqlRows;
 // This matches the existing frozen-participant read batch in `retrieval`.
 const PREPARED_PARTICIPANT_BATCH: usize = 64;
 
-/// Decides what a request is actually allowed to see of one participant source.
+/// Decides what a request is allowed to see of one participant source.
 ///
 /// The session-scoped query does not filter on `project_key`, so a session
 /// belonging to another project reaches this point and must be denied here.

@@ -543,7 +543,7 @@ struct NativeIntegrationSurfaceSpec {
 /// apply is an authoritative native mutation and there is no transport
 /// fallback path.
 const NATIVE_INTEGRATION_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
-/// The read-only status projection additionally serves the dashboard consumer
+/// The read-only status projection also serves the dashboard consumer
 /// over the same application result. No mutating operation gains a dashboard
 /// binding: the dashboard can observe a transaction but never advance one.
 const NATIVE_INTEGRATION_STATUS_SURFACES: [BindingSurface; 3] = [

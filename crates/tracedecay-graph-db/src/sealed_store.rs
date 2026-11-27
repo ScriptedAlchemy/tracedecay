@@ -337,7 +337,7 @@ pub(crate) enum SealedStoreInstall {
 /// currently materialized as a native engine.
 ///
 /// `retained` counts identities this database can serve without touching the
-/// staging container; `resident` counts the subset that is actually holding a
+/// staging container; `resident` counts the subset that is holding a
 /// grafeo store in RAM right now. The gap between them is the point of
 /// hibernation, and the pair is what makes a pressure decision falsifiable.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1846,7 +1846,7 @@ impl GraphDb {
         // Newly installed generation aside, every other retained sealed
         // reader is now a non-serving owner. Step each idle one down to its
         // identity so the count of concurrently materialized graphs stays
-        // bounded by what is actually being read, not by how many
+        // bounded by what is being read, not by how many
         // generations this process has ever sealed.
         self.reap_idle_sealed_generation_engines(Some(&locator));
         Ok(())
@@ -4719,7 +4719,7 @@ mod build_tests {
             assert!(Arc::ptr_eq(&retained, &store));
             drop(retained);
 
-            // Retry against the restored owner must really delete the bytes
+            // Retry against the restored owner must delete the bytes
             // and remove the reader. A permanent refusal cannot pass.
             std::fs::rename(&relocated, &original).unwrap();
             parent.retire_sealed_generation_store(&locator).unwrap();

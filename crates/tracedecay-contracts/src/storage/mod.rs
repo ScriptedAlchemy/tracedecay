@@ -1,4 +1,4 @@
-//! Storage retention, size, and efficiency read models (Plan 38 §5–§7).
+//! Storage retention, size, and efficiency read models (Plan 38 §5 to §7).
 //!
 //! This module owns the read models and policies *behind* the landed Doctor
 //! `Storage` finding contract (`crate::doctor::DoctorStorageFindingKindV1`).
@@ -6,7 +6,7 @@
 //!
 //! Layout:
 //! - [`identity`]: bounded store/table/path identifiers plus byte-size
-//!   and free-page-ratio primitives.
+//!   and free-page-ratio types.
 //! - [`telemetry`] (§7): per-store size, per-table growth, free-page ratio, soft
 //!   budgets, and the [`telemetry::StoreSizeTelemetryPort`] seam over
 //!   `dbstat`/pragma sources.

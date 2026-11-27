@@ -24,7 +24,7 @@ pub struct JsonlIoAccounting {
     pub prefix_validation_bytes: u64,
     /// Bytes hashed by the whole-extent snapshot fingerprint.
     pub snapshot_hash_bytes: u64,
-    /// Frame bytes actually consumed past the resume offset.
+    /// Frame bytes consumed past the resume offset.
     pub content_bytes: u64,
     /// Bytes returned by instrumented prefix, snapshot, framing, and boundary
     /// reads on the canonical handle. Identity-window reads remain separate.

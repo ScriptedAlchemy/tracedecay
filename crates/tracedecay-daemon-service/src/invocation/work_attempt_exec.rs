@@ -833,7 +833,7 @@ struct ResolvedProvider {
 /// One provider admitted for one attempt, plus the truth about how it won.
 struct ProviderSelection {
     provider: ResolvedProvider,
-    /// The route the attempt actually runs on. It differs from the attempt's
+    /// The route the attempt runs on. It differs from the attempt's
     /// requested route exactly when `fallback` is `Some`.
     actual_route: WorkProviderRouteV1,
     fallback: Option<WorkProviderFallbackRecordV1>,

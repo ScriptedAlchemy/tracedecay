@@ -2012,7 +2012,7 @@ mod tests {
     }
 
     /// The typed split must not change what a caller observes at the project
-    /// boundary: an enrollment root that is simply gone still reports
+    /// boundary: an enrollment root that is gone still reports
     /// `ProjectEnrollmentRootUnavailable`, and it still defers to the next
     /// enrollment root instead of denying an enrolled project.
     #[test]

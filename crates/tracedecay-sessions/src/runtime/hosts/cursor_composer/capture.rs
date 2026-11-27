@@ -117,7 +117,7 @@ pub fn build_cursor_composer_capture_request(
 ///
 /// Envelope native identity includes a todo checkpoint (authentic
 /// `lastUpdatedAt` when present, otherwise a deterministic content fingerprint
-/// over native todo id/content/status/order) so pending→completed and content
+/// over native todo id/content/status/order) so pending-to-completed changes and content
 /// or order revisions admit as new observations without inventing
 /// `WorkflowLifecycle.revision`.
 pub(super) fn build_cursor_composer_envelope_capture_request_for_project(

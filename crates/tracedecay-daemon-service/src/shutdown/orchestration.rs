@@ -386,7 +386,7 @@ where
                 };
                 // A timed-out runner may be inside synchronous third-party or
                 // filesystem work that cannot observe abort immediately. Keep
-                // the coordinator task owned until that runner actually exits;
+                // the coordinator task owned until that runner exits;
                 // callers already have a typed timeout receipt, and retries
                 // remain fenced by wait_for_finished_shutdown_coordinator.
                 if runner_needs_join

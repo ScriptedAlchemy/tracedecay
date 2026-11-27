@@ -132,7 +132,7 @@ async fn feedback_history_permits_only_detail_redaction() {
     .await
     .unwrap();
     // Redaction is the only accepted update: details go NULL and availability
-    // moves available -> redacted.
+    // moves from available to redacted.
     conn.execute(
         "UPDATE memory_v2_feedback_history
          SET source = NULL, note = NULL, details_availability = 'redacted'

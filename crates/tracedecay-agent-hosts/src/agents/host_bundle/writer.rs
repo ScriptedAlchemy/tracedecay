@@ -116,7 +116,7 @@ impl HostBundleWriterV1 {
     ///
     /// Same-host re-entry on this writer is a no-op. A different process that
     /// already holds the host lock is refused; that is the one shared writer
-    /// this host actually needs. Independent hosts are not refused.
+    /// this host needs. Independent hosts are not refused.
     pub(super) fn ensure_host_lock(&mut self, host: HostKindV1) -> Result<(), HostBundleError> {
         if self
             .host_lock

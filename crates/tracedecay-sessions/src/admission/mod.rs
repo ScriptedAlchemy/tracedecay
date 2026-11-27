@@ -5,7 +5,7 @@
 //! it needs the registered global database, the observation store adapters, and
 //! anchor resolution, none of which may be depended on from this crate.
 //!
-//! What lives here is everything the session runtime actually needs to *talk*
+//! What lives here is everything the session runtime needs to *talk*
 //! to that facade:
 //!
 //! * the disposition values it returns ([`HostAdmissionOutcome`],

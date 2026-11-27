@@ -1017,7 +1017,7 @@ mod tests {
             "the Gemini lifecycle drives `gemini extensions install`, so its deployed \
              bytes are not the whole lifecycle"
         );
-        // Control: Cursor's component set really is fully represented by its
+        // Control: Cursor's component set is fully represented by its
         // managed artifacts, so the assertion above is about Gemini's
         // classification and not about a predicate that always answers false.
         let cursor = CatalogHostComponentRegistrationAuthority::new(

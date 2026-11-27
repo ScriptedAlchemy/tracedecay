@@ -3688,8 +3688,8 @@ async fn grouped_begin_alone_savepoint_failure_aborts_the_group() {
     }
     // Item 0's batch refuses at its receipt insert, so its durable begin
     // commits under `refresh_begin_item_0_alone`. Item 1's batch refuses
-    // the same way, then its `_alone` create fails — a boundary failure
-    // that must abort the whole group rather than acknowledge item 0.
+    // the same way, then its `_alone` create fails. That boundary failure
+    // must abort the whole group rather than acknowledge item 0.
     let failing = FailingRegisteredDb::fail_prefixed_executes(
         database,
         &[

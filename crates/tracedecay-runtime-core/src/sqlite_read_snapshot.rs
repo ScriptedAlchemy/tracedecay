@@ -1050,11 +1050,11 @@ fn create_private_directory_all(path: &Path) -> io::Result<()> {
     // Walk up only as far as the deepest component that already exists. The
     // components below it are the ones this call creates, and the loop below
     // re-checks each of them. Ancestors above it belong to the operating system
-    // and are routinely symlinks -- macOS reaches the default temporary
-    // directory through `/var` -> `/private/var` -- so requiring the whole
+    // and are routinely symlinks. macOS reaches the default temporary
+    // directory through `/var`, a link to `/private/var`, so requiring the whole
     // chain to be symlink-free rejected every scratch path on that platform.
     // The scratch root's own owner and mode are verified by
-    // `ensure_private_root`, which is what actually keeps it private.
+    // `ensure_private_root`, which is what keeps it private.
     let mut missing = Vec::new();
     let mut current = path.as_path();
     loop {

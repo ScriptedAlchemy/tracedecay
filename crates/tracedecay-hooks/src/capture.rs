@@ -18,7 +18,7 @@ use crate::{
 };
 use tracedecay_domain::NativeHostIdentityV1;
 
-/// The real host surface that supplied native hook bytes.
+/// The real host interface that supplied native hook bytes.
 ///
 /// OpenCode's direct tool callback has a distinct checked-in wire shape even
 /// though it produces the same host-neutral envelope as its event-bus route.

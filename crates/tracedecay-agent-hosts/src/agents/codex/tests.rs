@@ -640,7 +640,7 @@ fn sync_codex_hook_trust_all_skipped_is_ok_without_hollow_state() {
 
 #[test]
 fn codex_hook_command_invokes_tracedecay_is_a_safety_valve() {
-    // A hook that actually invokes the tracedecay binary is trustable. Build
+    // A hook that invokes the tracedecay binary is trustable. Build
     // the command through the same hook_command helper the generator uses so
     // the assertion holds under each platform's quoting (single quotes on
     // Unix, different quoting on Windows).

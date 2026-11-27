@@ -1,5 +1,5 @@
 //! Owner-private filesystem creation, validation, and durable publication,
-//! plus the Windows file-handle identity primitive that shares this crate's
+//! plus the Windows file-handle identity helper that shares this crate's
 //! cold, dependency-light position.
 
 use std::collections::hash_map::RandomState;

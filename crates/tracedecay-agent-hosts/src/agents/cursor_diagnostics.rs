@@ -50,7 +50,7 @@ impl CursorMcpLogFindings {
 
 /// Candidate Cursor log roots for the current platform, derived from the home
 /// directory only (no env lookups) so doctor runs against temp homes stay
-/// hermetic. Non-existent candidates are simply skipped by the scan.
+/// hermetic. Non-existent candidates are skipped by the scan.
 pub(crate) fn cursor_log_roots(home: &Path) -> Vec<PathBuf> {
     vec![
         home.join(".config/Cursor/logs"),

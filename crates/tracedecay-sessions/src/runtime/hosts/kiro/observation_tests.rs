@@ -434,8 +434,8 @@ fn hostile_lookalike_fields_remain_absent() {
 fn fixture_backed_workspace_session_message_reaches_canonical_envelope() {
     // Exact modern workspace-session message shape from
     // tests/transcript_ingest_suite/kiro.rs::write_workspace_session_json.
-    // Provider-parser path: snapshot_messages → normalize_kiro_snapshot_observations
-    // → canonical_snapshot_envelope (not a hand-built canonical record).
+    // Provider-parser path: snapshot_messages, then normalize_kiro_snapshot_observations,
+    // then canonical_snapshot_envelope (not a hand-built canonical record).
     let input: Value = serde_json::from_str(include_str!(
         "../../../../../../tests/fixtures/provider_normalization/kiro/workspace_session.input.json"
     ))

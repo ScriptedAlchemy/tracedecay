@@ -266,10 +266,10 @@ pub fn gini_coefficient(values: &[f64]) -> f64 {
 }
 
 /// Returns a human-readable label for a Gini coefficient value.
-/// - <0.20  → "low inequality (healthy)"
-/// - <0.40  → "moderate inequality"
-/// - <0.60  → "high inequality"
-/// - >=0.60 → "extreme inequality (god files likely)"
+/// - below 0.20: "low inequality (healthy)"
+/// - below 0.40: "moderate inequality"
+/// - below 0.60: "high inequality"
+/// - 0.60 or above: "extreme inequality (god files likely)"
 pub fn gini_label(gini: f64) -> &'static str {
     if gini < 0.20 {
         "low inequality (healthy)"
@@ -766,9 +766,9 @@ pub fn health_panel(snapshot: &VerifiedHealthSnapshotV1) -> String {
     sections.join("; ")
 }
 
-/// Computes quality signal (0–10000) from geometric mean of all five dimensions.
+/// Computes the quality signal, from 0 to 10000, as the geometric mean of all five dimensions.
 /// Formula: `(product of all 5).powf(1.0/5.0) * 10000.0`, rounded.
-/// Zero in any dimension → 0.
+/// Zero in any dimension gives 0.
 /// A low-weight multiplicative penalty for `coverage_discipline` reduces
 /// the score by up to 2% when skip-test-coverage is overused.
 pub fn compute_composite_health(dims: &HealthDimensions) -> u32 {

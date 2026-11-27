@@ -3555,7 +3555,7 @@ mod recent_first_discovery_tests {
         // setup drives the retained traversal the scheduler uses. The
         // standalone helper documents that it does not converge past one pass:
         // its cursor lives in `CodexDiscoveryState`, not in the durable
-        // frontier. The restart the test is actually about is still a fresh
+        // frontier. The restart the test is about is still a fresh
         // `CodexSource` with fresh state below, reading only the persisted
         // admission offsets.
         let mut state = CodexDiscoveryState::default();

@@ -2,7 +2,7 @@
 //!
 //! The payload-shape unit tests in `src/windows.rs` prove what
 //! `SetFileInformationByHandle` is handed; they cannot prove that Windows
-//! accepts it. These exercise the two publication shapes the product actually
+//! accepts it. These exercise the two publication shapes the product
 //! performs, a first publish onto an absent name, and a POSIX replace of an
 //! occupied name while a delete-sharing reader holds the displaced file, so a
 //! payload Windows rejects (most visibly `ERROR_INVALID_PARAMETER`, 87, from a

@@ -407,7 +407,7 @@ pub trait HookScopedFeedbackV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HookFeedbackDeliveryV1<T> {
     pub feedback: Option<T>,
-    /// Present only when the port was actually asked to deliver.
+    /// Present only when the port was asked to deliver.
     pub outcome: Option<HookFeedbackDeliveryOutcomeV1>,
 }
 
@@ -428,7 +428,7 @@ const fn feedback_is_eligible(receipt: &HookAdmissionReceiptV1) -> bool {
 /// Close a completed synchronous hook by acknowledging its typed feedback
 /// through `port`. Feedback is withheld unless admission was accepted inside
 /// the synchronous budget, the payload proves it belongs to this envelope, and
-/// budget remains, so an over-budget or foreign-scope hook can never surface
+/// budget remains, so an over-budget or foreign-scope hook can never show
 /// another scope's feedback. Acknowledgement failure withholds nothing already
 /// earned: the outcome is reported so callers can record it truthfully.
 #[tracing::instrument(name = "hooks.runtime.deliver_feedback", level = "trace", skip_all)]

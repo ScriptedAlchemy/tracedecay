@@ -245,8 +245,8 @@ fn unsupported_schema_version(current: u32) -> TraceDecayError {
 ///
 /// The schema ladder is awaited through a `dyn Future` so its concrete future
 /// type stops at this phase boundary: with the instrumentation wrappers compiled in,
-/// the un-erased chain (retrieval-anchor schema -> memory baseline -> this
-/// ladder -> store mount -> lifecycle -> project open) overflows rustc's
+/// the un-erased chain (retrieval-anchor schema, memory baseline, this
+/// ladder, store mount, lifecycle, project open) overflows rustc's
 /// `Send` query depth in the root crate's lib test.
 pub async fn ensure_schema_current(database: &crate::db::Database) -> Result<()> {
     let writer = database.writer_connection("ensure schema current").await?;

@@ -1,6 +1,6 @@
 //! Residency probe for consecutive code-generation cycles on one incarnation
 //! (issue #762): cycle `i` stages the full corpus as generation `i` in its
-//! own physical namespace, then retires generation `i - 1` by deleting its
+//! own physical namespace, then retires the previous generation by deleting its
 //! rows the way `delete_generation_contents` does. Red when a cycle's
 //! post-retirement baseline does not return near the first cycle's, the
 //! operator daemon's cross-cycle retention shape, where every generation

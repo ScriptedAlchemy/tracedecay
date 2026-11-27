@@ -521,7 +521,7 @@ fn checkout_topology_is_live(topology: &GitRepositoryTopologyV1) -> bool {
 ///
 /// Repository discovery is the blocking filesystem cost the daemon's route
 /// resolution is bounded against, so tests need both to observe how many
-/// discoveries a journey really runs and to make one slow on demand.
+/// discoveries a journey runs and to make one slow on demand.
 #[cfg(any(test, feature = "test-helpers"))]
 #[derive(Default)]
 struct RepositoryDiscoveryObservation {

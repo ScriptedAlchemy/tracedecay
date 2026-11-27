@@ -2071,7 +2071,7 @@ mod tests {
     // any assistant is consulted. That refusal is the correct production
     // behaviour (a build that cannot count tokens must not ship unbounded
     // input to a model), which means the *typed model outcome* these tests
-    // grade simply does not exist without the feature. They are gated for the
+    // grade does not exist without the feature. They are gated for the
     // same reason `context_scout_model.rs` gates its backend tests, rather
     // than relaxing the budget to keep a default-feature build green.
     #[cfg(feature = "token-counting")]

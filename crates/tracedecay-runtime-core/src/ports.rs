@@ -295,7 +295,7 @@ pub mod registered_schema {
     /// schema, so `cargo test -p tracedecay-runtime-core` cannot install it
     /// without a Cargo cycle. Every kernel fixture that reaches this port does
     /// so incidentally: `Database::publish_test_runtime` materialises a
-    /// *profile* sidecar beside the graph shard the test actually exercises,
+    /// *profile* sidecar beside the graph shard the test exercises,
     /// and no kernel test reads a registered-schema table out of that sidecar.
     /// An empty sidecar is therefore the honest fixture, and it spares ~40
     /// kernel tests from hand-registering a schema they never query.

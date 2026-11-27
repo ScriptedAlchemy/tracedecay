@@ -433,7 +433,7 @@ pub(in crate::execution_topology_metrics) fn reduce_classified_execution_topolog
 }
 
 /// Classifies one fully read page into the bounded evidence that the projector
-/// actually consumes. Rollups serialize this result, never the input page.
+/// consumes. Rollups serialize this result, never the input page.
 pub(in crate::execution_topology_metrics) fn classify_execution_topology_page(
     authorized_scope_ref: &str,
     horizon: &ObservabilityHorizonV1,

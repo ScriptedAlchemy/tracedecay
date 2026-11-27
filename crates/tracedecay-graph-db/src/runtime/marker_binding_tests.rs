@@ -1,5 +1,5 @@
 //! A verified-generation marker authorizes exactly the container the engine
-//! opened -- never whichever file occupied the path at an earlier or later
+//! opened, never whichever file occupied the path at an earlier or later
 //! observation.
 //!
 //! Two valid containers, `A` and `B`, hold the same generation locator with
@@ -142,7 +142,7 @@ fn fixture() -> Fixture {
     }
 }
 
-/// The fast path is refused and the rows the engine actually holds are the
+/// The fast path is refused and the rows the engine holds are the
 /// ones that get proven: `digest_a` fails against `B`'s rows after a real
 /// enumeration, and `digest_b` verifies through the same real enumeration.
 fn assert_real_verification_yields_b(fixture: &Fixture, database: &GraphDb) {
@@ -239,7 +239,7 @@ fn a_container_replaced_between_engine_close_and_publish_keeps_a_proofs_off_b() 
     );
 
     // The published marker names the container the closed engine's own handle
-    // reported -- A -- not the file that occupied the path when it was written.
+    // reported, which is A, not the file that occupied the path when it was written.
     let marker: serde_json::Value =
         serde_json::from_slice(&fs::read(fixture.a.with_extension("verified")).unwrap()).unwrap();
     let recorded = marker["body"]["container"].clone();

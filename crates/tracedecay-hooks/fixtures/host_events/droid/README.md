@@ -7,9 +7,9 @@ entries). Droid runs every hook with one JSON object on stdin and closes
 stdin. These fixtures are the captured payload shape for the events TraceDecay
 ships:
 
-- `SessionStart` — `session_id`, `transcript_path`, `cwd`, `permission_mode`,
+- `SessionStart`: `session_id`, `transcript_path`, `cwd`, `permission_mode`,
   `hook_event_name`, `source`, and Droid's own `CLAUDE_ENV_FILE`.
-- `Stop` — the same base fields plus `message_id`, `stop_hook_active`,
+- `Stop`: the same base fields plus `message_id`, `stop_hook_active`,
   `tool_execution_count`, and `elapsed_time`.
 
 The TraceDecay integration deploys both events calling

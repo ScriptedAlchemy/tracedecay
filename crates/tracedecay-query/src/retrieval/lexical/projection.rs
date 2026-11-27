@@ -1117,7 +1117,7 @@ fn score_lexical_row(
     // so test helpers that share a name token (`canonical`, `grant`) cannot
     // consume the per-file diversity cap. Signature stays: error-contract
     // needs match `#[error]` text there. A route that whitelists a name
-    // field — preferred-symbol or a name-filtered phrase/proximity read —
+    // field, such as a preferred-symbol or a name-filtered phrase/proximity read,
     // exists to score names; suppressing them leaves it no admitted score.
     let name_fields_requested = field_filters
         .iter()

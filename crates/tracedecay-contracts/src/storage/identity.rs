@@ -1,5 +1,5 @@
-//! Bounded identity and measurement primitives for the storage retention read
-//! models (Plan 38 §5–§7).
+//! Bounded identity and measurement types for the storage retention read
+//! models (Plan 38 §5 to §7).
 //!
 //! These types are transport-neutral value objects. They carry no store,
 //! runtime, or path capability; a [`StoreKeyV1`] names a store *logically* (for

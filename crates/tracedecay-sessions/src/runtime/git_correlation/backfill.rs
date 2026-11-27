@@ -150,7 +150,7 @@ fn parse_reflog_checkout_line(line: &str) -> Option<BranchTimelineEntry> {
     Some((ts, branch_from_checkout_target(target)))
 }
 
-/// Classifies a checkout target: a 7–64 char all-hex token is a detached-HEAD
+/// Classifies a checkout target: a 7 to 64 character all-hex token is a detached-HEAD
 /// commit (`None`); anything else is treated as a branch name.
 fn branch_from_checkout_target(target: &str) -> Option<String> {
     let looks_like_sha =

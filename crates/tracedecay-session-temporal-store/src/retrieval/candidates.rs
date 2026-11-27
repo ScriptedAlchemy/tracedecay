@@ -287,7 +287,7 @@ pub(super) async fn resolve_root_authority(
     params.push(SqlValue::Text(project_key.to_string()));
     // Summary authority no longer filters by provider in SQL (summary source
     // lineage lives in the relation graph), so the provider placeholder is
-    // bound only when a channel predicate actually references it. An unused
+    // bound only when a channel predicate references it. An unused
     // trailing binding would fail the strict parameter-count check.
     let provider_param = params.len() + 1;
     if channels

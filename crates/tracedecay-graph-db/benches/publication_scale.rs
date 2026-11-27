@@ -79,7 +79,7 @@ fn main() {
     println!("clean_close_ms,{clean_close_ms:.1}");
     // The skipped checkpoint must leave the store fully recoverable. A lane
     // whose recovery applies writes (sealed-proof adoption) pays one more
-    // dirty checkpoint above; this second cycle isolates the truly clean
+    // dirty checkpoint above; this second cycle isolates the clean
     // close every steady-state consumer sees.
     drop(graph.recover_snapshot());
     let started = Instant::now();

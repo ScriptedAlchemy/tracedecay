@@ -97,7 +97,7 @@ pub(super) const CODEX_HOOKS_KEY: &str = "hooks";
 /// Codex reads once the plugin is installed, so a `Core`-bearing set already
 /// has an MCP route and must not gain a second, standalone one. Without `Core`
 /// the staged `.mcp.json` is never loaded by anything, and the host registry is
-/// the only way the server actually exists.
+/// the only way the server exists.
 pub(super) fn is_mcp_only_component_set(components: &[HostComponentV1]) -> bool {
     !components.contains(&HostComponentV1::Core)
         && components.contains(&HostComponentV1::ContextMcp)
@@ -395,7 +395,7 @@ mod tests {
     }
 
     /// Body for a fake `codex` that emulates the registry's own writes, so a
-    /// test can observe that TraceDecay's removal really reverses its install.
+    /// test can observe that TraceDecay's removal reverses its install.
     /// A pre-existing peer server and a pre-existing plugin-activation record
     /// are both carried across, exactly as the real command must.
     #[cfg(unix)]

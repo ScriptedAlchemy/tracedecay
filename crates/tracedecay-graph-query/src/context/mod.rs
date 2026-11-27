@@ -1,6 +1,6 @@
 //! Code-index-backed source-read helpers (`source_read`, `read_modes`)
 //! consumed by [`crate::VerifiedGraphQuery`] and the usecases source
-//! primitives. The request-context value types and read cache these compose
+//! readers. The request-context value types and read cache these compose
 //! with live in `tracedecay_session_memory::context`.
 
 pub mod read_modes;

@@ -1954,7 +1954,7 @@ fn unstaged_interactive_host_component_still_fails() {
 }
 
 /// Receipt-integrity checking is untouched for every host TraceDecay can
-/// actually drive: there the reinstall converges the state, so an absent
+/// drive: there the reinstall converges the state, so an absent
 /// receipt-owned artifact keeps blocking.
 #[test]
 fn non_interactive_host_missing_artifacts_still_fail() {

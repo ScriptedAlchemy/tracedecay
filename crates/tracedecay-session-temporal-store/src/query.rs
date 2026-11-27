@@ -360,7 +360,7 @@ const OBSERVATION_READ_BATCH: usize = 32;
 ///
 /// `observations.observation_id` is `UNIQUE`, so each id matches at most one row
 /// and the map holds exactly what the equivalent per-id `read_observation` calls
-/// would have returned. Ids that are absent are simply missing from the map:
+/// would have returned. Ids that are absent are missing from the map:
 /// reporting a missing observation stays with the caller so it still surfaces in
 /// the caller's own iteration order, with the same message.
 pub(super) async fn read_observations(

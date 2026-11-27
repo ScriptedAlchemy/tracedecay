@@ -767,7 +767,7 @@ fn match_recorded_prefix(
 
 /// Memoized [`bounded_jsonl_snapshot_fingerprint`]: the hash walks the whole
 /// extent, so callers compute it at most once per scan and only on paths that
-/// actually consume it.
+/// consume it.
 fn memoized_jsonl_snapshot_fingerprint(
     cache: &mut Option<u64>,
     hashed_bytes: &mut u64,

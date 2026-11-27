@@ -314,7 +314,7 @@ impl ProjectRootMatcher {
 
 /// Reuse the canonical checkout topology cache, which revalidates both the
 /// `.git` target and `commondir` before returning a retained root. Subdirectories
-/// additionally need a cheap marker walk: a newly nested repository supersedes
+/// also need a cheap marker walk: a newly nested repository supersedes
 /// the previously discovered outer checkout.
 fn repository_identity_is_current(path: &Path, identity: &GitRepositoryIdentity) -> bool {
     let Ok(existing) = nearest_existing_ancestor(path).canonicalize() else {

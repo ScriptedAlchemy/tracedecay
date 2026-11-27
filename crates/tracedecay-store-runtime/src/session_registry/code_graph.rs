@@ -522,7 +522,7 @@ impl CodeGraphPublicationFlightV1 {
 /// several times the corpus in transient memory. A daemon recovering a
 /// quarantined store re-publishes every open scope's generation
 /// concurrently, and unbounded overlap of those transients is what grew the
-/// replay working set past physical memory (observed live: 39.9–45.6 GB anon
+/// replay working set past physical memory (observed live: 39.9 to 45.6 GB anon
 /// RSS against a 12.4 GB store while several scopes staged at once). Waiters
 /// observe their typed interruption while parked, and no read or serving
 /// path ever takes this permit.
@@ -2508,7 +2508,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// lease-only path can never recover it: nothing else ever re-attaches.
     ///
     /// This reuses the exact attach the memory/journey graph mount uses, but
-    /// only when the shard is actually missing, and it does not retain the
+    /// only when the shard is missing, and it does not retain the
     /// resulting attachment, the sole purpose is to leave the registry
     /// entry `Ready` so the lease immediately below succeeds. Losing a race
     /// to a concurrent attacher (or any other failure here) is swallowed:

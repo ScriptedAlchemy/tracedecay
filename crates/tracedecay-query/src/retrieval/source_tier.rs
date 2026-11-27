@@ -37,8 +37,8 @@ pub(crate) fn exact_definition_grain(grain: CodeSearchChunkGrainV1) -> bool {
 }
 
 /// True when an exact hit names this row's own symbol, not a body reference
-/// to another symbol. Exact signature chunks never answer — the body carries
-/// those occurrences — so a defining body's `WholeSymbol`/`QualifiedName`
+/// to another symbol. Exact signature chunks never answer, because the body carries
+/// those occurrences. So a defining body's `WholeSymbol`/`QualifiedName`
 /// match is the definition evidence.
 pub(crate) fn exact_definition_match(
     grain: CodeSearchChunkGrainV1,

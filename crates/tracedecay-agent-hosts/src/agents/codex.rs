@@ -1037,7 +1037,7 @@ fn codex_hook_trust_entries(hooks: &serde_json::Value) -> Result<Vec<CodexHookTr
 
 /// Derive the ordered trust records for a rendered Codex `hooks.json` value.
 ///
-/// Iterates events -> groups -> handlers exactly as Codex indexes them, so the
+/// Iterates events, then groups, then handlers exactly as Codex indexes them, so the
 /// group/handler positions in each `trust_key` match what Codex records. The
 /// per-handler `timeout` is normalized the way Codex does (default 600, clamped
 /// to a minimum of 1) and `async` defaults to false, so the hash matches the
@@ -1121,7 +1121,7 @@ fn codex_personal_marketplace_name(home: &Path) -> Result<String> {
     Ok(validate_codex_marketplace_name(name)?.to_string())
 }
 
-/// The hooks payload Codex actually loads: the versioned cache entry when
+/// The hooks payload Codex loads: the versioned cache entry when
 /// Codex has installed one, otherwise the staged personal source (what
 /// `codex plugin add` will copy into the cache verbatim).
 fn codex_runtime_hooks_path(home: &Path) -> PathBuf {
@@ -1169,7 +1169,7 @@ struct CodexHookTrustSyncOutcome {
 /// Record trust for the installed plugin's lifecycle hooks in
 /// `~/.codex/config.toml` so Codex runs them without a manual `/hooks` approval.
 ///
-/// Uses the marketplace identity and hook payload actually installed on disk,
+/// Uses the marketplace identity and hook payload installed on disk,
 /// pruning stale active-marketplace entries while preserving every other
 /// plugin's and the user's own config. Hooks whose command does not exactly
 /// match a generated `TraceDecay` command are skipped (see

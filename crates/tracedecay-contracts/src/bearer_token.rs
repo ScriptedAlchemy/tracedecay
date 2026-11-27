@@ -10,7 +10,7 @@ use std::mem;
 
 use tracedecay_domain::{DomainError, ManifestDigest, canonical_sha256};
 
-/// A validated bearer secret: 32–512 bytes, trimmed, and control-free.
+/// A validated bearer secret: 32 to 512 bytes, trimmed, and control-free.
 ///
 /// Never serialized, never printed; the owned buffer is overwritten before
 /// release. Digesting is domain-separated so distinct token families derived

@@ -329,7 +329,7 @@ fn composition_sorts_once_and_keeps_one_provenance_per_fused_candidate() {
         .iter()
         .flat_map(|decision| &decision.collapsed_candidates)
         .collect::<Vec<_>>();
-    // The corpus must actually exercise ties, clusters, and collapse.
+    // The corpus must exercise ties, clusters, and collapse.
     assert_eq!(output.ranked_candidates.len(), 18);
     assert_eq!(collapsed.len(), 8);
 

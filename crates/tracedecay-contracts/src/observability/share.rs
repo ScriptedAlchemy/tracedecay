@@ -22,7 +22,7 @@ pub enum AggregateShareMetricV1 {
     RetrieverUniqueContributions,
     /// Candidates promoted into context, denominated by candidates composed.
     RetrievalContextSelected,
-    /// Cataloged sources actually searched, denominated by eligible sources.
+    /// Cataloged sources searched, denominated by eligible sources.
     /// Denied and unresolved sources stay in the censored/unknown columns so a
     /// denial can never be read back as an absence.
     RetrievalSourcesSearched,

@@ -123,7 +123,7 @@ fn same_registered_store_authority(
 /// How a `Stopping` entry's drain is progressing. Only a confirmed drain may
 /// settle the retirement: a mount frontend obtained from the owner can
 /// outlive every alias handle, so the entry must keep refusing mounts until
-/// the core is actually closed.
+/// the core is closed.
 #[derive(Clone, Copy)]
 enum StoreObservabilityDrainV1 {
     /// A retiring caller is awaiting the core drain or has spawned it.

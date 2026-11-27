@@ -5,7 +5,7 @@
 //! defined here: the same seam pattern as
 //! [`StoreSizeTelemetryPort`](crate::storage::StoreSizeTelemetryPort): the trait
 //! and its typed read model live in this crate, and the implementation is owned
-//! by the runtime/host/configuration component that actually reads the source.
+//! by the runtime/host/configuration component that reads the source.
 //! This crate holds only the trait, the typed read, and the pure producer that
 //! maps a read into a [`DoctorFindingV1`].
 //!
@@ -17,16 +17,16 @@
 //! becomes [`DoctorEvidenceStateV1::HealthyCompleteCoverage`].
 //!
 //! Family mapping (the finding-family enum is fixed; a source never widens it):
-//! - configuration authority (resolve/pin health) → [`DoctorFindingFamilyV1::Configuration`]
-//! - daemon/runtime health snapshot → [`DoctorFindingFamilyV1::StorageRuntime`]
-//! - host/agent integration conformance → [`DoctorFindingFamilyV1::Advisory`] (advisory
+//! - configuration authority (resolve/pin health) maps to [`DoctorFindingFamilyV1::Configuration`]
+//! - daemon/runtime health snapshot maps to [`DoctorFindingFamilyV1::StorageRuntime`]
+//! - host/agent integration conformance maps to [`DoctorFindingFamilyV1::Advisory`] (advisory
 //!   host-capability/conformance evidence)
-//! - mounted canonical feedback owner → [`DoctorFindingFamilyV1::Advisory`]
+//! - mounted canonical feedback owner maps to [`DoctorFindingFamilyV1::Advisory`]
 //!   (finding/scope/generation/provider/evidence/coverage identity)
-//! - code-index mount state → [`DoctorFindingFamilyV1::CodeIndex`]
-//! - live language-server/analyzer state → [`DoctorFindingFamilyV1::LanguageServer`]
-//! - durable feedback observations → [`DoctorFindingFamilyV1::Observability`]
-//! - storage retention/size → [`DoctorFindingFamilyV1::Storage`] (producers in
+//! - code-index mount state maps to [`DoctorFindingFamilyV1::CodeIndex`]
+//! - live language-server/analyzer state maps to [`DoctorFindingFamilyV1::LanguageServer`]
+//! - durable feedback observations map to [`DoctorFindingFamilyV1::Observability`]
+//! - storage retention/size maps to [`DoctorFindingFamilyV1::Storage`] (producers in
 //!   [`crate::storage::findings`]; this port collects their typed findings)
 
 use std::borrow::Cow;

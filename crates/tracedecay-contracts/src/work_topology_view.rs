@@ -2,7 +2,7 @@
 //!
 //! Plan 11's topology lens decodes an application-owned
 //! `ExecutionTopologyViewV1` with four independently decoded dimensions.
-//! Every dimension here is read off data this build actually holds: the
+//! Every dimension here is read off data this build holds: the
 //! placement lanes come from the durable placement relation joined to the
 //! attempt page, and the branch/review/integration dimensions carry the
 //! resolved work topology policy the run environment is pinned to. Nothing
