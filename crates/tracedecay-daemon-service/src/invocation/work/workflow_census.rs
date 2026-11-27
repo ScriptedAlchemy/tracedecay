@@ -562,6 +562,11 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
     }
 }
 
+#[tracing::instrument(
+    name = "daemon.service.workflow.recover_census",
+    level = "trace",
+    skip_all
+)]
 async fn recover_pending_census_once(
     database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     project_id: tracedecay_domain::ProjectId,

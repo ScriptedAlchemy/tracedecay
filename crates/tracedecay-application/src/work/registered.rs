@@ -377,6 +377,7 @@ impl RegisteredAuthorizedWorkProductServicesV1 {
 }
 
 impl RegisteredWorkApplicationServicesV1 {
+    #[tracing::instrument(name = "application.work.attach", level = "trace", skip_all)]
     pub fn attach(db: &RegisteredGlobalDb) -> tracedecay_domain::errors::Result<Self> {
         Ok(Self::over(db.work_storage()?))
     }
@@ -833,6 +834,7 @@ pub struct RegisteredWorkflowApplicationServicesV1 {
 }
 
 impl RegisteredWorkflowApplicationServicesV1 {
+    #[tracing::instrument(name = "application.workflow.attach", level = "trace", skip_all)]
     pub async fn attach(db: &RegisteredGlobalDb) -> tracedecay_domain::errors::Result<Self> {
         let authority = db.workflow_storage().await?;
         let runtime = db.project_graph_runtime().cloned().ok_or_else(|| {
