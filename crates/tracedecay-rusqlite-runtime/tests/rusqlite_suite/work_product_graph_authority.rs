@@ -19,10 +19,12 @@ use std::collections::BTreeSet;
 
 use tracedecay_contracts::{
     AddWorkTaskRequestV1, CreateWorkProductRequestV1, DecideWorkProposalRequestV1, OpaqueCursor,
-    PrefetchedWorkGraphReadV1, WorkGraphReadRequestV1, WorkGraphReadV1,
-    WorkProductApplicationErrorV1, WorkProductAuthorizedRelationScopeV1,
+    PrefetchedWorkGraphReadV1, WorkEvidenceSelectRequestV1, WorkGraphReadRequestV1,
+    WorkGraphReadV1, WorkIntelligenceServiceV1, WorkProductApplicationErrorV1,
+    WorkProductAuthorizedRelationScopeV1, WorkProductEvidenceServiceV1,
     WorkProductExpectedAuthorityV1, WorkProductMutationIdentityV1, WorkProductMutationRequestV1,
-    WorkProductMutationServiceV1, WorkProductSelectionScopeV1, WorkStorageFailureV1,
+    WorkProductMutationServiceV1, WorkProductSelectionScopeV1, WorkProposalComparisonRequestV1,
+    WorkStorageFailureV1,
 };
 use tracedecay_domain::{
     AcceptanceCriterionId, CursorBindingMismatchV1, MAX_WORK_PRODUCT_TEXT_BYTES, ProjectId,
@@ -2073,6 +2075,237 @@ fn current_tasks(
             .map(|item| item.task_id().as_str().to_owned())
             .collect(),
     ))
+}
+
+#[test]
+fn historical_combined_reads_survive_later_sibling_and_own_line_writes() {
+    let store = RegisteredWorkStore::start("work-product-historical-selection");
+    let created = mutations(&store)
+        .create(
+            &context(),
+            &binding(),
+            CreateWorkProductRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                initial_graph: graph(vec![item("task.no-git", &[], 2)]),
+                mutation: mutation("command.work-product.historical.create", UtcMicros(100)),
+            },
+        )
+        .unwrap();
+    let repository = add_on(
+        &store,
+        repository_selection(),
+        "task.repository",
+        created.verified_graph_version(),
+        "command.work-product.historical.repository",
+        UtcMicros(200),
+    )
+    .unwrap();
+    let requests = [
+        WorkGraphReadRequestV1::current(combined_selection(), UtcMicros(250)),
+        WorkGraphReadRequestV1::as_of(combined_selection(), UtcMicros(250), UtcMicros(250))
+            .unwrap(),
+    ];
+    let read_historical = || {
+        requests
+            .iter()
+            .map(|request| {
+                reads(&store)
+                    .read_graph(&context(), request.clone())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = read_historical();
+    for reading in &before {
+        assert_eq!(reading.entries().len(), 1);
+        let snapshot = &reading.entries()[0];
+        assert_eq!(
+            snapshot.verified_version(),
+            repository.verified_graph_version()
+        );
+        assert_eq!(
+            snapshot.graph().items(),
+            &[item("task.no-git", &[], 2), item("task.repository", &[], 1)]
+        );
+    }
+
+    let project = add_on(
+        &store,
+        project_selection(),
+        "task.project",
+        created.verified_graph_version(),
+        "command.work-product.historical.project",
+        UtcMicros(300),
+    )
+    .unwrap();
+    assert_eq!(
+        read_historical(),
+        before,
+        "a later sibling must not change the ancestry chosen for an earlier observation"
+    );
+    assert_eq!(
+        current_tasks(&store, combined_selection()).unwrap(),
+        (
+            project.verified_graph_version().clone(),
+            vec!["task.no-git".to_owned(), "task.project".to_owned()]
+        ),
+        "a current read still follows the new compatible base"
+    );
+
+    let rooted = add_on(
+        &store,
+        combined_selection(),
+        "task.combined",
+        project.verified_graph_version(),
+        "command.work-product.historical.combined",
+        UtcMicros(350),
+    )
+    .unwrap();
+    assert_eq!(
+        read_historical(),
+        before,
+        "a line's first write must not replace its earlier observed base"
+    );
+    assert_eq!(
+        current_tasks(&store, combined_selection()).unwrap(),
+        (
+            rooted.verified_graph_version().clone(),
+            vec![
+                "task.combined".to_owned(),
+                "task.no-git".to_owned(),
+                "task.project".to_owned()
+            ]
+        )
+    );
+
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "DELETE FROM work_product_graph_versions_v1 WHERE event_sequence = ?1",
+                [i64::try_from(rooted.event().sequence().get()).unwrap()],
+            )
+            .unwrap();
+    });
+    assert_eq!(
+        current_tasks(&store, combined_selection())
+            .expect_err("a missing head publication must not reveal an older head"),
+        WorkProductApplicationErrorV1::GraphAuthorityUnavailable
+    );
+}
+
+#[test]
+fn exact_evidence_survives_sibling_writes_at_the_same_observation() {
+    let store = RegisteredWorkStore::start("work-product-historical-evidence");
+    let created = mutations(&store)
+        .create(
+            &context(),
+            &binding(),
+            CreateWorkProductRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                initial_graph: graph(vec![item("task.no-git", &[], 2)]),
+                mutation: mutation("command.work-product.evidence-base.create", UtcMicros(100)),
+            },
+        )
+        .unwrap();
+    let repository = add_on(
+        &store,
+        repository_selection(),
+        "task.repository",
+        created.verified_graph_version(),
+        "command.work-product.evidence-base.repository",
+        UtcMicros(200),
+    )
+    .unwrap();
+    let comparison_request = WorkProposalComparisonRequestV1 {
+        selection: combined_selection(),
+        task_id: id("task.no-git"),
+        old_version: created.verified_graph_version().clone(),
+        new_version: repository.verified_graph_version().clone(),
+        observed_at: PROJECTED_AT,
+    };
+    let evidence_request = WorkEvidenceSelectRequestV1 {
+        selection: combined_selection(),
+        task_id: id("task.no-git"),
+        verified_version: repository.verified_graph_version().clone(),
+        limit: 16,
+        observed_at: PROJECTED_AT,
+    };
+    let intelligence =
+        WorkIntelligenceServiceV1::new(store.storage().clone(), store.storage().clone(), binding());
+    let evidence =
+        WorkProductEvidenceServiceV1::new(store.storage().clone(), store.storage().clone());
+    let compare = || {
+        intelligence
+            .compare_proposal(&context(), comparison_request.clone())
+            .unwrap()
+    };
+    let select = || {
+        evidence
+            .select(&context(), &binding(), evidence_request.clone())
+            .unwrap()
+    };
+    let before_comparison = compare();
+    let before_evidence = select();
+    assert_eq!(
+        before_comparison.old.verified_version,
+        *created.verified_graph_version()
+    );
+    assert_eq!(
+        before_comparison.new.verified_version,
+        *repository.verified_graph_version()
+    );
+    assert_eq!(before_comparison.new.item, item("task.no-git", &[], 2));
+    assert_eq!(
+        before_evidence.verified_version,
+        *repository.verified_graph_version()
+    );
+
+    let project = add_on(
+        &store,
+        project_selection(),
+        "task.project",
+        created.verified_graph_version(),
+        "command.work-product.evidence-base.project",
+        UtcMicros(200),
+    )
+    .unwrap();
+    assert!(project.event().sequence() > repository.event().sequence());
+    assert_eq!(
+        current_tasks(&store, combined_selection()).unwrap().0,
+        *project.verified_graph_version(),
+        "current reads move to the later sibling even when timestamps match"
+    );
+    assert_eq!(compare(), before_comparison);
+    assert_eq!(select(), before_evidence);
+
+    let rooted = add_on(
+        &store,
+        combined_selection(),
+        "task.combined",
+        project.verified_graph_version(),
+        "command.work-product.evidence-base.combined",
+        UtcMicros(300),
+    )
+    .unwrap();
+    assert_eq!(
+        current_tasks(&store, combined_selection()).unwrap().0,
+        *rooted.verified_graph_version()
+    );
+    assert_eq!(compare(), before_comparison);
+    assert_eq!(select(), before_evidence);
+    assert_eq!(
+        evidence
+            .select(
+                &context(),
+                &binding(),
+                WorkEvidenceSelectRequestV1 {
+                    selection: project_selection(),
+                    ..evidence_request
+                },
+            )
+            .expect_err("an exact version does not authorize a sibling's scope"),
+        WorkProductApplicationErrorV1::NotFoundOrNotAuthorized
+    );
 }
 
 #[derive(Clone, Copy, Debug)]

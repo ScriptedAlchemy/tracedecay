@@ -139,7 +139,7 @@ fn read_graph(
     // first event was rooted on. Each event is paired with the publication on
     // its own line that verified it, so a sibling line's events and
     // publications are never part of this aggregate.
-    let chain = selection_chain(storage.handle(), scope)
+    let chain = selection_chain(storage.handle(), scope, request.observed_at, None)
         .map_err(PortError::from_fault)?
         .ok_or(PortError::Unavailable)?;
     let (folded, published) = (chain.entries, chain.published);

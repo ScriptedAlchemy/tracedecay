@@ -524,16 +524,60 @@ fn last_on_line(
     )?;
     rows.rows
         .first()
-        .map(|row| {
-            Ok(ChainHeadV1 {
-                line: line.clone(),
-                sequence: stored_sequence(exact_sql_integer(&row.values, 0), "line head")?,
-                graph_version: exact_sql_integer(&row.values, 1)
-                    .and_then(|value| u64::try_from(value).ok())
-                    .and_then(|value| WorkGraphVersionV1::new(value).ok())
-                    .ok_or(StoreFault::Corrupt("line head"))?,
-            })
-        })
+        .map(|row| decode_chain_head(line, &row.values))
+        .transpose()
+}
+
+fn decode_chain_head(
+    line: &VersionLineV1,
+    values: &[ExactSqlValue],
+) -> Result<ChainHeadV1, StoreFault> {
+    Ok(ChainHeadV1 {
+        line: line.clone(),
+        sequence: stored_sequence(exact_sql_integer(values, 0), "line head")?,
+        graph_version: exact_sql_integer(values, 1)
+            .and_then(|value| u64::try_from(value).ok())
+            .and_then(|value| WorkGraphVersionV1::new(value).ok())
+            .ok_or(StoreFault::Corrupt("line head"))?,
+    })
+}
+
+/// A reader's head must have been published by its observation instant. An
+/// exact-version read also stops at the requested event, inclusively, so a
+/// later sibling with the same observation timestamp cannot replace it.
+fn last_observed_on_line(
+    source: &impl RegisteredWorkQuery,
+    scope: &AuthorizedWorkProductScopeV1,
+    line: &VersionLineV1,
+    observed_at: UtcMicros,
+    through: u64,
+) -> Result<Option<ChainHeadV1>, StoreFault> {
+    let rows = registered_work_query(
+        source,
+        "SELECT event.sequence, event.result_graph_version
+         FROM work_product_events_v1 AS event
+         LEFT JOIN work_product_graph_versions_v1 AS published
+           ON published.owner_brain_id = event.owner_brain_id
+          AND published.owner_profile_id = event.owner_profile_id
+          AND published.selection_key = event.selection_key
+          AND published.event_sequence = event.sequence
+         WHERE event.owner_brain_id = ?1 AND event.owner_profile_id = ?2
+           AND event.selection_key = ?3 AND event.sequence <= ?4
+           AND (published.observed_at IS NULL OR published.observed_at <= ?5)
+         ORDER BY event.sequence DESC LIMIT 1",
+        line_params(scope, line)
+            .into_iter()
+            .chain([
+                cursor_value(through, "observed line head bound")?,
+                ExactSqlValue::Integer(observed_at.0),
+            ])
+            .collect(),
+    )?;
+    // A missing publication remains a candidate: load_chain must refuse the
+    // unverifiable event instead of silently returning an older graph.
+    rows.rows
+        .first()
+        .map(|row| decode_chain_head(line, &row.values))
         .transpose()
 }
 
@@ -581,12 +625,21 @@ pub(crate) fn chain_head(
     line: &VersionLineV1,
     before: u64,
 ) -> Result<Option<ChainHeadV1>, StoreFault> {
-    if let Some(own) = last_on_line(source, scope, line, before)? {
+    select_chain_head(line, |candidate| {
+        last_on_line(source, scope, candidate, before)
+    })
+}
+
+fn select_chain_head(
+    line: &VersionLineV1,
+    mut last: impl FnMut(&VersionLineV1) -> Result<Option<ChainHeadV1>, StoreFault>,
+) -> Result<Option<ChainHeadV1>, StoreFault> {
+    if let Some(own) = last(line)? {
         return Ok(Some(own));
     }
     let mut root: Option<ChainHeadV1> = None;
     for narrower in line.narrower()? {
-        if let Some(head) = last_on_line(source, scope, &narrower, before)? {
+        if let Some(head) = last(&narrower)? {
             let rank = |head: &ChainHeadV1| (head.line.scopes.len(), head.sequence.get());
             if root
                 .as_ref()
@@ -683,12 +736,20 @@ fn load_chain(
 /// line, and beneath them the chain it was rooted on. An event this selection
 /// does not cover is never on it, so no hidden event is ever folded into, or
 /// paired with a publication for, a response under this selection.
+/// The observation and optional exact-event bound choose only the top-level
+/// head; its ancestry remains fixed by the sequence bounds used by writers.
 pub(crate) fn selection_chain(
     source: &impl RegisteredWorkQuery,
     scope: &AuthorizedWorkProductScopeV1,
+    observed_at: UtcMicros,
+    through: Option<WorkProductEventSequenceV1>,
 ) -> Result<Option<ChainV1>, StoreFault> {
     let line = VersionLineV1::of_selection(scope.selection())?;
-    match chain_head(source, scope, &line, MAX_BOUND_SEQUENCE)? {
+    let through = through.map_or(MAX_BOUND_SEQUENCE, |sequence| sequence.get());
+    let head = select_chain_head(&line, |candidate| {
+        last_observed_on_line(source, scope, candidate, observed_at, through)
+    })?;
+    match head {
         None => Ok(Some(ChainV1::empty())),
         Some(head) => load_chain(source, scope, &head, None),
     }

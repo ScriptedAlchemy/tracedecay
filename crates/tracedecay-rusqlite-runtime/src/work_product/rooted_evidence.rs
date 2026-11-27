@@ -65,13 +65,17 @@ fn verified_graph(
     requested: &VerifiedWorkGraphVersionV1,
 ) -> Result<(VerifiedWorkGraphVersionV1, WorkProductGraphV1), WorkEvidenceRootReadErrorV1> {
     let scope = context.authorized_scope();
-    // The version is resolved over this selection's own aggregate: the chain
-    // its line ends at, each event published on the line its scope set names.
-    // A version on an event that chain does not hold is not this caller's to
-    // read.
-    let chain = selection_chain(storage.handle(), scope)
-        .map_err(WorkEvidenceRootReadErrorV1::from_fault)?
-        .ok_or(WorkEvidenceRootReadErrorV1::NotFoundOrNotAuthorized)?;
+    // Resolve the selection's chain through the requested event. Later writes
+    // cannot change that exact version's ancestry, even at the same timestamp.
+    // Scope containment and the complete verified identity still fence the read.
+    let chain = selection_chain(
+        storage.handle(),
+        scope,
+        context.observed_at(),
+        Some(requested.event_sequence()),
+    )
+    .map_err(WorkEvidenceRootReadErrorV1::from_fault)?
+    .ok_or(WorkEvidenceRootReadErrorV1::NotFoundOrNotAuthorized)?;
     let (folded, published) = (chain.entries, chain.published);
     let Some(version) = published
         .iter()

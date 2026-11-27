@@ -154,16 +154,20 @@ fn verified_graph(
     requested: &VerifiedWorkGraphVersionV1,
 ) -> Result<(VerifiedWorkGraphVersionV1, WorkProductGraphV1), PortError> {
     let scope = context.authorized_scope();
-    // The version is resolved over this selection's own aggregate: the chain
-    // its line ends at, each event published on the line its scope set names.
-    // A version on an event that chain does not hold is not this caller's to
-    // read.
-    let chain = selection_chain(storage.handle(), scope)
-        .map_err(PortError::from_fault)?
-        // A chain this authority cannot verify has no version to answer with,
-        // which for evidence is the same absence as a version it never
-        // published.
-        .ok_or(PortError::NotFoundOrNotAuthorized)?;
+    // Resolve the selection's chain through the requested event. Later writes
+    // cannot change that exact version's ancestry, even at the same timestamp.
+    // Scope containment and the complete verified identity still fence the read.
+    let chain = selection_chain(
+        storage.handle(),
+        scope,
+        context.observed_at(),
+        Some(requested.event_sequence()),
+    )
+    .map_err(PortError::from_fault)?
+    // A chain this authority cannot verify has no version to answer with,
+    // which for evidence is the same absence as a version it never
+    // published.
+    .ok_or(PortError::NotFoundOrNotAuthorized)?;
     let (folded, published) = (chain.entries, chain.published);
     let Some(version) = published
         .iter()
