@@ -506,16 +506,9 @@ impl InvocationConnectionLease {
     }
 
     fn release_after_response(&mut self, response: &crate::contract::DaemonInvocationResponse) {
-        // Admission saturation answers the request and closes the stream.
-        // A profile-warmup refusal does too, but an admitted owner answers the
-        // same mounting and protocol problems on a stream it keeps serving,
-        // so only the daemon's stream disposition tells those apart.
-        let saturated = matches!(
-            &response.outcome,
-            crate::contract::DaemonInvocationOutcome::ApplicationProblem { problem }
-                if problem.kind() == ApplicationProblemKind::Saturated
-        );
-        if !saturated && response.stream.is_open() {
+        // Admitted owners can keep serving after the same typed refusals that
+        // close an unadmitted stream. The daemon owns that disposition.
+        if response.stream.is_open() {
             self.release_to_pool();
         }
     }

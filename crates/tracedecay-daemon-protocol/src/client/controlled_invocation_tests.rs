@@ -9,9 +9,9 @@ use crate::client_identity::DaemonClientIdentity;
 use crate::connection::DaemonConnection;
 use crate::contract::{
     DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
-    DaemonInvocationRequest, DaemonInvocationResponse, DaemonLspSessionAccess,
-    WorkApplicationInvocationV1, parse_daemon_invocation_cancellation_request,
-    parse_daemon_invocation_delivery_ack_request,
+    DaemonInvocationRequest, DaemonInvocationResponse, DaemonInvocationStream,
+    DaemonLspSessionAccess, WorkApplicationInvocationV1,
+    parse_daemon_invocation_cancellation_request, parse_daemon_invocation_delivery_ack_request,
 };
 use crate::handshake::DaemonHandshake;
 use crate::lsp_wire::{FrameSend, LspSessionAccess, LspSessionCredential, LspSessionId};
@@ -638,7 +638,8 @@ async fn work_refusals_reuse_the_connection_without_a_delivery_ack() {
                         "daemon_per_client_capacity_saturated",
                         "The owning TraceDecay daemon has no request capacity",
                     ),
-                );
+                )
+                .closing_stream();
                 writer
                     .write_all(serde_json::to_string(&response).unwrap().as_bytes())
                     .await
@@ -647,6 +648,22 @@ async fn work_refusals_reuse_the_connection_without_a_delivery_ack() {
                 writer.flush().await.unwrap();
             }
         }
+        writer.shutdown().await.unwrap();
+        drop(writer);
+        drop(lines);
+
+        let stream = listener
+            .accept()
+            .await
+            .expect("fresh connection after saturation");
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut lines = authenticated_lines(reader).await;
+        DaemonHandshake::from_line(&lines.next_line().await.unwrap().expect("fresh handshake"))
+            .expect("the retry must bind its client identity again");
+        let request: DaemonInvocationRequest =
+            serde_json::from_str(&lines.next_line().await.unwrap().expect("invocation")).unwrap();
+        assert_eq!(request.request_id, "request.after-saturation");
+        write_unavailable_response(&mut writer, &request.request_id).await;
     });
     let client = invocation_client(endpoint, "client.work.refused");
     let result = client
@@ -672,11 +689,32 @@ async fn work_refusals_reuse_the_connection_without_a_delivery_ack() {
         .unwrap();
     let (response, delivery) = result.into_parts();
     assert!(delivery.is_none());
+    assert_eq!(response.stream, DaemonInvocationStream::Closing);
     assert!(
         matches!(response.outcome, DaemonInvocationOutcome::ApplicationProblem { problem }
         if problem.kind() == tracedecay_contracts::ApplicationProblemKind::Saturated)
     );
-    assert_eq!(idle_pool_size(&client), 0, "saturation retires the stream");
+    assert_eq!(
+        idle_pool_size(&client),
+        0,
+        "terminal saturation retires the stream"
+    );
+    let deadline = deadline_after(Duration::from_secs(5));
+    let response = client
+        .invoke_controlled(
+            invocation_request("request.after-saturation", deadline.clone()),
+            deadline,
+            CancellationSignal::active("cancel.after-saturation").unwrap(),
+            InvocationCancellationPolicy::ReadOnly,
+        )
+        .await
+        .expect("the retry authenticates on a fresh connection");
+    assert!(matches!(
+        response.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::Unavailable,
+        }
+    ));
     server.await.unwrap();
 }
 
@@ -755,12 +793,20 @@ async fn profile_warmup_retry_authenticates_on_a_fresh_connection() {
 }
 
 #[tokio::test]
-async fn admitted_mounting_refusal_keeps_its_stream_for_the_resend() {
-    const REQUEST_ID: &str = "request.admitted-mounting.resend";
+async fn admitted_refusals_keep_their_stream_for_resends() {
+    const REQUEST_ID: &str = "request.admitted-refusals.resend";
+    let problems = [
+        tracedecay_contracts::ApplicationProblem::runtime_mounting(),
+        tracedecay_contracts::ApplicationProblem::saturated(
+            "daemon_per_client_capacity_saturated",
+            "The owning TraceDecay daemon has no request capacity",
+        ),
+    ];
     let (listener, endpoint) =
         crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
             .await
             .unwrap();
+    let refused = problems.clone();
     let server = tokio::spawn(async move {
         // One accept: a resend that reconnects finds no daemon behind it.
         let stream = listener.accept().await.expect("admitted connection");
@@ -768,16 +814,14 @@ async fn admitted_mounting_refusal_keeps_its_stream_for_the_resend() {
         let (reader, mut writer) = tokio::io::split(stream);
         let mut lines = authenticated_lines(reader).await;
         lines.next_line().await.unwrap().expect("handshake");
-        for mounting in [true, false] {
+        for problem in refused.into_iter().map(Some).chain(std::iter::once(None)) {
             let request: DaemonInvocationRequest =
                 serde_json::from_str(&lines.next_line().await.unwrap().expect("invocation"))
                     .unwrap();
             assert_eq!(request.request_id, REQUEST_ID);
-            if mounting {
-                let response = DaemonInvocationResponse::application_problem(
-                    request.request_id,
-                    tracedecay_contracts::ApplicationProblem::runtime_mounting(),
-                );
+            if let Some(problem) = problem {
+                let response =
+                    DaemonInvocationResponse::application_problem(request.request_id, problem);
                 writer
                     .write_all(serde_json::to_string(&response).unwrap().as_bytes())
                     .await
@@ -789,28 +833,30 @@ async fn admitted_mounting_refusal_keeps_its_stream_for_the_resend() {
             }
         }
     });
-    let client = invocation_client(endpoint, "client.admitted-mounting.resend");
+    let client = invocation_client(endpoint, "client.admitted-refusals.resend");
     let deadline = deadline_after(Duration::from_secs(5));
-    let cancellation = CancellationSignal::active("cancel.admitted-mounting.resend").unwrap();
-    let response = client
-        .invoke_controlled(
-            invocation_request(REQUEST_ID, deadline.clone()),
-            deadline.clone(),
-            cancellation.clone(),
-            InvocationCancellationPolicy::ReadOnly,
-        )
-        .await
-        .expect("typed mounting refusal");
-    assert!(matches!(
-        response.outcome,
-        DaemonInvocationOutcome::ApplicationProblem { problem }
-            if problem == tracedecay_contracts::ApplicationProblem::runtime_mounting()
-    ));
-    assert_eq!(
-        idle_pool_size(&client),
-        1,
-        "an admitted owner keeps serving the stream that answered mounting"
-    );
+    let cancellation = CancellationSignal::active("cancel.admitted-refusals.resend").unwrap();
+    for expected in problems {
+        let response = client
+            .invoke_controlled(
+                invocation_request(REQUEST_ID, deadline.clone()),
+                deadline.clone(),
+                cancellation.clone(),
+                InvocationCancellationPolicy::ReadOnly,
+            )
+            .await
+            .expect("typed admitted refusal");
+        assert_eq!(response.stream, DaemonInvocationStream::Open);
+        assert!(matches!(
+            response.outcome,
+            DaemonInvocationOutcome::ApplicationProblem { problem } if problem == expected
+        ));
+        assert_eq!(
+            idle_pool_size(&client),
+            1,
+            "an admitted owner keeps serving the stream that answered the refusal"
+        );
+    }
     let response = client
         .invoke_controlled(
             invocation_request(REQUEST_ID, deadline.clone()),
