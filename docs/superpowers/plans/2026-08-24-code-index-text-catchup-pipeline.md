@@ -1,4 +1,4 @@
-# Code-Index Text Catch-Up Pipeline Implementation Plan
+# Code-index text catch-up pipeline implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-24-code-index-text-catchup-pipeline-design.md`
 
-## Global Constraints
+## Global constraints
 
 - Production acceptance is at most 300 seconds and less than 8 GiB RSS on the exact isolated 10,592-file corpus.
 - Per-page receipts, cursor transitions, final artifact digest, and query results remain exact.
@@ -325,7 +325,7 @@ git add src/daemon/code_index_scheduler.rs \
 git commit -m 'feat(index): publish live catch-up progress'
 ```
 
-### Task 4: Freshness contract and Code progress UI
+### Task 4: Freshness contract and code progress UI
 
 **Files:**
 - Modify: `crates/tracedecay-dashboard-api/src/code_index_freshness_api.rs`

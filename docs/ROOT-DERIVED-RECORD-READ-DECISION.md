@@ -8,7 +8,7 @@ memo states the measurement and the options; it does not choose.
 ## Observed failure
 
 `message_search` for a rare term over the operator's profile root returns
-`application.retained.budget-refused` after 18–26 s. The query matches 18
+`application.retained.budget-refused` after 18 to 26 s. The query matches 18
 occurrences in 2 sessions out of 1,454.
 
 ## Measurement
@@ -27,8 +27,8 @@ The wall clock and the refusal are two separate defects.
 
 The wall clock was the root span and burst candidate clauses, which scanned
 every evidence row in the root with a correlated FTS subquery. That is fixed:
-`ROOT_DERIVED_CANDIDATE_QUERY` now drives from the match (6.87 s → 0.01 s for
-span, 5.09 s → 0.01 s for burst, byte-identical rows).
+`ROOT_DERIVED_CANDIDATE_QUERY` now drives from the match (6.87 s to 0.01 s for
+span and 5.09 s to 0.01 s for burst, with byte-identical rows).
 
 The refusal is the record read, and it survives that fix. For this query the
 derived cohort is:

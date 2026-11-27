@@ -1,4 +1,4 @@
-# Parallel Migration Role Prompts
+# Parallel migration role prompts
 
 Add the exact base, owned paths, relevant diagnostic log, and repository rules.
 Use only roles that the migration needs; a separate integrator is optional.

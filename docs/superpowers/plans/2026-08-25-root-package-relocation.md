@@ -1,4 +1,4 @@
-# TraceDecay Root Package Relocation Implementation Plan
+# TraceDecay root package relocation implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-25-root-package-relocation-design.md`
 
-## Global Constraints
+## Global constraints
 
 - The library remains package `tracedecay`; the executable remains `tracedecay` in package `tracedecay-cli`.
 - Persisted and wire contracts do not change.
@@ -21,7 +21,7 @@
 
 ---
 
-### Task 1: Workspace Product-Version Authority
+### Task 1: Workspace product-version authority
 
 **Files:**
 - Modify: `Cargo.toml`
@@ -73,7 +73,7 @@ git diff --check
 git commit -m "refactor(version): move product version to workspace"
 ```
 
-### Task 2: Relocate the Composition Library
+### Task 2: Relocate the composition library
 
 **Files:**
 - Create: `crates/tracedecay/Cargo.toml`
@@ -106,7 +106,7 @@ Expected: virtual root; one library package `tracedecay` under `crates/`; one bi
 git commit -m "refactor(workspace): relocate composition library"
 ```
 
-### Task 3: Relocate Package Tests and Benches
+### Task 3: Relocate package tests and benches
 
 **Files:**
 - Move: package-owned Rust `tests/**` to `crates/tracedecay/tests/**`
@@ -137,7 +137,7 @@ cargo bench -p tracedecay --bench queries --no-run --locked
 git commit -m "refactor(test): move composition package targets"
 ```
 
-### Task 4: Distribution and Dashboard Packaging
+### Task 4: Distribution and dashboard packaging
 
 **Files:**
 - Modify: `scripts/check-distribution-acceptance.sh`
@@ -169,7 +169,7 @@ target/debug/tracedecay --version
 git commit -m "build(distribution): stage relocated product package"
 ```
 
-### Task 5: Gate Host-Admission Test Support
+### Task 5: Gate host-admission test support
 
 **Files:**
 - Modify: `crates/tracedecay/Cargo.toml`
@@ -188,7 +188,7 @@ git commit -m "build(distribution): stage relocated product package"
 git commit -m "test(host-admission): gate integration fixture surface"
 ```
 
-### Task 6: Adopt JSON-RPC Work and Remove Proven Shims
+### Task 6: Adopt JSON-RPC Work and remove proven shims
 
 **Files:**
 - Adopt after producer completion: six daemon JSON-RPC files currently modified in this worktree
@@ -212,7 +212,7 @@ git commit -m "refactor(jsonrpc): use canonical daemon wire types"
 git commit -m "refactor(usecases): remove root diagnostic shims"
 ```
 
-### Task 7: Final Integration
+### Task 7: Final integration
 
 **Files:**
 - Modify only paths required by integration diagnostics.

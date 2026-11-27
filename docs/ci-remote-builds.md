@@ -131,12 +131,12 @@ OAuth client with its own audience and `actor_id` claim:
 Every workflow that requests a client id, and the client it may receive:
 
 - `ci.yml`: `debug-cli`, `gates`, `macos-test`, `linux-test`, `clippy`,
-  `windows-test`, `shipped-cli` — any of the three.
-- `sdk-conformance.yml`: `packages`, `production-router` — owner or bot.
-- `release.yml`, `release-beta.yml`: `build` — owner or bot.
-- `release-please.yml`: `release-please` — owner or bot.
-- `upstream-compat.yml`: `bazel-10-readiness` — owner or bot.
-- `hermetic-evals.yml`: `test` — owner or bot.
+  `windows-test`, `shipped-cli`: any of the three.
+- `sdk-conformance.yml`: `packages`, `production-router`: owner or bot.
+- `release.yml`, `release-beta.yml`: `build`: owner or bot.
+- `release-please.yml`: `release-please`: owner or bot.
+- `upstream-compat.yml`: `bazel-10-readiness`: owner or bot.
+- `hermetic-evals.yml`: `test`: owner or bot.
 
 Each of those sites also pins the same repository and actor in a workflow
 expression. The expression is convenience: the signed `actor_id` claim in

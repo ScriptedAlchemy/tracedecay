@@ -1,4 +1,4 @@
-# TraceDecay V2 Session and LCM Temporal Retrieval
+# TraceDecay V2 session and LCM temporal retrieval
 
 **Status:** completed temporal-retrieval product delivery and retained temporal retrieval authority.
 **Depends on:** [01 domain](01-domain-crate.md), [02 store](02-store-crate.md), [03 capture](03-capture-crate.md), [04 projectors](04-projectors-crate.md), [05 query](05-query-crate.md), [09 application](09-application-crate.md), [13 anchors](13-research-provenance-and-context-anchors.md), and [18 privacy](18-secret-detection-redaction-and-private-data-safety.md). The temporal retrieval kernel implements against explicitly resolved current-project/single-root scope and address contracts available by then; the [multi-root scope plan](16-cross-project-repository-worktree-scope.md) later composes this same retrieval kernel with canonical cross-project/repository/worktree resolution and is not an implementation prerequisite.

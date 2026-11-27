@@ -56,7 +56,7 @@ evidence that motivated this plan. The current census of the same profile
 ≈ 13 GB, `code-index-v1/` ≈ 13 GB, `tracedecay.db` ≈ 7.1 GB, with 17 sealed
 generation files spread across 11 scope roots. The live tracedecay scope sits at
 generation `…00000082` with 4 superseded generations, 17 retention receipts
-dated Jul 27–29, and an empty quarantine, that is generation retention running
+dated Jul 27 to 29, and an empty quarantine, that is generation retention running
 and converging, not a store that has never collected.
 
 The historical measurement follows. The profile totalled 106 GB: `projects/` was
@@ -109,7 +109,7 @@ measurements, not inferred table sizes.
    are smaller than a single ~1 GiB generation file, so Doctor answered
    `Unknown` and the report answered `Unavailable` on every profile that had
    anything to report, making `code_generation_retention_finding` structurally
-   unreachable. The census cost is directory entries (4–5) and cheap metadata
+   unreachable. The census cost is directory entries (4 to 5) and cheap metadata
    reads; only digest verification is expensive. Doctor now gates on entry count
    and censuses from metadata, and the report keeps its digest budget but
    degrades to a metadata-only entry instead of discarding a readable census.
@@ -222,7 +222,7 @@ measurements, not inferred table sizes.
 - Branch lifecycle and registry orphan collection are implemented through
   daemon-owned storage runtime work.
 - Session retention is daemon-wired. Projected-message dedupe and raw
-  offload/drop have bounded defaults; legacy session/raw pruning additionally
+  offload/drop have bounded defaults; legacy session/raw pruning also
   requires durable summary lineage. Disposition-scoped observation-evidence
   release is active by default with a 30-day recovery horizon.
 - Code-index generation retention is implemented and engaged (corrected
@@ -332,7 +332,7 @@ repository capture twice per row (`capture_json` and
 187,002 rows, 495 MB, of which 396 MB was the repeated capture. The capture
 now lives once in `observation_repository_captures`; rows keep a reference
 and every reader hydrates through one shared SQL projection. Measured on a
-copy of the live table: 494.6 MB → 98.6 MB.
+copy of the live table: from 494.6 MB to 98.6 MB.
 
 Two residues remain, each blocked on a design decision outside retention:
 

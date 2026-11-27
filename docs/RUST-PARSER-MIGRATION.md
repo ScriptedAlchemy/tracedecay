@@ -1,4 +1,4 @@
-# Rust Parser Migration
+# Rust parser migration
 
 > **Archived supporting design, not implementation authority.** This document
 > preserves historical parser-migration analysis. Current requirements come
@@ -38,7 +38,7 @@ Both of these are this project's job.
 
 ---
 
-## Inventory: what tracedecay actually needs
+## Inventory: what tracedecay needs
 
 ```mermaid
 graph LR
@@ -70,8 +70,8 @@ Counting the work:
 | Category | Grammars | Effort per grammar |
 |---|---|---|
 | No external scanner | Go, Java, C, TypeScript | Just regenerate; minimal port effort |
-| Small scanner (one or two tokens) | Bash, Ruby, Lua, Dart, PHP | ~100–300 lines to port |
-| Medium scanner | Rust, Python, C++, C#, Scala, Kotlin, Swift | ~300–800 lines to port |
+| Small scanner (one or two tokens) | Bash, Ruby, Lua, Dart, PHP | ~100 to 300 lines to port |
+| Medium scanner | Rust, Python, C++, C#, Scala, Kotlin, Swift | ~300 to 800 lines to port |
 | Large scanner | **Markdown** | ~1500 lines C++, the urgent one |
 | Vendored | Cobol, Dockerfile | Live in `tracedecay-large-treesitters/vendor/`; we already control these |
 
@@ -161,7 +161,7 @@ impl Scanner {
 
 Most scanners fall into two structural patterns:
 
-- **Indentation/heredoc trackers** (Python, Ruby, Bash, Lua): a small stack of integers, simple character classification. Direct Rust port is straightforward.
+- **Indentation/heredoc trackers** (Python, Ruby, Bash, Lua): a small stack of integers, simple character classification. These port directly to Rust.
 - **Delimiter/context machines** (Markdown, C++ raw strings, Scala): more involved state, but mechanical translation of C++ classes to Rust structs works.
 
 For markdown specifically, the scanner has:

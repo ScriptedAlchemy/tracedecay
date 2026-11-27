@@ -1,4 +1,4 @@
-# Rust Library Maintenance-Reduction Execution Note
+# Rust library maintenance-reduction execution note
 
 Status: queued behind the current V2 landing wave.
 
@@ -23,7 +23,7 @@ delivery.
 - Use isolated profiles and sockets. Never run the V2 daemon against the
   operator's live TraceDecay profile.
 
-## Ordered Cutovers
+## Ordered cutovers
 
 ### 1. `tokio-util`
 
@@ -79,7 +79,7 @@ authorization, body limits, retries, cancellation, lifecycle, or error
 semantics. Delete duplicate route/schema construction only after shipped HTTP
 handlers produce the same authorized operations and typed responses.
 
-## Per-Lane Workflow
+## Per-lane workflow
 
 1. Inspect the reconciled current worktree and production callers.
 2. Research the maintained crate's current official documentation and source.
@@ -90,7 +90,7 @@ handlers produce the same authorized operations and typed responses.
 6. Fresh independent review, parent diff review, focused tests, merge, push,
    and delete only the recognized merged worktree.
 
-## Completion Evidence
+## Completion evidence
 
 - Every added dependency has a real production caller.
 - Replaced custom production code and obsolete dependencies are deleted.

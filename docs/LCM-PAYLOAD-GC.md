@@ -55,8 +55,8 @@ dedup, reaping summary nodes / lifecycle state / maintenance debt.
 ## 2. Primitives the implementation MUST reuse (do not reinvent)
 
 GC adds a *destructive* capability to a module that today has none. Every
-non-destructive building block already exists and is battle-tested by the read
-path and the doctor diagnostics. Reusing them is a hard requirement, not a
+non-destructive building block already exists and the read path and the
+doctor diagnostics exercise it. Reusing them is a hard requirement, not a
 convenience, they encode the path/ref/symlink safety the contract §12 demands.
 
 | Need | Primitive | Location | Notes for GC |
@@ -74,7 +74,7 @@ convenience, they encode the path/ref/symlink safety the contract §12 demands.
 | **Reference-set computation** | `referenced_payload_refs` | `gc.rs` / doctor diagnostics | The canonical "is this ref cited by a live raw row" query (whole-message `payload_ref` **and** placeholders in the 4 text columns). GC and read-only Doctor diagnostics must agree exactly (OM-2). |
 | All metadata refs | `all_payload_metadata_refs` | `maintenance.rs` | Set of `payload_ref` PKs. |
 | Unreferenced count | `count_unreferenced_payload_metadata` | status/maintenance queries | For status; GC's scan reuses the same sets. |
-| Now | `current_timestamp` (`crate::tracedecay`) / SQL `unixepoch()` | — | Marker/`last_gc_at` timestamps. |
+| Now | `current_timestamp` (`crate::tracedecay`) / SQL `unixepoch()` | none | Marker/`last_gc_at` timestamps. |
 
 **New symbols this design introduces** (implementation task): `delete_external_payload`,
 `run_payload_gc` + phase functions, `tombstone_placeholder_in_text`, a shared
@@ -166,11 +166,11 @@ delete_external_payload(conn, root, ref, opts):
 ```
 
 **Why this order (D-2).** Deleting the file *before* the DB commit would destroy
-bytes a rollback might still need → unrecoverable data loss. Deleting the row
-first means a crash in the commit→remove window leaves an **orphan file** (safe;
+bytes a rollback might still need, which is unrecoverable data loss. Deleting the row
+first means a crash in the window between commit and remove leaves an **orphan file** (safe;
 GC reaps) instead of a missing file behind a live reference (unsafe; `expand`
 would fail). This is the inverse of the ingest order (file before row,
-`raw.rs:258`→`:267`) and is chosen for the same crash-safety reason: always err
+`raw.rs:258` then `:267`) and is chosen for the same crash-safety reason: always err
 toward leaving an orphan file, never toward losing referenced data.
 
 ### 3.3 `tombstone_residual_placeholders`
@@ -307,9 +307,9 @@ on each GC run, for unreferenced metadata (Phase B):
 ```
 
 **Crash safety.** Marks and the reap row-delete live in the same transaction.
-Crash after marking, before reap → mark persists, next run continues the clock.
-Crash mid-reap (row committed, file not removed) → mark deleted with the row,
-orphan file remains → Phase A reaps it next pass by mtime. Either way, a re-run
+If the process crashes after marking and before the reap, the mark persists and the next run continues the clock.
+If it crashes mid-reap (row committed, file not removed), the mark is deleted with the row,
+the orphan file remains, and Phase A reaps it on the next pass by mtime. Either way, a re-run
 converges (contract §8).
 
 **Re-referenced recovery.** If a ref gains a live reference again before reaping,
@@ -343,7 +343,7 @@ reap_orphan_files(dir, metadata_refs, now, cfg, apply) -> OrphanReport:
 ```
 
 No mark table is used for orphans: `mtime` is the grace clock (contract GP-2).
-No hash gate is possible (no owner row ⇒ no expected `content_hash`); orphan
+No hash gate is possible (no owner row means no expected `content_hash`); orphan
 reap trusts name-shape + containment + lstat only. Threat model: an attacker who
 can *write* under `lcm-payloads/` already owns that directory; the invariant we
 uphold is that reap **cannot escape** the canonical dir or follow a symlink
@@ -399,7 +399,7 @@ scans the carrying rows. No file, no mark.
 
 ---
 
-## 7. Filesystem enumeration & deletion safety (§10.1–2, §13)
+## 7. Filesystem enumeration & deletion safety (§10.1 and §10.2, §13)
 
 This is the highest-risk surface. Three independent gates, **all** required:
 
@@ -489,7 +489,7 @@ accepts GC policy or invokes maintenance.
 |---|---|---|---|---|
 | `lcm_payload_gc_grace_seconds` | u64 | `86400` (24h) | floor **300** (GP-1) | Min continuous collectable time before an orphan file / unreferenced-ref is reaped. |
 | `lcm_payload_reap_missing_metadata_after_seconds` | u64 | `604800` (7d) | `0` = never | Window after which a *missing* payload (row+ref, no file) becomes eligible for tombstoning. |
-| `lcm_payload_reap_missing_metadata_enabled` | bool | `false` | — | Master opt-in for Phase C auto-tombstone. `false` ⇒ missing payloads reported forever (contract §9 caution). |
+| `lcm_payload_reap_missing_metadata_enabled` | bool | `false` | none | Master opt-in for Phase C auto-tombstone. When `false`, missing payloads are reported forever (contract §9 caution). |
 | `lcm_payload_gc_max_batch_size` | usize | `500` (== `SQLITE_IN_BATCH_SIZE`) | ≥1 | Caps refs reaped per run; bounds txn/lock time. Excess candidates wait for the next run. |
 
 **No zero-grace escape hatch.** The 300 s floor is enforced in the config parser
@@ -609,8 +609,8 @@ Mapped to the contract §12 and this doc. Implementation and tests assert each.
    immediately before `remove_file`; accept only validated names, never caller
    paths (§3.2, §7.3).
 5. **Safe removal order (D-2):** commit the DB delete (metadata row + mark
-   cleared + placeholders tombstoned) **before** `remove_file` (§3.2). Crash ⇒
-   orphan file, never missing-file-behind-live-ref.
+   cleared + placeholders tombstoned) **before** `remove_file` (§3.2). A crash
+   leaves an orphan file, never a missing file behind a live ref.
 6. **Hash gate (D-4):** never delete a file whose on-disk SHA-256 ≠ the metadata
    `content_hash`; abort + report `PayloadIntegrityMismatch`, remove nothing
    (§3.2, §9). Corrupted files are **never** auto-deleted.
@@ -662,7 +662,7 @@ Concrete, ordered, minimal-blast-radius steps. Each is independently testable.
    prefixes, idempotency, multi-column, and nested cases.
 4. **Owner reaper:** keep `safe_remove_payload_file` and
    `delete_external_payload` behind the authorized owner boundary.
-5. **Phases A–D:** keep `run_payload_gc` and `LcmGcConfig` dry-run by default;
+5. **Phases A to D:** keep `run_payload_gc` and `LcmGcConfig` dry-run by default;
    only owner apply runs may mutate.
 6. **Reports and visibility:** keep `LcmGcReport`/status fields and ensure
    Doctor/status serialize evidence without applying it.

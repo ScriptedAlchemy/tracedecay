@@ -1,4 +1,4 @@
-# Outstanding-Issue Staged Six-Lane Delivery Design
+# Outstanding-issue staged six-lane delivery design
 
 ## Status
 

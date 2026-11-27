@@ -1,4 +1,4 @@
-# TraceDecay V2 Cross-Project and Worktree Scope
+# TraceDecay V2 cross-project and worktree scope
 
 ## Status / role
 

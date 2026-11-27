@@ -1,7 +1,7 @@
 # 40. Partitioned generation storage and zero-copy replay retirement
 
 Status: ACTIVE (decided 2026-08-22). Supersedes the monolithic sealed-generation
-envelope as the long-term storage design; stages 0–1 land first as compatible
+envelope as the long-term storage design; stages 0 to 1 land first as compatible
 fixes inside the current `format_revision`.
 
 Stage state (reconciled 2026-08-31 against the tree, not the commit log):
@@ -87,12 +87,12 @@ representation and the replay economics:
   branches via the Stage-0a fallback) so cold activation parses the sealed
   payload at most once.
 - **Stage 2, manifest + segment split** (`format_revision` bump): split the
-  sealed envelope per §Decision 1–2; integer-keyed, content-addressed
+  sealed envelope per §Decision 1 to 2; integer-keyed, content-addressed
   segments; the 2 GiB whole-envelope bound and whole-file rewrite per
   generation disappear; unchanged-file segments are shared across
   generations.
 - **Stage 3. Grafeo startup authority**: manifest ↔ Grafeo head validation
-  replaces replay on clean startup per §Decision 3–4.
+  replaces replay on clean startup per §Decision 3 to 4.
 
 ## Invariant mapping (old mechanism → new mechanism)
 

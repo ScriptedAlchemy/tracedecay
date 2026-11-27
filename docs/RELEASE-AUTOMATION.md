@@ -1,4 +1,4 @@
-# Release Automation
+# Release automation
 
 TraceDecay releases from `master` on two channels with one publication
 authority:
@@ -31,7 +31,7 @@ trigger; crates.io publication waits until crate naming and structure are
 settled. Neither workflow runs `cargo publish`, and no crates.io publish step
 may be added before that decision.
 
-## Required GitHub Setup
+## Required GitHub setup
 
 Set repository Actions workflow permissions to allow write access:
 
@@ -162,7 +162,7 @@ byte-verified no-op; identical version with different bytes fails and
 requires an SDK version bump. The `scripts/check-sdk-publish-workflow.py`
 gate (run by SDK conformance CI) enforces this job isolation.
 
-## Normal Release Flow (beta)
+## Normal release flow (beta)
 
 1. Merge feature/fix PRs into `master`.
 2. `Release Please` opens or updates the `chore(release): release
@@ -186,7 +186,7 @@ install -m 755 tracedecay ~/.cargo/bin/tracedecay
 install -m 644 tracedecay_sdk_node.node ~/.cargo/bin/tracedecay_sdk_node.node
 ```
 
-## Stable Release (manual)
+## Stable release (manual)
 
 Stable versions are never proposed automatically. When the current beta is
 ready to ship:
@@ -202,7 +202,7 @@ Release, and `release.yml` builds and uploads the assets, refreshes
 npm once release verification passes. The next push to `master` resumes
 proposing betas above the new stable version.
 
-## Manual Recovery
+## Manual recovery
 
 If the GitHub Release is created but the binary artifact workflow does not run,
 check whether `RELEASE_PLZ_TOKEN` and the `actions: write` job permission are

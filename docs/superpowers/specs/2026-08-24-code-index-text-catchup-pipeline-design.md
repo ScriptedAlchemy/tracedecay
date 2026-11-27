@@ -1,4 +1,4 @@
-# Code-Index Text Catch-Up Pipeline Design
+# Code-index text catch-up pipeline design
 
 **Date:** 2026-08-24
 **Status:** Approved for implementation

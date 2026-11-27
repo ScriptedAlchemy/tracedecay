@@ -1,4 +1,4 @@
-# L6 Follow-up Issue Closure Implementation Plan
+# L6 Follow-up issue closure implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-16-outstanding-issues-delivery-design.md`
 
-## Global Constraints
+## Global constraints
 
 - **Bazel only.** Every build, test, check, and run goes through Bazel. Never invoke `cargo`. pnpm is only for `dashboard/` (`pnpm run typecheck`, `pnpm test`, `pnpm run build`, `pnpm run contracts:check`).
 - **Green and red runs.** A green named run is `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test <one target> --test_output=all --test_arg=<full module path> --test_arg=--exact`. The helper proves only a pass: when the command fails it exits with that status and checks no signature. An expected red invokes Bazel directly as `bazel test <one target> --test_output=all --test_arg=<full module path> --test_arg=--exact`. It counts as red only when Bazel exits nonzero and the log shows the step's exact signature: a rustc `error[E…]` line naming the stated missing symbol, or `test <full module path> ... FAILED` with the stated assertion text and `test result: FAILED. 0 passed; 1 failed`. No substring filter is evidence. Every unfiltered target run whose counts or test names are recorded uses `--test_output=all`, because Bazel prints a passing test's log only with that flag. Quote counts and signature lines in the lane report.
@@ -24,7 +24,7 @@
 - **Shared paths.** Task 2 holds the configuration registry files (`crates/tracedecay-global-db/src/configuration/registry.rs`, `crates/tracedecay-domain/src/configuration.rs`, `crates/tracedecay-domain/src/lib.rs`, and the configuration store tests) first. L5 #4419 edits them only after Task 2's PR merges. Task 2's new `dashboard/src/viz/proximity/ProximityPanel.dom.test.tsx` is an L6-created file under L4's dashboard area; L4 does not edit it while #4416 is open. Task 3 is the last of three owners of `crates/tracedecay-application/src/advisory/runtime/local_cycle_tests.rs` (design, Shared files): L1 #4448 edits it first and L5 #4436 second. Task 3 starts only after both PRs have merged, on a branch from the `master` that contains them. If they have not merged when Task 3 is next, run Task 4 first.
 - **Heavy runs.** Tasks 4 and 5 are measured runs. Take a coordinator slot, run them alone, and never loosen a bound to make a number look better.
 
-## Review Focus
+## Review focus
 
 1. **A registered submodule whose binding is revoked between discovery and read.** A parent gitlink removed, a `.git` marker retargeted, or a child worktree replaced must refuse the read, not serve the previous child bytes. Pinned by `lazy_submodule_walk_refuses_retargeted_marker` and `submodule_revocation_during_capture_refuses_snapshot_and_preserves_publication` (Task 1).
 2. **A proximity read whose graph generation moved under it.** A read that resolves encounter addresses against a generation the code index no longer holds must report stale or partial, never a clean zero. Pinned by `expired_evidence_returns_typed_stale_result` and `read_page_preserves_encounter_intervals_and_relation_evidence` (Task 2).
@@ -397,7 +397,7 @@ The report maps each #4416 acceptance line to evidence: no graph-impact call on 
 
 ### Task 3: #4423 local feedback isolation evidence closure
 
-**Gate:** start only after L1 #4448 and L5 #4436 have merged, on a branch from the `master` that contains both (Global Constraints, Shared paths).
+**Gate:** start only after L1 #4448 and L5 #4436 have merged, on a branch from the `master` that contains both (Global constraints, Shared paths).
 
 **Files:**
 - Test: `crates/tracedecay-application/src/advisory/runtime/local_cycle_tests.rs` (the file is the `advisory::runtime::local_cycle_tests` module itself, with its tests at file level; add one `Harness` helper, migrate the two existing held-read tests to it, and add the new test)

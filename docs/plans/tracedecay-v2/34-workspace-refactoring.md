@@ -1,4 +1,4 @@
-# Workspace Refactoring
+# Workspace refactoring
 
 ## Status / role
 

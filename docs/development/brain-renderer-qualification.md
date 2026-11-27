@@ -164,7 +164,7 @@ directory (original run: `/fast/tmp/td-graph-headless/`).
 | Scene during 20,000-envelope stream | Frame median / p95 / max | Observed long tasks | JS heap before / after |
 | --- | --- | --- | --- |
 | 5,000 symbols, 4,999 relations | 16.7 / 16.8 / 16.8 ms | None during the burst | 105.6 / 109.3 MB |
-| 29-project overview | 16.7 / 33.4 / 150 ms | Eight, 51–148 ms | 42.9 / 53.3 MB |
+| 29-project overview | 16.7 / 33.4 / 150 ms | Eight, 51 to 148 ms | 42.9 / 53.3 MB |
 
 Both measured connections received all 20,000 envelopes. The overview's exact
 terminal envelope was selected in the UI and resolved `tracedecay`; retention
@@ -173,7 +173,7 @@ scoped graph is a static scene during this load.
 
 The initial 5,000-symbol navigation took 12.69 seconds. A CPU sample attributes
 6,738.6 ms self time to ForceAtlas2 `iterate`, versus approximately 446 ms in a
-React frame and 238 ms in canvas measurement. Barnes–Hut was already enabled.
+React frame and 238 ms in canvas measurement. Barnes-Hut was already enabled.
 `5000-load-before.cpuprofile` and `load-cpu-summary.json` contain the observations.
 The fix in `cfc6477ee` moves the same bounded calculation into a module worker;
 it does not raise a limit, reduce iterations, or alter measured coordinates.

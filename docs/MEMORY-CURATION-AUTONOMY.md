@@ -1,4 +1,4 @@
-# Final-V2 Agent-Managed Memory Curation
+# Final-V2 agent-managed memory curation
 
 ## Purpose
 
@@ -125,7 +125,7 @@ daemon restart boundaries unchanged.
    profiles use user-level TraceDecay storage scoped to the project by default.
 2. **Start read-mostly.** Prefer TraceDecay MCP graph/context tools, then
    fact-store `get`, `contradict`, `search`, `list`, `probe`, `related`, or
-   `reason`. Note that some recall-style tools may update access metadata.
+   `reason`. Some recall-style tools may update access metadata.
 3. **Run the canonical curator.** Use `tracedecay_fact_store_curate`,
    `tracedecay tool fact_store_curate`, or the retained application HTTP
    endpoint. The runner validates and commits supported backend output in one

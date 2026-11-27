@@ -3,7 +3,7 @@ name: interpreting-tracedecay-diagnostics
 description: "Interpret TraceDecay mapped compiler diagnostics to locate a build or type failure and its affected callers."
 ---
 
-# Interpreting TraceDecay Diagnostics
+# Interpreting TraceDecay diagnostics
 
 Use mapped diagnostics when symbol ownership or affected callers would help
 resolve a compiler failure. If existing compiler output already identifies a

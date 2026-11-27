@@ -1,4 +1,4 @@
-# Self-Improving Loop Contracts
+# Self-improving loop contracts
 
 This is the durable contract for TraceDecay-owned self-improvement loops. The
 daemon scheduler, CLI, and dashboard own curation, managed skills, scheduler
@@ -6,7 +6,7 @@ jobs, and artifact generation; host adapters only load the exported results.
 The first standalone backend is the Codex app-server adapter, and the same
 contracts support other delegated or CLI hosts.
 
-## Host Matrix
+## Host matrix
 
 | Host | TraceDecay-owned behavior | Host-owned behavior | Skill delivery |
 | --- | --- | --- | --- |
@@ -30,7 +30,7 @@ gate materialization. `tracedecay automation skills install --target <host>
 active `SKILL.md` and prompt index. Hosts load those exported files; no
 read-through compatibility route remains.
 
-## Cadence And Automation Defaults
+## Cadence and automation defaults
 
 Hermes is the reference behavior for self-improvement cadence, but TraceDecay owns its own scheduler in standalone mode. Hermes memory review and skill review are turn/iteration nudges: memory defaults to every 10 user turns when memory is enabled, skill review defaults to every 10 tool-calling iterations, and both run as a whitelisted background review fork after the foreground response. Hermes skill-library curator is separate: it runs after `curator.interval_hours` elapses, defaults to 168 hours, requires the idle gate (`curator.min_idle_hours`, default 2 hours), seeds the first run instead of mutating immediately, snapshots before real runs, and archives rather than deletes.
 
@@ -50,13 +50,13 @@ Scheduling is activity-coupled, not purely wall-clock. The scheduler reads the n
 
 The daemon loop is the host for these jobs. It should not create Codex top-level chats for scheduler work, and it should not rely on Codex native recurring automations for liveness. Host backends provide the model call; TraceDecay owns evidence collection, validation, ledgers, apply policy, and scheduler state.
 
-## Standalone And Delegated Modes
+## Standalone and delegated modes
 
 `standalone` means TraceDecay owns backend calls, evidence collection, validation, run ledger writes, policy decisions and receipts, dashboard telemetry payloads, and optional scheduler execution. Backend output can propose changes, but TraceDecay validates every proposed mutation before it is automatically applied or materialized.
 
 `delegated_host` means the host owns intelligence and mutation decisions. TraceDecay exposes contracts and storage views, validates proposed operations when asked, and records typed evidence. It must not call its own backend for memory curation, session reflection, or skill writing in this mode.
 
-## Curation Operation Contract
+## Curation operation contract
 
 Curation proposals are advisory until TraceDecay validation accepts them. Every proposal must identify the reviewed evidence item it targets, include a supported operation kind, provide a confidence/reason, and pass the existing evidence guard before any apply policy is considered.
 
@@ -68,7 +68,7 @@ Timestamp semantics follow the Hermes memory-curator rule:
 4. Treat maintenance `updated_at` as storage metadata, not truth freshness.
 5. Use deterministic tie-breakers only after the subject, claim, and semantic timestamp checks are resolved.
 
-## Managed Skill Contract
+## Managed skill contract
 
 TraceDecay-owned managed skills live under the profile `agent_managed/skills` store and static bundled skills stay immutable. Managed skill metadata includes id, title, summary, category, targets, lifecycle state, pinned flag, checksum, timestamps, and provenance. Support files are restricted to `references`, `templates`, `scripts`, and `assets`.
 
@@ -79,13 +79,13 @@ overrides; they do not gate activation. Pinned and user-authored skills are
 excluded from automatic archive or patch recommendations; shipped and
 Hermes-owned skills remain outside TraceDecay-owned mutation surfaces.
 
-## Telemetry And Recommendations
+## Telemetry and recommendations
 
 Skill telemetry is a sidecar ledger, not frontmatter. The ledger tracks view/use/patch counts, last timestamps, created_by, state, pinned, targets, and provenance. TraceDecay may normalize its own analytics into this ledger. In delegated host mode, TraceDecay reads host usage/provenance data as evidence and does not write host state.
 
 Archive/prune recommendations are explainable review recommendations only. They cannot auto-delete skills. Skill improvement recommendations must cite repeated corrections, failed workflows, underused tool evidence, or validation artifacts before proposing a patch.
 
-## Local Skill Versus Plugin Artifact
+## Local skill versus plugin artifact
 
 Use a local managed skill when the workflow is personal, project-specific, unstable, or still pending validation.
 
@@ -93,7 +93,7 @@ Use a managed overlay when a policy-valid skill should be available to a local n
 
 Generate a Codex plugin artifact when a policy-valid workflow is stable, shareable, and should travel with plugin metadata, native `skills/`, optional `.mcp.json`, optional hooks, and marketplace metadata.
 
-## Improvement Artifacts
+## Improvement artifacts
 
 Every automation run that reaches backend validation should be able to produce a review chain:
 

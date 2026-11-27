@@ -1,4 +1,4 @@
-# Trust & Temporal-Decay semantics. Current behavior
+# Trust & temporal-decay semantics. Current behavior
 
 This document describes how a project-memory fact's persisted trust score
 changes, and how temporal decay affects search ranking, against the current
@@ -97,7 +97,7 @@ its own delta argument anymore; an absolute trust set now goes through the
 same update patch as any other field edit. None of the above is time-driven;
 none runs on a schedule.
 
-## 3. Where temporal decay is actually applied: retrieval, dynamically
+## 3. Where temporal decay is applied: retrieval, dynamically
 
 The only live decay is in recall ranking, in
 `crates/tracedecay-session-memory/src/fact_store/scoring.rs`:
@@ -166,7 +166,7 @@ retrieval / not at all"):
 - **Retrieval-time decay** is visible per result via the `why` field on every
   search hit.
 - **Feedback-driven trust changes** are recorded append-only in
-  `memory_v2_feedback_history` (old trust → new trust, delta, action, source
+  `memory_v2_feedback_history` (old trust, new trust, delta, action, source
   label, note, timestamp). The table's schema forbids `DELETE` and restricts
   `UPDATE` to detail redaction only (`memory_v2_feedback_history_no_delete`,
   `memory_v2_feedback_history_only_redaction` triggers in

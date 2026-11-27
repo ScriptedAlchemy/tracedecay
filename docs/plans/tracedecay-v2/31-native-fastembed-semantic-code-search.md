@@ -380,9 +380,9 @@ measurements.
 - All caches are local and privacy-domain/key-epoch separated. Model artifacts
   key by versioned manifest digest; sessions by embedding projection key; vectors
   and checkpoints by projection key plus source generation/chunk digest.
-  Result caches additionally key by authorization receipt/epoch, authorized
+  Result caches also key by authorization receipt/epoch, authorized
   scope and query digests, fusion/rerank/request revisions, and pagination.
-  Hydration caches additionally key by candidate identity, requested fields,
+  Hydration caches also key by candidate identity, requested fields,
   and neighbor budget. Domain/epoch changes produce zero hits in every cache;
   authorization changes produce zero result/hydration hits. No ambient model
   cache, network inference, browser runtime, external process, or cross-domain

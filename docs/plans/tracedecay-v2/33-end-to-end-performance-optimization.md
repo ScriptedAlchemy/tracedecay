@@ -1,4 +1,4 @@
-# End-to-End Performance Optimization
+# End-to-end performance optimization
 
 ## Status and authority
 

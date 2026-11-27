@@ -24,7 +24,7 @@ ranking.
 Lexical clause matches 73 occurrences, well inside the 256 page. Hotpath places
 the cost outside retrieval entirely. Over a 1,978 s window,
 `mcp.server.tools_call.dispatch` averaged 23.68 s across 186 calls and
-`mcp.hook_runtime.total` averaged 23.60 s across 179, so essentially the whole
+`mcp.hook_runtime.total` averaged 23.60 s across 179, so nearly all of the
 tool latency is admission-side, before dispatch. Inside it,
 `daemon.context_scout.lifecycle_lookup` averaged 19.80 s (p95 32.04 s) across
 179 calls, and `daemon.context_scout.lookup.unresolved` counted 153, every
@@ -48,7 +48,7 @@ anything, and it proposes almost the whole store:
 | Clause | Match term | Rows available |
 | --- | --- | --- |
 | ExactMessage | phrase `"resident limit warm sessions"` | 0 |
-| Phrase | not planned (query is unquoted) | — |
+| Phrase | not planned (query is unquoted) | n/a |
 | Lexical | `"resident" OR "limit" OR "warm" OR "sessions"` | **41,064** |
 | Summary | phrase, over `session_summary_nodes_fts` | 0 |
 | Span | phrase, over member occurrences | 0 |
@@ -68,7 +68,7 @@ a recency-ordered page of 256 over the OR match takes 0.106 s; the complete AND
 result takes 0.001 s. The mis-sized quantity is the *population*, 41,064 rows
 proposed for a 2-row answer.
 
-### What a page of 256 actually contains
+### What a page of 256 contains
 
 Every candidate clause orders by recency (`ORDER BY o.knowledge_at DESC,
 o.session_id, o.occurrence_id`), because that ordering is the cursor keyset.
@@ -174,8 +174,8 @@ when the strict form does not fill the page.
   measurably wrong: AND yields 2 < 256 for the observed query, so the fallback
   would fire and restore all 41,064 rows. The trigger has to be **AND yields
   zero**, and the fallback should be a graduated relaxation (drop one term, then
-  two) rather than a jump to full OR: 2 → 67 → 3,539 → 41,064 for this query,
-  and 0 → ≤6 for `span burst membership record read`.
+  two) rather than a jump to full OR. For this query the row counts go from 2 to 67 to 3,539 to 41,064,
+  and for `span burst membership record read` from 0 to at most 6.
 - Recall risk: a term the user misspelled or a synonym now excludes the whole
   document instead of contributing a weak match. That is the honest trade, and
   the graduated fallback bounds it.

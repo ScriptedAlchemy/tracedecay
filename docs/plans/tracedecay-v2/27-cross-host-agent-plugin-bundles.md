@@ -1,4 +1,4 @@
-# TraceDecay V2 Cross-Host Agent Integration Plan
+# TraceDecay V2 cross-host agent integration plan
 
 ## Status and existing foundation
 

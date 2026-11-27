@@ -1,4 +1,4 @@
-# TraceDecay V2 Code Intelligence Indexing Plan
+# TraceDecay V2 code intelligence indexing plan
 
 ## Status / role
 
@@ -62,7 +62,7 @@ release 0.0.73, running since 08:56 UTC) journals `git_watch_synced` per
 metadata-watcher sync; joining today's 164 commits made inside that daemon's
 window against the journal's sync timestamps gives commit-to-next-sync delays
 of p50 = 8 s, p95 = 252 s, p99 = 1,043 s, max = 1,176 s (19.6 min), minutes,
-not the 237–285 min measured before the watcher/backstop repairs. The worst
+not the 237 to 285 min measured before the watcher/backstop repairs. The worst
 inter-sync gap today (67 min) contained zero commits, i.e. idle time, not
 staleness. Caveat kept honest: the installed 0.0.73 binary predates the
 event-to-ready receipts (325ea665e4) and the query-admission ladder close

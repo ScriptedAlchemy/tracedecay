@@ -17,7 +17,7 @@ contradicts the project's "never push to / fork the aovestdipaperino upstream"
 policy. The real long-term exit is dropping these deps entirely via the Rust-parser
 migration (`docs/RUST-PARSER-MIGRATION.md`), not renaming them.
 
-## What the dependency actually is
+## What the dependency is
 
 | Aspect | Value | Source |
 |---|---|---|

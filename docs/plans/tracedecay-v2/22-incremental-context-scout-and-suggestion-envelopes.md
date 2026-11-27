@@ -1,4 +1,4 @@
-# TraceDecay V2 Incremental Context Scout
+# TraceDecay V2 incremental context scout
 
 Earlier Scout envelope names, conformance packets, fixture matrices, timing
 baselines, and file layouts are historical evidence, not prerequisites.
@@ -55,7 +55,7 @@ and treats historical narrative as quoted evidence, never active instruction.
 
 ## Implementation slices
 
-### Deterministic Scout
+### Deterministic scout
 
 - Produce suggestions directly from current authorized evidence with stable
   ranking, suppression, expiry, and dedupe behavior.

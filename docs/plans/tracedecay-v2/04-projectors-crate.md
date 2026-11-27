@@ -1,6 +1,6 @@
 # V2 projection boundary
 
-## Status / Role
+## Status / role
 
 Sanitized capture pinned the first production observation-to-view contract. Projection now
 participates in each active vertical PR that introduces or replaces a product view. It

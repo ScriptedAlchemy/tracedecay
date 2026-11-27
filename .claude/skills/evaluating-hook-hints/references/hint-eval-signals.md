@@ -1,4 +1,4 @@
-# Hint Eval Signals
+# Hint eval signals
 
 Use deterministic evals for pure classifier/dedupe behavior:
 

@@ -1,4 +1,4 @@
-# L2 Storage Issues Implementation Plan
+# L2 Storage issues implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -16,7 +16,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-16-outstanding-issues-delivery-design.md`
 
-## Global Constraints
+## Global constraints
 
 - **Bazel only.** Every build, test, check, run, and measurement goes through Bazel (`bazel test //<target> --test_output=all`, `bazel run //crates/tracedecay-cli:tracedecay -- …`). Never invoke `cargo`. This plan adds no Rust dependency. If one becomes necessary, escalate before running `CARGO_BAZEL_REPIN=workspace bazel fetch --repo=@c` and `bazel run //scripts:gen_builds`.
 - **Green and red runs.** A green named run is `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test <one target> --test_output=all --test_arg=<full module path> --test_arg=--exact`. The helper proves only a pass: when the command fails it exits with that status and checks no signature, so it never proves an expected red. An expected red invokes Bazel directly, `bazel test <one target> --test_output=all --test_arg=<full module path> --test_arg=--exact`, and counts only when Bazel exits nonzero and the log shows the step's exact signature: a rustc `error[E…]` line naming the stated missing symbol, or `test <full module path> ... FAILED` with the stated assertion text and `test result: FAILED. 0 passed; 1 failed`. A reproduce-first run with a genuinely unknown outcome uses the green shape; a pass is the pin, and a failure is classified only by the signatures its step names. No substring filter is evidence. Every unfiltered target run whose counts or test names are recorded uses `--test_output=all`. Quote counts and signature lines in the lane report.
@@ -38,7 +38,7 @@
   - **Shared `daemon/maintenance.rs`:** L1 Task 1 (#4448) edits `crates/tracedecay/src/daemon/maintenance.rs` first (design, Shared files). Task 12 may prepare its pass on a branch from `master`, but it rebases onto the `master` that contains #4448 and reruns its Step 4 runs before the #4099 PR opens.
   - **No cross-lane edits:** no task edits L3's code-index format, segment layout, or session admission; L5's SDK sources; or L1's registered-store schema.
 
-## Review Focus
+## Review focus
 
 1. **A worktree-registered shard that is the repository's only authority.** Narrowing sibling-worktree candidates must never strand a repository whose first enrollment came from a linked worktree. A new worktree must still resolve to that sole authority rather than minting a second project. Pinned by `sole_worktree_registered_authority_still_claims_a_new_worktree` (Task 1, Step 1).
 2. **Retention under a live reader or a racing publication.** Collection must leave the generation a reader holds and every durable descriptor target in place. A text artifact that became live after its retention receipt was written must be restored, not deleted, and must not block the other candidates. Pinned by `reader_held_previous_generation_survives_scheduled_retention` (Task 7, Step 1) and `committed_receipt_with_relivened_artifact_restores_it_and_finishes_recovery` (Task 8, Step 1).
@@ -201,7 +201,7 @@ git add crates/tracedecay-global-db/src/project_registry.rs crates/tracedecay-ag
 git commit -m "fix(hooks): name registry conflicts and their remedy in session hints"
 ```
 
-Open one PR for Tasks 1–2 with `Fixes #4876`. Its criterion map covers four points:
+Open one PR for Tasks 1 to 2 with `Fixes #4876`. Its criterion map covers four points:
 - resolution narrowed by each shard's registered root;
 - the sole-authority guard;
 - the remedy named in both the error and the hint;
@@ -419,7 +419,7 @@ Expected: all 100 invocations report `1 passed; 0 failed`; the loop stops at the
 
 - [ ] **Step 2: Open the #4152 PR and record the disposition**
 
-Open one PR for Tasks 4–5 with `Refs #4152`. Its criterion map has two items:
+Open one PR for Tasks 4 to 5 with `Refs #4152`. Its criterion map has two items:
 - **Item 2, large unlinked temp files:** spill sources are the #4853 merged carry repairs, Task 4 removes the remaining connection-local TEMP tables, and Task 5 adds the macOS census. Doctor accounting covers this as `sqlite_temp_spill`.
 - **Item 1, memory corruption:** not reproduced under the Step 1 conditions, with the mimalloc owner-heap removal (#4173) cited.
 
@@ -684,7 +684,7 @@ Expected: PASS, each target's `test result:` line reports a nonzero passed count
 
 Run `pnpm run contracts:check`. Expected: no drift.
 
-Open the PR for Tasks 7–11 with `Refs #4616`. Its criterion map covers the five criteria with test names and counts. Criterion 3 and the multi-day busy-monorepo observation stay `pending-long-acceptance` on the operator machine. After merge, notify the coordinator that the L3 #4533 gate is open.
+Open the PR for Tasks 7 to 11 with `Refs #4616`. Its criterion map covers the five criteria with test names and counts. Criterion 3 and the multi-day busy-monorepo observation stay `pending-long-acceptance` on the operator machine. After merge, notify the coordinator that the L3 #4533 gate is open.
 
 ### Task 12: #4099 Profile-wide hook analytics rotate from the retention tick
 
@@ -731,7 +731,7 @@ git add crates/tracedecay/src/daemon/maintenance.rs
 git commit -m "fix(maintenance): rotate hook analytics from the retention tick"
 ```
 
-### Task 13: #4099 Ingest growth trips a named Doctor finding
+### Task 13: #4099 Ingest growth trips a named doctor finding
 
 **Files:**
 - Create: `crates/tracedecay/tests/daemon_suite/storage_growth_finding_test.rs`
@@ -807,9 +807,9 @@ git commit -m "simplify(storage): drop footprint family for retired response han
 
 - [ ] **Step 5: Open the #4099 PR after the L1 gate**
 
-Confirm that L1's #4448 and #4427 have both merged. Rebase, rerun the Task 12–14 targets, and run `pnpm run contracts:check`.
+Confirm that L1's #4448 and #4427 have both merged. Rebase, rerun the Task 12 to 14 targets, and run `pnpm run contracts:check`.
 
-Open the PR for Tasks 12–14 with `Refs #4099`. Its criterion map covers the three needs:
+Open the PR for Tasks 12 to 14 with `Refs #4099`. Its criterion map covers the three needs:
 
 - **Need 1, size observable.** Task 13, plus #4794 merged growth streaming.
 - **Need 2, retention and GC.** One row per family, each with the pass and test that already cover it on `master`:
@@ -856,4 +856,4 @@ Mark #4099 `pending-long-acceptance` in the lane report, with the draft attached
 - **Spec coverage.** Every L2 issue has its order (#4876 → #4513 → #4152 → #4616 → #4099), reproduce-first steps, and closure through a coordinator-reviewed criterion map. The seams are respected: L2 owns registry resolution and retention; L3's format is consumed only through retention's public interface; L1's removals gate Task 14. #4099's real-profile runbook is drafted (Task 15) and never executed.
 - **Placeholder scan.** No TBDs. Non-reproduction and unexpected-mechanism outcomes go to a named `needs-decision` disposition instead of an unspecified fix.
 - **Type consistency.** These names are used identically everywhere they appear: `ProjectRootResolutionV1`, `HookWorkspaceStatus::RegistryConflict`, `UnlinkedOpenFileV1`, `ProcessFdCensusErrorV1`, `CommittedTextArtifactCleanupV1`, `StoreLockAdmissionV1`, `GENERATION_STORE_BUSY_DEFERRALS_BEFORE_WAIT`, and `run_hook_analytics_rotation`.
-- **Review Focus.** Each of the five items names a test that is written in a numbered step of its owning task.
+- **Review focus.** Each of the five items names a test that is written in a numbered step of its owning task.

@@ -3,7 +3,7 @@ name: tracedecay-dev-sweep
 description: "Run a requested broad TraceDecay self-improvement audit across usage, transcripts, automation, hints, and code health."
 ---
 
-# TraceDecay Development Sweep
+# TraceDecay development sweep
 
 Bound the project set, time window, and requested outcome. Select the evidence
 lanes that answer it; do not invoke every skill or build the repository merely

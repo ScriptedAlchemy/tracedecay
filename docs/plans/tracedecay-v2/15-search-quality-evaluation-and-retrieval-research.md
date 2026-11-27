@@ -1,6 +1,6 @@
-# TraceDecay V2 Search Quality, Evaluation, and Retrieval Research
+# TraceDecay V2 search quality, evaluation, and retrieval research
 
-## Status / Role
+## Status / role
 
 Status: active product plan and quality authority. It covers federated
 retrieval and source-bound shared-code evaluation. Neural dense retrieval is
@@ -441,7 +441,7 @@ rebuild time. Shared-code evaluation also reports exact and renamed family
 precision, near-duplicate precision and recall when that verifier is available,
 contained-block outcomes, excluded-too-small counts, examined and omitted
 counts, verification work, and continuation behavior. Task evaluations
-additionally report completion, failure/timeout, turns, tokens/cost when
+also report completion, failure/timeout, turns, tokens/cost when
 authoritative usage data exists, and fallback/abstention behavior.
 
 Linux measurements are descriptive developer evidence. Keep raw samples,

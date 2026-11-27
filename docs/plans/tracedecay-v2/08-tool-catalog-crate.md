@@ -1,6 +1,6 @@
 # V2 tool catalog crate
 
-## Status / Role
+## Status / role
 
 Completion and activity status is owned solely by
 [the plan-set index](00-plan-set-index.md). This component plan defines
@@ -203,7 +203,7 @@ required negotiated features. It also retains lifecycle, streaming,
 pagination, deadline/cancellation, idempotency, authority-revalidation,
 reconciliation, terminal-state, and receipt semantics wherever they apply.
 
-For every retrieval primitive it additionally retains the retrieval family
+For every retrieval primitive it also retains the retrieval family
 and owner, canonical evidence-envelope contract, coverage, omissions, score
 and contribution semantics, deterministic ordering and page bounds, supported
 temporal modes, cancellation points, and deadline behavior. Current

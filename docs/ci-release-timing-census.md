@@ -20,7 +20,7 @@ run is skipped. The live path is `release-beta.yml`.
 
 ## Workflow wall times
 
-### Release (Beta) — last 15 finished runs
+### Release (Beta): last 15 finished runs
 
 | Run | Tag | Conclusion | Wall min |
 | --- | --- | --- | ---: |
@@ -29,7 +29,7 @@ run is skipped. The live path is `release-beta.yml`.
 | 32605144188 | v0.1.0-beta.37 | failure | 105.8 |
 | 32597856820 | v0.1.0-beta.36 | failure | 85.7 |
 | 32552646147 | v0.1.0-beta.35 | failure | 100.9 |
-| 32540109408 … 32417378296 | beta.10–34 | cancelled/failure | 49–509 |
+| 32540109408 … 32417378296 | beta.10 to beta.34 | cancelled/failure | 49 to 509 |
 
 Last successful Release (Beta) in history: run 27839751753 (`v0.0.3-beta.1`,
 27.4 min). Not comparable to the current workspace.
@@ -43,7 +43,7 @@ not on the current release critical path.
 ### CI (`ci.yml`)
 
 Recent master/PR runs are almost all cancelled by concurrency. Completed
-failures that actually scheduled the heavy jobs:
+failures that scheduled the heavy jobs:
 
 | Run | Conclusion | Wall min | Critical job |
 | --- | --- | ---: | --- |
@@ -56,7 +56,7 @@ Last successful CI in the API window: 34956004104 (41.8 min). That run is the
 pre-partition 15-job shape (`Test Linux` 4.4 min). It is not the current
 `ci.yml`.
 
-## Run 35271070760 (v0.1.0-beta.40) — 149.8 min wall
+## Run 35271070760 (v0.1.0-beta.40), 149.8 min wall
 
 Jobs started together after `validate` (0.3 min). Wall clock is the slowest
 job: `Build x86_64-linux`.
@@ -68,7 +68,7 @@ job: `Build x86_64-linux`.
 | Build aarch64-linux | ubuntu-22.04-arm | failure | 73.9 | three serial `cargo build`s, 24.9 + 19.9 + 23.7 |
 | Build x86_64-windows | windows-latest | failure | 65.1 | Build release binary for packaging 55.7 |
 | validate | ubuntu-22.04 | success | 0.3 | checkout 0.3 |
-| publish | ubuntu-22.04 | skipped | 0.0 | — |
+| publish | ubuntu-22.04 | skipped | 0.0 | n/a |
 
 Packaging, MCPB, archive verify, and artifact upload never ran. The job died
 in compile/test or distribution acceptance.
@@ -105,16 +105,16 @@ steps.
 Older Linux failures of the same step: 103.5 min (beta.37), 80.0 min
 (beta.36). Same shape, smaller tree or warmer runner, still the wall.
 
-### Other platforms on the same run — three serial release compiles
+### Other platforms on the same run: three serial release compiles
 
 After a cache miss, non-Linux (and ARM Linux) jobs do:
 
-1. `Verify all-feature release build compiles` —
+1. `Verify all-feature release build compiles`:
    `cargo build -p tracedecay-cli --bin tracedecay --release --all-features`
    (skipped on Windows).
-2. `Build release binary for packaging` —
+2. `Build release binary for packaging`:
    `cargo build … --no-default-features --features production`.
-3. `Run distribution acceptance` —
+3. `Run distribution acceptance`:
    `cargo build --workspace --release --lib --bins` with production features
    inside `scripts/check-distribution-acceptance.sh`.
 
@@ -127,7 +127,7 @@ After a cache miss, non-Linux (and ARM Linux) jobs do:
 macOS paid **120.6 minutes of serial cargo** in one job. ARM Linux paid
 **68.5**. Windows paid **55.7** for the first compile only.
 
-### `Resolve release source feature profile` (4.3–5.0 min, all four platforms)
+### `Resolve release source feature profile` (4.3 to 5.0 min, all four platforms)
 
 This step is two `cargo tree --locked` walks
 (`scripts/check-production-feature-profile.py`) and it runs **before**
@@ -141,13 +141,13 @@ scratch:
 | x86_64-linux | 4.3 |
 | aarch64-linux | 4.0 |
 
-Older betas (cache warmer or smaller tree) spent 0.2–0.4 min here.
+Older betas (cache warmer or smaller tree) spent 0.2 to 0.4 min here.
 
 ## Cache miss cost
 
 ### Release (Beta) rust-cache: miss on every platform (beta.40)
 
-Logs: `No cache found.` Restore lookup 3–6 seconds. Keys:
+Logs: `No cache found.` Restore lookup 3 to 6 seconds. Keys:
 
 ```
 v0-rust-release-beta-<target>-<os>-<hash>
@@ -170,8 +170,8 @@ Save after failure (`cache-on-failure: true`):
 Save is not the sink. The miss is: every release compile starts from an empty
 `target/`.
 
-npm cache hit on Linux and Windows (90–129 MB, restore < 5 s). Dashboard
-build 0.1–0.3 min. Not a sink.
+npm cache hit on Linux and Windows (90 to 129 MB, restore < 5 s). Dashboard
+build 0.1 to 0.3 min. Not a sink.
 
 ### CI rust-cache: hit, workspace still compiles
 
@@ -205,10 +205,10 @@ partitions. That is small next to the workspace compile.
 | Hotpath parity | success | 15.2 | Build controlled-workload helpers | 14.8 |
 | Feature gates | success | 12.1 | cargo check two feature graphs | 11.4 |
 | Build debug CLI | success | 11.7 | cargo build -p tracedecay-cli | 11.0 |
-| Clippy | success | 6.4 | clippy 3.5 + lean check 2.4 | — |
-| Dashboard | success | 2.1 | npm test 1.6 | — |
+| Clippy | success | 6.4 | clippy 3.5 + lean check 2.4 | n/a |
+| Dashboard | success | 2.1 | npm test 1.6 | n/a |
 
-Windows test shards are 12–15 min after the 114 min archive. They are not the
+Windows test shards are 12 to 15 min after the 114 min archive. They are not the
 wall. macOS groups are 3-vCPU `macos-14` compile+test in one step; comments
 in `ci.yml` already treat that compile as irreducible on three cores.
 
@@ -228,10 +228,10 @@ stops doing redundant work on a free runner.
 | 7 | **24.9 / 19.9 / 23.7** | Release (Beta) | 35271070760 | Build aarch64-linux | same three cargo steps | Same serial triple as macOS, faster cores. Dist acceptance still rebuilds the workspace. |
 | 8 | **15.3** | Release (Beta) | 35271070760 | Build x86_64-linux | Test release distribution (helpers) | Two serial release helper builds (9.1 + 6.2) before the workspace test compile. CI already has a dedicated `hotpath-parity` job for this. |
 | 9 | **57.1** | CI | 35274248710 | Test macOS root-suites | Run the group's partitions | 3-vCPU compile+test. rust-cache is deps-only. |
-| 10 | **4.3–5.0** | Release (Beta) | 35271070760 | all four build jobs | Resolve release source feature profile | Two `cargo tree` walks **before** rust-cache restore. |
-| — | 0.1–0.3 | Release (Beta) | 35271070760 | all build jobs | Build dashboard | npm cache hit. Not a sink. |
-| — | 0.2–1.4 | Release (Beta) | 35271070760 | all build jobs | Post Cache Rust build | Upload 0.5–1.2 GB. Not a sink. |
-| — | never ran | Release (Beta) | 35271070760 | all build jobs | Package / upload | Not on the wall. |
+| 10 | **4.3 to 5.0** | Release (Beta) | 35271070760 | all four build jobs | Resolve release source feature profile | Two `cargo tree` walks **before** rust-cache restore. |
+| n/a | 0.1 to 0.3 | Release (Beta) | 35271070760 | all build jobs | Build dashboard | npm cache hit. Not a sink. |
+| n/a | 0.2 to 1.4 | Release (Beta) | 35271070760 | all build jobs | Post Cache Rust build | Upload 0.5 to 1.2 GB. Not a sink. |
+| n/a | never ran | Release (Beta) | 35271070760 | all build jobs | Package / upload | Not on the wall. |
 
 ## Observed facts vs inferences
 
@@ -244,7 +244,7 @@ Observed:
   production CLI, production workspace). Dist acceptance then fails on
   `lang-bash` after paying the third compile.
 - rust-cache missed on every beta.40 platform. CI Windows rust-cache hit and
-  still compiled 65–106 min of workspace crates.
+  still compiled 65 to 106 min of workspace crates.
 - Dashboard, npm, cache save, packaging, and upload are minutes or less, or
   never reached.
 

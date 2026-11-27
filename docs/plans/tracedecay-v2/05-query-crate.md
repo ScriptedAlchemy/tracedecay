@@ -1,6 +1,6 @@
 # V2 query crate
 
-## Status / Role
+## Status / role
 
 - Status: shared query-contract authority. The temporal-kernel delivery is
   complete. Lexical/code and semantic implementations are callable;

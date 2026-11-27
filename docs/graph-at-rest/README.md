@@ -85,13 +85,13 @@ production-sized 65,536-mutation pages.
 |---|---|---|---|---|---|---|---|
 | 20k + 5k | replay | 0.539s | 140.1 MiB | 156.0 MiB (15.0x disk) | 10.4 MiB | 64/64 in 3.89ms | 9 visits, 0.37ms |
 | 20k + 5k | compact | 0.308s | 290.0 MiB | 341.5 MiB | 40.4 MiB | **0/64** | **error** |
-| 40k + 10k | compact | — | — | — | — | — | **`compact()` fails** |
+| 40k + 10k | compact | n/a | n/a | n/a | n/a | n/a | **`compact()` fails** |
 | 500k + 125k | replay | 12.065s | 2589.6 MiB | **3804.1 MiB (14.4x disk)** | 264.9 MiB | 64/64 in 1.69ms | 9 visits, 7.44ms |
 | 1M + 250k | replay | 21.265s | 6067.6 MiB | **7581.7 MiB (14.3x disk)** | 531.4 MiB | 64/64 in 1.15ms | 9 visits, 4.00ms |
 
 Two things to read off this table.
 
-The **14.3–14.4x publish peak reproduces exactly** as reported, which is the
+The **14.3 to 14.4x publish peak reproduces exactly** as reported, which is the
 harness validating itself against a known figure before it is trusted on
 anything new.
 
@@ -264,7 +264,7 @@ replay-to-compact open ratio under a sane label count is **10.9x at 1M rows and
 13.5x at 500k**. If activation is dominated by grafeo's open, which the
 harness supports but does not prove for the production path, since production
 activation also runs digest verification, then compaction lands it at roughly
-**45–60s**.
+**45 to 60s**.
 
 That assumption is the one number in this document that is not directly
 measured, and it should be confirmed with a profile of the real activation path

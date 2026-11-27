@@ -1,4 +1,4 @@
-# TraceDecay V2 Daemon LSP Gateway and Universal Diagnostics Plan
+# TraceDecay V2 daemon LSP gateway and universal diagnostics plan
 
 ## Status and existing foundation
 
