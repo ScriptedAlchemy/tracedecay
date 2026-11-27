@@ -4,7 +4,7 @@ use tracedecay_store::{
     ProjectReadResultV1, RemoteObservationReplayWriteV1, RemoteWriterFenceInstallV1,
     RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
     SanitizedCleanDiagnosticSnapshotV1, SourceAcquisitionQueueCasV1, SourceCommitV1,
-    SourceProjectionCommitV1,
+    SourceProjectionBatchV1,
 };
 
 use crate::operation::StorageOperationError;
@@ -120,13 +120,13 @@ impl ProjectExecutor {
         Ok(())
     }
 
-    pub fn execute_external_source_projection_write(
+    pub fn execute_external_source_projection_batch(
         &mut self,
         savepoint: &Savepoint<'_>,
-        projection: &SourceProjectionCommitV1,
+        batch: &SourceProjectionBatchV1,
     ) -> rusqlite::Result<()> {
         self.external_source
-            .execute_projection_write(savepoint, projection)
+            .execute_projection_batch(savepoint, batch)
     }
 
     pub fn execute_external_source_acquisition_write(

@@ -67,9 +67,10 @@ pub use external_source::{
     SourceAuthorityPublicationV1, SourceCommitApplyOutcomeV1, SourceCommitReceiptSummaryV1,
     SourceCommitReceiptV1, SourceCommitV1, SourceObjectCoverageV1, SourceObjectLineageV1,
     SourceObjectMutationV1, SourceObjectTransitionV1, SourceObservationEvidenceV1,
-    SourcePendingProjectionV1, SourceProjectionApplyOutcomeV1, SourceProjectionCommitV1,
-    SourceProjectionEffectV1, SourceScheduledRefetchV1, SourceStoreErrorV1, SourceStoreResult,
-    SourceStoreStateV1, apply_source_authority_publication,
+    SourcePendingProjectionV1, SourceProjectionApplyOutcomeV1,
+    SourceProjectionBatchContractErrorV1, SourceProjectionBatchResultV1, SourceProjectionBatchV1,
+    SourceProjectionCommitV1, SourceProjectionEffectV1, SourceScheduledRefetchV1,
+    SourceStoreErrorV1, SourceStoreResult, SourceStoreStateV1, apply_source_authority_publication,
     apply_source_authority_publication_owned, apply_source_commit, apply_source_commit_owned,
     apply_source_projection, apply_source_projection_owned, build_source_projection,
 };

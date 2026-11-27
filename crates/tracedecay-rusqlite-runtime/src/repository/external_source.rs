@@ -9,9 +9,9 @@ use tracedecay_store::{
     SourceAcquisitionQueueStateV1, SourceAuthorityPublicationReceiptV1,
     SourceAuthorityPublicationV1, SourceCommitApplyOutcomeV1, SourceCommitReceiptSummaryV1,
     SourceCommitReceiptV1, SourceCommitV1, SourceObjectCoverageV1, SourceObjectMutationV1,
-    SourcePendingProjectionV1, SourceProjectionApplyOutcomeV1, SourceProjectionCommitV1,
-    SourceStoreStateV1, apply_source_authority_publication_owned, apply_source_commit_owned,
-    apply_source_projection_owned, build_source_projection,
+    SourcePendingProjectionV1, SourceProjectionApplyOutcomeV1, SourceProjectionBatchV1,
+    SourceProjectionCommitV1, SourceStoreStateV1, apply_source_authority_publication_owned,
+    apply_source_commit_owned, apply_source_projection_owned, build_source_projection,
 };
 
 use super::support::{CachedStatements, decode, encode, invalid, same_json};
@@ -302,6 +302,56 @@ impl ExternalSourceExecutor {
         }
     }
 
+    /// Projects up to `batch.max()` consecutive pending heads of one binding
+    /// inside this savepoint, starting at the head whose source receipt is
+    /// `batch.head_receipt_digest()`. Each head exists only once its
+    /// predecessor is durable, so the chain is derived here rather than named
+    /// by the caller, and every head settles through the same
+    /// `execute_projection_write` authority as an unbatched one.
+    ///
+    /// A chain that already moved past the named head is an exact replay of a
+    /// window this drainer lost, and settles as a no-op; so does a binding with
+    /// nothing pending, since there is then no head this window may project.
+    /// A chain still waiting on a different head is a stale drainer: the
+    /// window settles as a no-op too, so the caller re-reads the head a peer
+    /// left instead of projecting under a window that no longer describes the
+    /// queue. A no-op commits nothing, so neither case is an error.
+    #[tracing::instrument(
+        name = "rusqlite.external_source.execute_projection_batch",
+        level = "trace",
+        skip_all
+    )]
+    pub fn execute_projection_batch(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        batch: &SourceProjectionBatchV1,
+    ) -> rusqlite::Result<()> {
+        batch.validate().map_err(invalid)?;
+        let binding = batch.binding();
+        let projector = batch.projector();
+        let Some(pending) = load_next_pending_projection(savepoint, binding)? else {
+            // Nothing is pending: the window already drained, or the binding
+            // never had a head to project. Either way there is no work left.
+            return Ok(());
+        };
+        if pending.receipt().receipt_digest() != batch.head_receipt_digest() {
+            // The chain moved on, or has not reached this head: a stale or
+            // replayed window projects nothing under a peer's head.
+            return Ok(());
+        }
+        let first = build_source_projection(&pending, projector.clone()).map_err(invalid)?;
+        self.execute_projection_write(savepoint, &first)?;
+        for _ in 1..batch.max() {
+            let Some(pending) = load_next_pending_projection(savepoint, binding)? else {
+                break;
+            };
+            let projection =
+                build_source_projection(&pending, projector.clone()).map_err(invalid)?;
+            self.execute_projection_write(savepoint, &projection)?;
+        }
+        Ok(())
+    }
+
     #[tracing::instrument(
         name = "rusqlite.external_source.execute_acquisition_cas",
         level = "trace",
@@ -389,6 +439,22 @@ impl ExternalSourceExecutor {
                 Ok(ExternalSourceReadResultV1::PendingProjection(
                     pending.map(Box::new),
                 ))
+            }
+            ExternalSourceReadOperationV1::PendingProjectionCount { binding } => {
+                binding.validate().map_err(invalid)?;
+                snapshot
+                    .query_row_cached(
+                        "SELECT COUNT(*)
+                         FROM external_source_pending_projections_v1
+                         WHERE binding_id = ?1",
+                        params![binding.binding_id.as_str()],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .and_then(|count| {
+                        u64::try_from(count)
+                            .map_err(|_| invalid("external source pending count is negative"))
+                    })
+                    .map(ExternalSourceReadResultV1::PendingProjectionCount)
             }
             ExternalSourceReadOperationV1::AcquisitionState { binding } => {
                 binding.validate().map_err(invalid)?;

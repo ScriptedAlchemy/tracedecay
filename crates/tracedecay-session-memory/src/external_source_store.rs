@@ -26,8 +26,7 @@ use tracedecay_store::{
     RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadResultV1, RuntimeSubmitOutcomeV1,
     SourceCommitApplyOutcomeV1, SourceCommitReceiptSummaryV1, SourceCommitV1,
     SourceObjectMutationV1, SourceObjectTransitionV1, SourceObservationEvidenceV1,
-    SourcePendingProjectionV1, SourceProjectionCommitV1, SourceStoreStateV1, apply_source_commit,
-    build_source_projection,
+    SourcePendingProjectionV1, SourceProjectionBatchV1, SourceStoreStateV1, apply_source_commit,
 };
 
 use tracedecay_contracts::request_identity::{
@@ -66,6 +65,13 @@ pub enum RuntimeExternalSourceErrorV1 {
 }
 
 const HOST_EXTERNAL_SOURCE_PROJECTOR: &str = "projector.host-observation.external-source.v1";
+
+/// Pending heads projected per write transaction by the host drain. A
+/// projection's input is the head its predecessor made durable, so the
+/// writer derives the chain inside one savepoint instead of the caller
+/// paying a transaction per head. Bounds the write-lease hold and the
+/// cancellation-check granularity.
+pub const HOST_PROJECTION_REPLAY_TXN_WINDOW: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeSourceCaptureOutcomeV1 {
@@ -555,9 +561,12 @@ impl RuntimeExternalSourceStore {
             .map_err(|error| RuntimeExternalSourceErrorV1::Invalid(error.to_string()))?;
         let mut projected = 0_usize;
         let mut exhausted = false;
-        // A head lost to another drainer still spends budget, so a drainer
-        // that keeps losing ends with the queue deferred, never spinning.
-        for _ in 0..max {
+        let mut remaining = max;
+        // Each window is one write transaction over up to
+        // `HOST_PROJECTION_REPLAY_TXN_WINDOW` heads of the head's binding. A
+        // head lost to another drainer still spends budget, so a drainer that
+        // keeps losing ends with the queue deferred, never spinning.
+        while remaining > 0 {
             if cancellation.is_cancelled() {
                 break;
             }
@@ -565,12 +574,33 @@ impl RuntimeExternalSourceStore {
                 exhausted = true;
                 break;
             };
-            if self
-                .project_pending_head(&pending, projector.clone())
-                .await?
-            {
-                projected = projected.saturating_add(1);
-            }
+            let head = pending.binding_identity().map_err(invalid)?;
+            let queued = self.read_pending_projection_count(head.clone()).await?;
+            let window = HOST_PROJECTION_REPLAY_TXN_WINDOW.min(remaining);
+            let window_u32 = u32::try_from(window)
+                .map_err(|_| invalid("external source projection window exceeds u32"))?;
+            let batch = SourceProjectionBatchV1::new(
+                head.clone(),
+                projector.clone(),
+                pending.receipt().receipt_digest().clone(),
+                window_u32,
+            )
+            .map_err(invalid)?;
+            self.submit_projection_batch(&batch, pending.receipt())
+                .await?;
+            // The writer is the serial authority on the chain, so the heads a
+            // window consumed are exactly the pending rows it removed. A
+            // window that lost its head to another drainer consumed nothing
+            // and still spends one unit of budget, so a drainer that keeps
+            // losing ends deferred, never spinning.
+            let consumed = queued
+                .saturating_sub(self.read_pending_projection_count(head.clone()).await?)
+                .min(u64::from(window_u32));
+            let consumed = usize::try_from(consumed)
+                .map_err(|_| invalid("external source pending count exceeds usize"))?;
+            let consumed = consumed.max(1);
+            projected = projected.saturating_add(consumed);
+            remaining = remaining.saturating_sub(consumed);
         }
         let deferred = !exhausted
             && !cancellation.is_cancelled()
@@ -581,26 +611,76 @@ impl RuntimeExternalSourceStore {
         })
     }
 
-    /// Projects `pending`, the queue head this drainer read. Returns `false`
-    /// when the write failed because another drainer already projected that
-    /// head: the next read sees the head it left.
-    async fn project_pending_head(
+    /// Submits one projection window. The idempotency key is the head's
+    /// receipt digest, so a drainer that retries a window it already lost
+    /// settles as an exact replay instead of projecting twice.
+    async fn submit_projection_batch(
         &self,
-        pending: &SourcePendingProjectionV1,
-        projector: ComponentVersion,
-    ) -> Result<bool, RuntimeExternalSourceErrorV1> {
-        let projection = build_source_projection(pending, projector).map_err(invalid)?;
-        let Err(error) = self.submit_projection(projection).await else {
-            return Ok(true);
-        };
-        let binding = pending.binding_identity().map_err(invalid)?;
-        let head = self.read_pending_projection(Some(binding)).await?;
-        if head.is_some_and(|head| {
-            head.receipt().receipt_digest() == pending.receipt().receipt_digest()
-        }) {
-            return Err(error);
+        batch: &SourceProjectionBatchV1,
+        head: &tracedecay_store::SourceCommitReceiptV1,
+    ) -> Result<(), RuntimeExternalSourceErrorV1> {
+        let payload =
+            RepositoryWritePayloadV1::ExternalSourceProjectionBatch(Box::new(batch.clone()));
+        let request = runtime_submit_request(
+            self.runtime.binding(),
+            payload,
+            &batch,
+            head.receipt_digest(),
+            tracedecay_store::OperationPriorityV1::Foreground,
+        )?;
+        let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
+        match self
+            .runtime
+            .dispatch_submit(request, probe)
+            .await
+            .map_err(|failure| dispatch_error("projection batch", failure))?
+        {
+            RuntimeSubmitOutcomeV1::Committed { .. }
+            | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
+            | RuntimeSubmitOutcomeV1::ExactReplay { .. } => Ok(()),
+            RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
+                Err(RuntimeExternalSourceErrorV1::IdempotencyConflict)
+            }
+            outcome => Err(RuntimeExternalSourceErrorV1::SubmitRejected {
+                outcome: Box::new(outcome),
+                admission_bytes: serialized_len(&batch)?,
+                commit_count: 1,
+            }),
         }
-        Ok(false)
+    }
+
+    async fn read_pending_projection_count(
+        &self,
+        binding: tracedecay_domain::SourceBindingIdentityV1,
+    ) -> Result<u64, RuntimeExternalSourceErrorV1> {
+        let operation = ExternalSourceReadOperationV1::PendingProjectionCount { binding };
+        let request = runtime_read_request(self.runtime.binding(), operation)?;
+        let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
+        let outcome = self
+            .runtime
+            .dispatch_read(request, probe)
+            .await
+            .map_err(|failure| dispatch_error("pending projection count", failure))?;
+        if !matches!(
+            outcome.coverage(),
+            RuntimeReadCoverageV1::Latest { .. } | RuntimeReadCoverageV1::Complete { .. }
+        ) {
+            return Err(read_unavailable(
+                "pending projection count",
+                outcome.coverage(),
+            ));
+        }
+        match outcome.value() {
+            Some(RuntimeReadResultV1::Repository {
+                result:
+                    RepositoryReadResultV1::ExternalSource(
+                        ExternalSourceReadResultV1::PendingProjectionCount(count),
+                    ),
+            }) => Ok(*count),
+            _ => Err(invalid(
+                "pending projection count read returned a mismatched result",
+            )),
+        }
     }
 
     async fn read_receipt(
@@ -664,40 +744,6 @@ impl RuntimeExternalSourceStore {
             _ => Err(invalid(
                 "pending projection read returned a mismatched result",
             )),
-        }
-    }
-
-    async fn submit_projection(
-        &self,
-        projection: SourceProjectionCommitV1,
-    ) -> Result<(), RuntimeExternalSourceErrorV1> {
-        let payload =
-            RepositoryWritePayloadV1::ExternalSourceProjection(Box::new(projection.clone()));
-        let request = runtime_submit_request(
-            self.runtime.binding(),
-            payload,
-            &projection,
-            projection.receipt_digest(),
-            tracedecay_store::OperationPriorityV1::Foreground,
-        )?;
-        let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
-        match self
-            .runtime
-            .dispatch_submit(request, probe)
-            .await
-            .map_err(|failure| dispatch_error("projection commit", failure))?
-        {
-            RuntimeSubmitOutcomeV1::Committed { .. }
-            | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
-            | RuntimeSubmitOutcomeV1::ExactReplay { .. } => Ok(()),
-            RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
-                Err(RuntimeExternalSourceErrorV1::IdempotencyConflict)
-            }
-            outcome => Err(RuntimeExternalSourceErrorV1::SubmitRejected {
-                outcome: Box::new(outcome),
-                admission_bytes: serialized_len(&projection)?,
-                commit_count: 1,
-            }),
         }
     }
 

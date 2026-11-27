@@ -724,7 +724,10 @@ impl SourceCommitV1 {
 }
 
 mod projection;
-pub use projection::{SourceProjectionCommitV1, SourceProjectionEffectV1};
+pub use projection::{
+    SourceProjectionBatchContractErrorV1, SourceProjectionBatchResultV1, SourceProjectionBatchV1,
+    SourceProjectionCommitV1, SourceProjectionEffectV1,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

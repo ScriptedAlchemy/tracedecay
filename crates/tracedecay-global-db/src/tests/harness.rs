@@ -620,6 +620,12 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn profile_registry(&self) -> &RegisteredGlobalDb {
         self.profile_registry.as_ref()
     }
+
+    /// The profile registry as a lease, for composition roots that retain
+    /// the registry alongside the session shard they write.
+    pub fn profile_registry_lease(&self) -> RegisteredGlobalDbLeaseV1 {
+        self.profile_registry.clone()
+    }
 }
 
 #[cfg(any(test, feature = "test-helpers"))]

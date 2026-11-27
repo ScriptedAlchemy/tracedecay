@@ -336,9 +336,15 @@ async fn a_restart_mid_import_resumes_without_rewriting_committed_rollouts() {
 }
 
 /// Committed transactions the import pays per settled rollout it admits.
-/// The product with the corpus size proves every rollout was admitted once:
-/// a skipped rollout falls short and a re-admitted one overshoots.
-const IMPORT_TRANSACTIONS_PER_ROLLOUT: u64 = 5;
+/// Each rollout's own writes (observation commit, cursor, anchors) are a
+/// fixed cost of about three transactions; projection replay is batched 32
+/// heads per transaction and adds well under one per rollout on top. Before
+/// replay was batched the import paid five per rollout. The bounds prove
+/// every rollout was admitted once: a skipped rollout falls below the
+/// fixed cost, and a re-admitted rollout or an unbatched replay rises
+/// above the batched ceiling.
+const IMPORT_FIXED_TRANSACTIONS_PER_ROLLOUT: u64 = 2;
+const IMPORT_TRANSACTIONS_PER_ROLLOUT_CEILING: u64 = 4;
 
 /// The re-offer acceptance measurement for #4374: a full second sweep over
 /// 2,010 settled rollouts in one project commits nothing and does no
@@ -358,11 +364,18 @@ async fn a_second_sweep_over_the_measured_corpus_commits_nothing() {
          import={import:?} reoffer={reoffer:?}"
     );
     // Every rollout was discovered and admitted: the import's durable writes
-    // are exactly the per-rollout cost times the corpus.
-    assert_eq!(
-        import.transactions,
-        IMPORT_TRANSACTIONS_PER_ROLLOUT * rollouts as u64,
-        "the import must admit every rollout exactly once"
+    // are the fixed per-rollout cost times the corpus, plus the batched
+    // projection replay, which stays under one transaction per rollout.
+    let rollouts = rollouts as u64;
+    assert!(
+        import.transactions >= IMPORT_FIXED_TRANSACTIONS_PER_ROLLOUT * rollouts,
+        "the import must admit every rollout exactly once: {} transactions for {rollouts} rollouts",
+        import.transactions
+    );
+    assert!(
+        import.transactions <= IMPORT_TRANSACTIONS_PER_ROLLOUT_CEILING * rollouts,
+        "projection replay must stay batched: {} transactions for {rollouts} rollouts",
+        import.transactions
     );
     assert_eq!(
         reoffer.transactions, 0,

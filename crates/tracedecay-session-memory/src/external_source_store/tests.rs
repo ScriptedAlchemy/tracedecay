@@ -249,7 +249,7 @@ async fn fresh_cline_stream_appends_share_one_task_without_object_duplicates() {
 }
 
 #[tokio::test]
-async fn a_drainer_whose_head_another_drainer_projected_past_continues() {
+async fn a_window_whose_head_another_drainer_settled_projects_nothing() {
     let fixture = Fixture::open().await;
     for (stream, ordinal, native) in [
         (ClineTranscriptStream::UiMessages, 0, "ui-1"),
@@ -264,12 +264,12 @@ async fn a_drainer_whose_head_another_drainer_projected_past_continues() {
             .await
             .unwrap();
     }
-    let loser_head = fixture
+    let stale_head = fixture
         .retained
         .read_pending_projection(None)
         .await
         .unwrap()
-        .expect("the loser read the queue head");
+        .expect("the stale drainer read the queue head");
     let winner = fixture
         .retained
         .drain_host_projection_replay(
@@ -280,10 +280,122 @@ async fn a_drainer_whose_head_another_drainer_projected_past_continues() {
         .unwrap();
     assert_eq!((winner.projected, winner.deferred), (2, false));
 
-    let projected = fixture
+    // The stale drainer submits the window it read before the winner ran.
+    // The chain is past its head, so the window must settle as a no-op rather
+    // than project anything or fail.
+    let binding = stale_head.binding_identity().unwrap();
+    let batch = SourceProjectionBatchV1::new(
+        binding.clone(),
+        host_external_source_projector().unwrap(),
+        stale_head.receipt().receipt_digest().clone(),
+        4,
+    )
+    .unwrap();
+    fixture
         .retained
-        .project_pending_head(&loser_head, host_external_source_projector().unwrap())
+        .submit_projection_batch(&batch, stale_head.receipt())
         .await
-        .expect("a head another drainer already projected is not a failure");
-    assert!(!projected, "the loser did not project the head itself");
+        .expect("a window whose head a peer settled is not a failure");
+    assert_eq!(
+        fixture
+            .retained
+            .read_pending_projection_count(binding)
+            .await
+            .unwrap(),
+        0,
+        "the stale window must not leave or create pending work"
+    );
+}
+
+#[tokio::test]
+async fn pending_heads_commit_in_one_transaction_per_window() {
+    let fixture = Fixture::open().await;
+    let mut binding = None;
+    let mut receipts = Vec::new();
+    // Several captures on one binding queue several heads; the drain must
+    // settle them in one writer transaction per window, not one per head.
+    for ordinal in 0..6 {
+        let receipt = fixture
+            .persist(observation(
+                ClineTranscriptStream::ApiHistory,
+                true,
+                ordinal,
+                &format!("api-{ordinal}"),
+                false,
+            ))
+            .await;
+        binding = Some(
+            host_source_authority(&receipt, fixture.retained.runtime.binding())
+                .unwrap()
+                .2,
+        );
+        fixture
+            .retained
+            .capture_host_observation(&receipt)
+            .await
+            .unwrap();
+        receipts.push(receipt);
+    }
+    let binding = binding.unwrap();
+    let objects = objects_of(&receipts);
+    let queued = fixture
+        .retained
+        .read_pending_projection_count(binding.clone())
+        .await
+        .unwrap();
+    assert_eq!(queued, 6, "every capture must queue one projection head");
+
+    let before = fixture
+        ._database
+        .runtime_client()
+        .writer_telemetry_snapshot()
+        .unwrap()
+        .writer
+        .unwrap()
+        .transactions
+        .committed_transactions;
+    let replay = fixture
+        .retained
+        .drain_host_projection_replay(
+            32,
+            &tracedecay_sessions::observation::ObservationCancellation::default(),
+        )
+        .await
+        .unwrap();
+    let after = fixture
+        ._database
+        .runtime_client()
+        .writer_telemetry_snapshot()
+        .unwrap()
+        .writer
+        .unwrap()
+        .transactions
+        .committed_transactions;
+    assert_eq!((replay.projected, replay.deferred), (6, false));
+    assert_eq!(
+        after - before,
+        1,
+        "six heads within one window must commit in one writer transaction"
+    );
+    assert_eq!(
+        fixture
+            .retained
+            .read_pending_projection_count(binding.clone())
+            .await
+            .unwrap(),
+        0
+    );
+    let state = fixture
+        .retained
+        .read_state(binding, objects)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.projected_objects().len(), 6);
+    for object in objects_of(&receipts) {
+        assert_eq!(
+            state.projected_objects().get(&object),
+            state.observed_object(&object).unwrap()
+        );
+    }
 }
