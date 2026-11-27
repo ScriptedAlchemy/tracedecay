@@ -10,23 +10,30 @@ use support::{
     BACKLOG_SESSIONS, BASE_BACKLOG_MESSAGES, DrainFixture, GROWN_BACKLOG_MESSAGES,
     backlog_drain_read_per_message,
 };
+use tracedecay_sessions::admission::HostAdmissionScope;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pending_backlog_drain_reads_scale_with_the_backlog() {
     let fixture = DrainFixture::open().await;
     let facade = fixture.facade();
+    let database = fixture
+        .runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
     let (project, scope) = (fixture.project.as_path(), fixture.scope());
 
-    let base = backlog_drain_read_per_message(
+    let (base, base_work) = backlog_drain_read_per_message(
         &facade,
+        database,
         project,
         &scope,
         0..BACKLOG_SESSIONS,
         BASE_BACKLOG_MESSAGES,
     )
     .await;
-    let grown = backlog_drain_read_per_message(
+    let (grown, grown_work) = backlog_drain_read_per_message(
         &facade,
+        database,
         project,
         &scope,
         BACKLOG_SESSIONS..2 * BACKLOG_SESSIONS,
@@ -34,10 +41,13 @@ async fn pending_backlog_drain_reads_scale_with_the_backlog() {
     )
     .await;
 
-    eprintln!("backlog drain read bytes per message: base={base} grown={grown}");
+    eprintln!(
+        "backlog drain read bytes per message: base={base} grown={grown}; \
+         base work={base_work:?}; grown work={grown_work:?}"
+    );
     assert!(
         grown <= base * 2,
         "draining a 16x larger backlog must not double each message's reads: \
-         base={base} grown={grown}"
+         base={base} grown={grown}; base work={base_work:?}; grown work={grown_work:?}"
     );
 }
