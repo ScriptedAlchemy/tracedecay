@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
@@ -577,6 +577,80 @@ class TestResourceOwnershipTests(unittest.TestCase):
 
 
 class SharedPackageOwnershipTests(unittest.TestCase):
+    def test_generation_leaves_linked_foreign_build_files_untouched(self) -> None:
+        gen = load_gen_builds()
+        with tempfile.TemporaryDirectory() as scratch:
+            parent = Path(scratch).resolve()
+            root = parent / "workspace"
+            product = root / "crates/tracedecay"
+            (product / "src").mkdir(parents=True)
+            (product / "src/lib.rs").write_text("pub fn present() {}\n")
+            (product / "Cargo.toml").write_text(
+                '[package]\nname = "tracedecay"\nversion = "0.1.0"\n'
+            )
+            (root / "Cargo.toml").write_text("[profile.dev]\n")
+            (root / "Cargo.lock").write_text("package = []\n")
+            for name in (".bazelrc", "MODULE.bazel", "BUILD.bazel",
+                         "scripts/BUILD.bazel", "sdks/codegen/BUILD.bazel"):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# handwritten\n")
+
+            foreign = parent / "other-checkout"
+            foreign.mkdir()
+            foreign_build = foreign / "BUILD.bazel"
+            original = (
+                "# handwritten\n" + gen.GEN_BEGIN
+                + '\nfilegroup(name = "owned_elsewhere", srcs = [])\n'
+                + gen.GEN_END + "\n"
+            )
+            foreign_build.write_text(original)
+            foreign_crate = parent / "other-crate"
+            foreign_crate.mkdir()
+            foreign_crate_build = foreign_crate / "BUILD.bazel"
+            foreign_crate_build.write_text(gen.BANNER)
+            (root / "bazel-workspace").symlink_to(foreign, target_is_directory=True)
+            (root / "crates/linked").symlink_to(foreign_crate, target_is_directory=True)
+            (root / "linked-file").mkdir()
+            (root / "linked-file/BUILD.bazel").symlink_to(foreign_build)
+            obsolete = root / "obsolete/BUILD.bazel"
+            obsolete.parent.mkdir()
+            obsolete.write_text(gen.BANNER)
+
+            package = {
+                "name": "tracedecay", "version": "0.1.0", "dependencies": [],
+                "manifest_path": str(product / "Cargo.toml"),
+                "features": {"default": ["production"],
+                             "production": ["token-counting", "lite", "medium"]},
+                "targets": [{"name": "tracedecay", "kind": ["lib"],
+                             "crate_types": ["lib"], "edition": "2024", "test": False,
+                             "src_path": str(product / "src/lib.rs")}],
+            }
+            query = mock.Mock(spec=gen.CargoQuery, workspace=root)
+
+            def cargo_output(command):
+                if command[0] == "metadata":
+                    return json.dumps({"packages": [package]})
+                self.assertEqual(command[0], "tree")
+                features = "" if "--no-default-features" in command else (
+                    "default,lite,medium,production,token-counting"
+                )
+                return f"tracedecay v0.1.0 ({product})|{features}\n"
+
+            query.run.side_effect = cargo_output
+            with mock.patch.object(gen.CargoQuery, "from_bazel", return_value=query), \
+                    mock.patch.object(gen, "target_feature_annotations", return_value=None), \
+                    mock.patch.object(gen, "TEST_DATA", {}), redirect_stdout(io.StringIO()):
+                for arguments in ([], ["--check"]):
+                    with self.subTest(arguments=arguments), \
+                            mock.patch.object(sys, "argv", [str(SCRIPT), *arguments]):
+                        gen.main()
+                        self.assertEqual(foreign_build.read_text(), original)
+                        self.assertEqual(foreign_crate_build.read_text(), gen.BANNER)
+                        self.assertTrue((root / "linked-file/BUILD.bazel").is_symlink())
+                        self.assertFalse(obsolete.exists())
+            self.assertTrue((product / "BUILD.bazel").is_file())
+
     def test_nested_package_owns_embedded_fixture(self) -> None:
         gen = load_gen_builds()
         with tempfile.TemporaryDirectory() as scratch:
