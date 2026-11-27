@@ -16,6 +16,8 @@ mod lcm_schema;
 #[cfg(test)]
 mod payload_gc_cost;
 #[cfg(test)]
+mod response_handle_store_cost;
+#[cfg(test)]
 mod schema_install_cancellation;
 #[cfg(test)]
 mod session_sync;
