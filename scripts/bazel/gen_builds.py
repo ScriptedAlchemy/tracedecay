@@ -234,8 +234,11 @@ RUNTIME_BINARIES = (
 NO_DEFAULT_FEATURES = "!no-default-features"
 PRODUCTION_CONTEXT = ("tracedecay", "normal,build", frozenset())
 PRODUCTION_CONTEXTS = {
-    PRODUCTION_CONTEXT,
-    ("tracedecay-cli", "normal,build", frozenset()),
+    PRODUCTION_CONTEXT: "tracedecay",
+    ("tracedecay-cli", "normal,build", frozenset()): "tracedecay",
+    # The index benchmark must parse the shipped grammar profile without
+    # depending on the composition root itself.
+    ("tracedecay-query", "normal,build", frozenset({"production"})): "tracedecay-query",
 }
 GRAMMAR_PROFILE_PACKAGES = {
     "tracedecay", "tracedecay-cli", "tracedecay-code-index",
@@ -450,7 +453,7 @@ def _parse_tree_row(line):
 
 
 def _parse_feature_map(output, context):
-    production = context in PRODUCTION_CONTEXTS
+    production_root = PRODUCTION_CONTEXTS.get(context)
     package, edges, requested = context
     artifact = (
         package in {"tracedecay", "tracedecay-cli"}
@@ -470,7 +473,7 @@ def _parse_feature_map(output, context):
             raise ValueError(
                 f"{context}: production graph enables test-transport for {row.package_id}"
             )
-        if production and row.name in GRAMMAR_PROFILE_PACKAGES and "full" in row.features:
+        if production_root and row.name in GRAMMAR_PROFILE_PACKAGES and "full" in row.features:
             raise ValueError(
                 f"{context}: production graph enables the opt-in full grammar tier "
                 f"for {row.package_id}"
@@ -478,8 +481,8 @@ def _parse_feature_map(output, context):
         # Cargo renders host-native paths; source URLs are not member paths.
         if row.path is not None and "/crates/" in row.path.replace("\\", "/"):
             fmap.setdefault(row.name, set()).update(row.features)
-    if production and "tracedecay" not in fmap:
-        raise ValueError(f"{context}: cargo tree omitted the tracedecay root package")
+    if production_root and production_root not in fmap:
+        raise ValueError(f"{context}: cargo tree omitted the {production_root} root package")
     return fmap
 
 

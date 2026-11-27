@@ -136,12 +136,40 @@ class ProductionFeatureResolutionTests(unittest.TestCase):
             ("tracedecay", "normal,build", ("full",)),
             ("tracedecay-cli", "normal,build", ("full",)),
             (None, "normal,build,dev", ("tracedecay-cli/full",)),
+            ("tracedecay-query", "normal,build,dev", ("production",)),
         ):
             with self.subTest(context=context):
                 self.assertEqual(
                     self.resolve(output, *context)["tracedecay-code-extraction"],
                     {"full", "lite", "medium"},
                 )
+
+    def test_production_benchmark_rejects_transitive_full_grammar_tier(self) -> None:
+        root = "tracedecay-query v0.1.0 (/workspace/crates/tracedecay-query)|production"
+        for package in self.gen.GRAMMAR_PROFILE_PACKAGES:
+            with self.subTest(package=package):
+                output = (
+                    f"{root}\n"
+                    f"{package} v0.1.0 (/workspace/crates/{package})|lite,medium\n"
+                    f"{package} v0.1.0 (/workspace/crates/{package})|full (*)\n"
+                )
+                with self.assertRaisesRegex(ValueError, "opt-in full grammar tier"):
+                    self.resolve(output, "tracedecay-query", features=("production",))
+
+    def test_production_benchmark_requires_its_own_root(self) -> None:
+        root = "tracedecay-query v0.1.0 (/workspace/crates/tracedecay-query)|production"
+        grammars = (
+            "tracedecay-code-index v0.1.0 "
+            "(/workspace/crates/tracedecay-code-index)|lite,medium"
+        )
+        self.assertEqual(self.resolve(
+            f"{root}\n{grammars}\n", "tracedecay-query", features=("production",),
+        ), {
+            "tracedecay-query": {"production"},
+            "tracedecay-code-index": {"lite", "medium"},
+        })
+        with self.assertRaisesRegex(ValueError, "omitted the tracedecay-query root"):
+            self.resolve(grammars, "tracedecay-query", features=("production",))
 
     def test_optional_full_artifacts_still_refuse_test_transport(self) -> None:
         output = f"{self.ROOT}\nexternal v1.0.0|test-transport\n"
