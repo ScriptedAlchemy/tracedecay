@@ -264,24 +264,16 @@ async fn assert_socket_doctor_project_open_refusal(
     .expect("Doctor daemon endpoint");
     let serving_engine = engine.clone();
     let serving = tokio::spawn(async move {
-        // The ordinary mounting refusal retires its client connection, so
-        // the Doctor probe authenticates on a fresh connection.
-        for _ in 0..2 {
-            let stream = listener
-                .accept()
-                .await
-                .expect("accept Doctor fixture client");
-            Box::pin(
-                crate::daemon::connection_serving::serve_authenticated_socket_client_with_class(
-                    stream,
-                    serving_engine.clone(),
-                    super::TEST_AUTH_TOKEN.to_owned(),
-                    crate::daemon::core_admission::DaemonClientAdmissionClass::General,
-                ),
-            )
-            .await?;
-        }
-        Ok::<(), tracedecay_domain::errors::TraceDecayError>(())
+        let stream = listener.accept().await.expect("accept Doctor probe");
+        Box::pin(
+            crate::daemon::connection_serving::serve_authenticated_socket_client_with_class(
+                stream,
+                serving_engine,
+                super::TEST_AUTH_TOKEN.to_owned(),
+                crate::daemon::core_admission::DaemonClientAdmissionClass::General,
+            ),
+        )
+        .await
     });
     let client = tracedecay_daemon_protocol::DaemonInvocationClient::new(
         tracedecay_daemon_protocol::DaemonConnection::new(
