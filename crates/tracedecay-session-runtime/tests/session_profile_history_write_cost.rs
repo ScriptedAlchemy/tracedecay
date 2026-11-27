@@ -379,6 +379,16 @@ fn census(store: &Path) -> StoreCensus {
             .try_into()
             .unwrap()
     };
+    let page_count: u64 = connection
+        .pragma_query_value(None, "page_count", |row| row.get::<_, i64>(0))
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let page_size: u64 = connection
+        .pragma_query_value(None, "page_size", |row| row.get::<_, i64>(0))
+        .unwrap()
+        .try_into()
+        .unwrap();
     StoreCensus {
         observations: count("observations"),
         source_mutations: count("external_source_mutations_v1"),
@@ -395,17 +405,14 @@ fn census(store: &Path) -> StoreCensus {
                   AND projected.mutation_digest = source.mutation_digest
                  WHERE projected.binding_id IS NULL",
                 [],
-                |row| row.get::<_, u64>(0),
+                |row| row.get::<_, i64>(0),
             )
+            .unwrap()
+            .try_into()
             .unwrap(),
         pending_projections: count("external_source_pending_projections_v1"),
         projection_publications: count("external_source_projection_publications_v2"),
-        logical_database_bytes: connection
-            .pragma_query_value(None, "page_count", |row| row.get::<_, u64>(0))
-            .unwrap()
-            * connection
-                .pragma_query_value(None, "page_size", |row| row.get::<_, u64>(0))
-                .unwrap(),
+        logical_database_bytes: page_count.checked_mul(page_size).unwrap(),
     }
 }
 
