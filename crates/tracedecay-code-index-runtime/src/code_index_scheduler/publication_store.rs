@@ -1776,8 +1776,7 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                     .filter(|extent| {
                         identities
                             .binary_search_by(|identity| identity.digest.cmp(&extent.digest))
-                            .ok()
-                            .is_some_and(|index| identities[index].size_bytes == extent.size_bytes)
+                            .is_ok_and(|index| identities[index].size_bytes == extent.size_bytes)
                     })
                     .map(|extent| SealedGenerationSegmentIdentityV1 {
                         digest: extent.digest.clone(),

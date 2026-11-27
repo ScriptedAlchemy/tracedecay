@@ -2599,7 +2599,7 @@ fn bounded_pack_compaction_drops_deleted_and_superseded_extents() {
         None,
     )
     .expect("collect the superseded generations and folded pack");
-    assert!(!report.deleted_generations.is_empty());
+    assert_ne!(report.deleted_generations.len(), 0);
     assert!(!folded_path.exists(), "the folded pack is no longer live");
     let reopened = opened_publication(&fixture, store.path());
     assert!(
@@ -2646,7 +2646,7 @@ fn inherited_pack_corruption_before_or_after_binding_cannot_publish() {
         sha256_hex_suffix(pack.digest.as_str()).expect("parent pack digest")
     ));
     let original_bytes = std::fs::read(&pack_path).expect("parent pack bytes");
-    assert!(!original_bytes.is_empty());
+    assert_ne!(original_bytes.len(), 0);
     let original_permissions = std::fs::metadata(&pack_path)
         .expect("parent metadata")
         .permissions();

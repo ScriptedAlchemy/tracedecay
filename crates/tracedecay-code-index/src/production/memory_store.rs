@@ -625,8 +625,7 @@ impl CodeIndexPreparationPort for MemoryCodeIndexPreparationV1 {
                     .filter(|extent| {
                         segments
                             .binary_search_by(|identity| identity.digest.cmp(&extent.digest))
-                            .ok()
-                            .is_some_and(|index| segments[index].size_bytes == extent.size_bytes)
+                            .is_ok_and(|index| segments[index].size_bytes == extent.size_bytes)
                     })
                     .map(|extent| SealedGenerationSegmentIdentityV1 {
                         digest: extent.digest.clone(),

@@ -170,9 +170,9 @@ impl GenerationPackReadPassV1 {
         Ok(pass)
     }
 
-    fn unique_identities<'a>(
-        identities: &'a [SealedGenerationSegmentIdentityV1],
-    ) -> Result<Vec<&'a SealedGenerationSegmentIdentityV1>, CodeIndexProductionErrorV1> {
+    fn unique_identities(
+        identities: &[SealedGenerationSegmentIdentityV1],
+    ) -> Result<Vec<&SealedGenerationSegmentIdentityV1>, CodeIndexProductionErrorV1> {
         let mut unique: Vec<&SealedGenerationSegmentIdentityV1> = Vec::new();
         for identity in identities {
             if sha256_hex_suffix(identity.digest.as_str()).is_none() {

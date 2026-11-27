@@ -3630,7 +3630,7 @@ pub(super) fn seal_partitioned_manifest_charged(
         )?)?;
     retain(base as u64)?;
     validate_pack_roles(
-        &generation.content_packs,
+        generation.content_packs,
         &generation.generation_evidence.segment_digest,
         generation.generation_evidence.segment_size_bytes,
     )?;
