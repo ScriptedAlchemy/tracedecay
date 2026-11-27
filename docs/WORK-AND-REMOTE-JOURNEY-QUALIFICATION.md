@@ -247,10 +247,22 @@ false, and the measurement below was taken before any behavior was changed.
 **Where attach actually happens.** `runtime.rs` attaches Work and workflow
 only inside its own tests. In production, `RegisteredWorkApplicationServicesV1::attach`
 and `RegisteredWorkflowApplicationServicesV1::attach` (`crates/tracedecay-application/src/work/registered.rs`)
-are called per request from the daemon invocation surface, and the only
-project-open path is `DaemonWorkRuntimeRegistrar::register` (`crates/tracedecay-daemon-service/src/invocation/registrars.rs`),
-which spawns three recovery owners. Each owner runs one restart scan
-immediately, then waits for a durable-write signal.
+are called by request handlers and by background recovery. The project-open
+registration is `DaemonWorkRuntimeRegistrar::register`
+(`crates/tracedecay-daemon-service/src/invocation/registrars.rs`), which mounts
+three recovery owners. Their schedules differ:
+
+- Blocked-interval and fan-out census recovery run at startup, then react to
+  durable-write signals and one-minute safety scans. Failures use bounded
+  retry backoff (`crates/tracedecay-daemon-service/src/invocation/recovery_schedule.rs`).
+- Fan-out startup recovery resumes attempts once, then continuously
+  reconciles active workflow pages. It waits 100 ms between pages with a
+  continuation and five seconds after the final page or a failure
+  (`crates/tracedecay-daemon-service/src/invocation/work/workflow_fan_out/recovery.rs`). This loop does not wait for
+  a durable-write signal.
+
+The background scans attach application services themselves. Constructor
+cost is therefore paid outside foreground requests too.
 
 **Instrumentation.** None of those boundaries had a span, so the cost was
 invisible under `TRACEDECAY_SPAN_TIMINGS=1`. This change adds
@@ -277,22 +289,26 @@ numbers to read.
 | `application.work.attach` inside one Work request | 10 | 30 µs | 25 to 37 µs |
 | One Work request (`daemon.service.work.dispatch`) | 10 | 162 µs | 113 to 272 µs |
 
-Attach is about 0.02% of project open. The recovery scans begin when
-`work.register` closes and finish 2 to 9 ms later, while the open itself
-runs another 37 to 40 ms to `http_application_mounted`, so they never extend
-it. The 11 ms trial is scan scheduling on a loaded host, not attach cost, and
-it is off the critical path either way. Inside a Work request, attach is 19%
-of a 162 µs request, which is 30 µs of handle clones per call.
+The ratio of the recorded attach and project-open medians is about 0.02%.
+In these one-file trials, recovery finished before later open stages. That
+observation does not establish the critical path for a populated Work store,
+and the loaded-host measurements do not separate execution from scheduling
+cost. The ratio of the attach and Work-request medians is 19% (30 µs versus
+162 µs); these small samples are not a bound on other requests.
 
-**Decision: no de-overlap change.** The cost is noise, so behavior is
-retained and this change lands instrumentation and evidence only. Deferring
-the recovery owners would save nothing an operator can observe and would
-delay recovery of settled receipts after a restart.
+**Decision: retain behavior while measuring broader workloads.** This change
+adds instrumentation only. The sample covers initial open and two lightweight
+CLI reads. It does not measure steady-state fan-out polling, retained-store
+recovery, large task graphs, workflow effect execution, or dashboard work.
+Those measurements are needed before concluding that deferring recovery or
+changing ownership would have no observable benefit.
 
-**Durable ownership.** Each row below has exactly one writer, named from
-current code. Every derived row is written in the same writer transaction as
-the event it derives from and carries that event's digest, so a derived view
-cannot disagree silently with its source.
+**Durable ownership.** The table identifies each canonical store and its
+writing paths. Atomicity and identity checks depend on the operation: graph
+checkpoints bind a journal prefix, topology generations bind a definition and
+projector revision, and safe retry coordinates its related writes in one
+transaction. The table does not establish that every derived row carries an
+event digest or shares its source transaction.
 
 | Datum | Canonical owner | Writer |
 | --- | --- | --- |
