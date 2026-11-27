@@ -1,23 +1,21 @@
 /**
- * The TRACE subgraph, carried over unchanged from the static sheet
- * (`mockups/code-topography/trace.html`) so round one and round two are the
- * same picture and any difference the owner sees is MOTION, not data.
+ * The prototype uses the same TRACE subgraph as
+ * `mockups/code-topography/trace.html` so readers can compare motion without
+ * changing the data.
  *
- * Shape note for the eventual product wiring: every field here has a real
- * source. `deg` is on the node payload; `calls` is the per-edge call-site count;
- * `membranes` are `contains` edges from an impl/trait node to its methods;
- * `regions` are the module rollups the cortex sheet aggregates. `unresolved` is
- * the absence the extractor already records. A `calls` edge whose target did
- * not resolve, and it is drawn, never dropped.
+ * `deg` comes from the node payload. `calls` counts call sites per edge.
+ * `membranes` use `contains` edges from impl or trait nodes to their methods.
+ * `regions` use the cortex sheet's module aggregates. `unresolved` records a
+ * `calls` edge whose target the extractor could not resolve. The sheet still
+ * draws that edge.
  *
- * Coordinates are the static sheet's 1440x1160 world. They are LAYOUT ANCHORS,
- * not physics state: the simulation holds every node to its anchor, so the live
- * field at rest is this sheet.
+ * The coordinates are anchors from the static sheet's 1440x1160 layout. Each
+ * node rests at its anchor, so the simulation matches the static layout at rest.
  *
  * @module dataset
  */
 
-/** Hop rings. Hop distance from the focus, NOT elevation. See the legend. */
+/** Each row represents hop distance from the focus, not elevation. */
 export const ROW = Object.freeze({
   u3: 118,
   u2: 268,
@@ -148,10 +146,9 @@ export const MEMBRANES = [
 ];
 
 /**
- * The dimmed relief underlay: the cortex sheet's regions filtered to the
- * modules this trace lands in. Simplified for round two, two contours instead
- * of the sheet's full interval stack. Because the point of this page is motion,
- * and a shoreline that moves with its members is the part that had to be proven.
+ * The dimmed background shows only cortex regions containing traced modules.
+ * It uses two contours instead of the full set to show whether each outline
+ * moves with its member nodes.
  */
 export const REGIONS = [
   { mod: 'hooks/session', sym: 92, of: ['dispatch', 'replay'] },
@@ -166,21 +163,16 @@ export const REGIONS = [
 ];
 
 /**
- * Hop ring of every node: the distance the sheet's rows actually encode.
+ * Compute the hop distance represented by each node's row.
  *
- * The plain channel count does NOT reproduce the static sheet's rows, and
- * chasing that discrepancy turned up the sheet's real rule rather than a bug in
- * it: an `in` channel. A call that entered a type and moves between that
- * type's methods. Is a LATERAL move inside a membrane, not a step down the
- * call graph, so it costs zero hops. Under that rule every one of the 26 nodes
- * lands on exactly the row the sheet drew it on, `sim.test.mjs` asserts it, and
- * the row caption ("hop distance from the focus, not elevation") stays true.
+ * An `in` channel connects methods within the same type and costs zero hops.
+ * This rule reproduces the static sheet's rows for all 26 nodes, as
+ * `sim.test.mjs` checks.
  *
- * Plain undirected channel distance is still what the QA gate uses to say what
- * "far" means; that is `hopDistances` in `sim.js`, and the two are deliberately
- * different questions.
+ * The QA check instead uses `hopDistances` in `sim.js`, which counts every
+ * undirected channel when deciding which nodes are far away.
  *
- * @returns {Map<string, number>} id → hop ring
+ * @returns {Map<string, number>} Hop ring by node ID.
  */
 export function hopRings(dataset = DATASET, sourceId = FOCUS_ID) {
   const adjacency = new Map(dataset.nodes.map((node) => [node.id, []]));

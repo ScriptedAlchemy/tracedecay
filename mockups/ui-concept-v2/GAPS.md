@@ -41,13 +41,13 @@ baseline behavior in [IMPLEMENTATION.md](IMPLEMENTATION.md). These are concrete
 gaps between that baseline and the final briefs; they do not downgrade the
 accepted target to current renderer or data limits.
 
-| Surface | Current honest state | Required capability still incomplete |
+| Workspace | Current behavior | Incomplete production capability |
 |---|---|---|
 | [Brain](01-brain/final/README.md) | Registry, scoped graph, renderer, and activity authorities may report independent loading, empty, partial, or unavailable states. | Compose registered-project geometry, indexed mass/recency, scoped knowledge, and admitted event identity so activity blooms the exact project and at most one evidenced relation. Retain the atlas option. |
 | [Explorer](02-explorer/final/01-browse-query-lanes.md) | Four lanes can disclose served empty, partial, stale, unavailable, cancelled, or failed sources independently. | Run one admitted query across indexed code, sessions, facts, and evidence with lane-specific freshness, progress, cancellation, and pagination. |
 | [Loom](03-loom/final/README.md) | The vertical weave, loaded-page replay, selected chain, and typed gaps are valid baseline/fallback behavior; the imported concept app illustrates the horizontal interaction. | Compose event bodies, tasks, worktrees, agents, files, commits, checks, handoffs/results, outcomes, feedback, and production proximity observations into stable source identities. |
 | [Sessions](04-sessions/final/01-session-provenance-inspector.md) | Session timeline/list and paged inspector can expose source and temporal availability separately. | Hydrate canonical transcript bodies and full-text search, then join stable task, code, worktree, agent, and Delivery identities. |
-| [Agents](05-agents/final/01-delegation-topology.md) | Parent/child topology and absent delegation or attempt coverage remain honest states. | Join handoff/result edges, attempts, tasks, worktrees, commits, checks, and failure context across harnesses without inferring relations from proximity. |
+| [Agents](05-agents/final/01-delegation-topology.md) | The view shows parent/child links and identifies missing delegation or attempt coverage. | Join handoff/result edges, attempts, tasks, worktrees, commits, checks, and failure context across agent hosts without inferring relations from proximity. |
 | [Code](06-code/final/README.md) | Graph, diagnostics, freshness, and renderer states remain independent; the atlas already defines measured structural lenses. | Complete production symbol/call/test/diagnostic/runtime joins and revision comparison. Add semantic-duplication or quality claims only with new named evidence, never from churn or exact blobs alone. |
 | [Knowledge](07-knowledge/final/01-fact-provenance-cameras.md) | Missing facts, detail, geometry, trust, curation, or oplog authority stays visible rather than becoming an empty healthy panel. | Connect durable fact provenance, trust history, curation receipts, and oplog through canonical memory authorities. |
 | [Delivery](08-delivery/final/README.md) | Local repository evidence remains useful when provider projections are unconfigured, partial, stale, denied, or unavailable. | Build indexed-only global/project PR discovery, cross-repository umbrella outcomes, review/CI chronology, exact review workspaces, and causal journey joins over registered projects and tracked heads. |
@@ -65,5 +65,5 @@ accepted target to current renderer or data limits.
 2. Add the registered Brain field and admitted-event feed while retaining the
    structural atlas.
 3. Define and connect proximity observations and structural comparison measures.
-4. Connect the remaining independent authorities as their production reads and
-   mutations become available; preserve their honest absence states meanwhile.
+4. Connect the remaining authorities as their production reads and mutations
+   become available. Until then, keep their absence states visible.

@@ -5,9 +5,9 @@ This is the complete existing React/Rsbuild concept application imported from
 Continue its implementation here. The original fourteen workspaces, navigation,
 view states, recorded profile exports, fixture scenarios and checks are retained.
 
-The [parent concept folder](../README.md) owns the reconciled briefs and design
-plates. There is no second lookbook copy in this application. Build on the existing
-components in `src/`; do not replace the app with independent HTML screen rebuilds.
+The [parent concept folder](../README.md) contains the briefs and design plates.
+Extend the components in `src/` rather than rebuilding screens as separate HTML
+pages. Do not duplicate the plates in this app.
 
 ```sh
 npm ci
@@ -29,7 +29,7 @@ Loom and Delivery use `state=01`, `02`, etc. Brain retains its overview, hover,
 repository zoom, scoped, synapse, firing-tree and neuron-lab views. The structural
 atlas remains accessible in recorded Brain, including churn and exact duplicates.
 
-- `data=snapshot` is the default: recorded exports with honest unavailable states.
+- `data=snapshot` is the default. It uses recorded exports and labels unavailable data.
 - `data=fixture` opens labeled authored scenarios and local interactions.
 - Dense Loom: `?surface=loom&state=04&data=fixture&loom_source=design&loom_page=full`.
 - Proximity: add `&loom_lens=proximity` to the dense Loom URL.

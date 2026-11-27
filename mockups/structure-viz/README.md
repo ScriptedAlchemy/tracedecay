@@ -1,9 +1,8 @@
 # Structure-viz mockups
 
-Screenshot-ready **concept mockups**. Not production code, not wired to
-anything, and deliberately outside `dashboard/src/`. Three surfaces exploring
-one question: how do symbols connect to threads, sessions and memory, and how do
-we draw call chains and architecture without falling back on bland UML?
+These three concepts are outside `dashboard/src/` and use no production
+endpoints. They explore how to show links between symbols, threads, sessions,
+and memory, and how to draw call chains and architecture without using UML.
 
 | Concept | Page | Note |
 | --- | --- | --- |
@@ -11,40 +10,38 @@ we draw call chains and architecture without falling back on bland UML?
 | 2 · Call-chain transit map | [`call-chain-transit.html`](call-chain-transit.html) | [note](notes/call-chain-transit.md) |
 | 3 · Disagreement field | [`disagreement-field.html`](disagreement-field.html) | [note](notes/disagreement-field.md) |
 
-Shots in [`shots/`](shots/), dark and light, 1440 wide at 2×, six files.
+[`shots/`](shots/) contains six screenshots, one per page and theme, at 1440 px
+wide and 2× device scale.
 
-## Ground rules these follow
+## Design rules
 
-- **Every position, size and brightness encodes a stated measurement**, and each
-  figure's caption says exactly what encodes what. Including the channels that
-  encode *nothing* (a connector's length, a hand-laid node's position).
-- **Absence is shown, not cropped.** Each page carries at least one deliberate
-  beat where missing data keeps its slot and is labelled `unrecorded`,
-  `absent`, `uncovered`, `no station`, or drawn hollow. Unmeasured is never
-  collapsed into zero.
-- **All data is invented.** Each note names precisely which fields a real
-  backend would have to serve and which ones I am least confident exist today.
+- Each caption explains what position, size, and brightness measure. It also
+  names marks that carry no measurement, such as a connector's length or a
+  manually placed node's position.
+- Each page keeps at least one slot for missing data and uses a label such as
+  `unrecorded`, `absent`, `uncovered`, or `no station`, or draws a hollow mark.
+  Missing measurements never appear as zero.
+- All data is synthetic. Each note lists the fields a backend would need to
+  supply and identifies the fields whose availability is uncertain.
 
-## Running them
+## Open a page
 
 Open any page from `file://`. Theme comes from a query parameter:
 
     …/symbol-anatomy.html?theme=light     # default is dark
 
-Chrome tokens are copied verbatim from `dashboard/src/theme/tokens.css` and the
-`@theme` block of `dashboard/src/theme/tailwind.css`; `kindColor()` is a
-line-for-line port of `dashboard/src/viz/graph/kindColor.ts` so a kind lands on
-the same hue here as in the product. Those copies exist only because a
-standalone `file://` page cannot import the product modules, **if the palette
-or the token values move, these mockups are stale and should be regenerated
-rather than patched.**
+The mockups copy the UI frame tokens from `dashboard/src/theme/tokens.css` and
+the `@theme` block of `dashboard/src/theme/tailwind.css`. They also copy
+`kindColor()` from `dashboard/src/viz/graph/kindColor.ts` so each kind uses the
+same hue as in the product. The copies are necessary because a standalone
+`file://` page cannot import the product modules. If the palette or the token
+values change, regenerate the mockups rather than patching the copies.
 
 ## Re-shooting
 
     node mockups/structure-viz/shoot.mjs                  # all six
     node mockups/structure-viz/shoot.mjs disagreement     # one page, both themes
 
-`shoot.mjs` drives `file://` directly, no dev server, no daemon. It resolves
-`@playwright/test` from whichever `dashboard/` directory actually has
-`node_modules` (a git worktree has none of its own); override with
-`TD_DASHBOARD_DIR`.
+`shoot.mjs` opens `file://` pages without a dev server or daemon. It loads
+`@playwright/test` from the dashboard's `node_modules`. In a git worktree without
+its own install, use `TD_DASHBOARD_DIR` to point to an installed dashboard.

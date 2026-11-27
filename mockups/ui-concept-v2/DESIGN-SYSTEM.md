@@ -158,7 +158,7 @@ it is not a confidence percentage.
 | `INFERRED` | A relation derived by correlation rather than stated by a source authority. | Name the correlation basis and use an inferred/dashed relation without decimal confidence theatre. |
 | `AMBIGUOUS` | Multiple plausible source records, identities, or causal candidates remain. | Preserve the candidates and the unresolved choice; never select one silently. |
 | `STALE` | A source exists, but its declared freshness window has elapsed. | Show the source timestamp and freshness boundary; do not silently substitute cached state for current state. |
-| `UNAVAILABLE` | Evidence is missing, denied, private, not ingested, or otherwise inaccessible. | Name the reason when known and leave an honest gap; never reconstruct private reasoning or fabricate a source. |
+| `UNAVAILABLE` | Evidence is missing, denied, private, not ingested, or otherwise inaccessible. | Leave a gap and name the reason if known. Never reconstruct private reasoning or invent a source. |
 
 `EXACT` and `EXPLICIT` distinguish direct authoritative facts from persisted
 claims. A commit identity can be `EXACT` while rationale written in its commit

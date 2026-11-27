@@ -1,46 +1,40 @@
 # Design notes, code topography
 
-Per-sheet notes are printed on each sheet. This file holds what is common to all
-four: the rules they obey, the data they are allowed to claim, and where they are
-knowingly weak.
+Each sheet has its own notes. These notes describe the shared design rules,
+available data, and limitations.
 
 ## The direction
 
-The ask was for callers/callees traced **over the surrounding types**, a way to see
-the structure of many files and many functions in a file, and "the topography of the
-code base", explicitly not boxes-and-arrows UML and not a route-between-two-points
-diagram.
+The brief asked to show callers and callees within their surrounding types, the
+structure of many files and functions, and "the topography of the code base".
+It ruled out boxes-and-arrows UML and diagrams limited to a route between two
+points.
 
-Everything here follows from one decision: **treat structure as terrain and traffic
-as flow.** A module is not a container with a border, it is a landform with an
-elevation, an area, a shoreline and a contour density. A call is not an arrow, it is
-water with a measured volume that runs downhill, converges, forks, crosses
-boundaries, and enters and leaves types. Both are continuous, which is what lets a
-reader take in a whole basin at a glance instead of tracing a path.
+The sheets draw modules as terrain with an elevation, area, outline, and contour
+density. Calls flow downhill and their width shows call-site count. They can
+converge, fork, and enter or leave types. The continuous shapes let readers see
+groups of calls in context without tracing each one.
 
-The sheets share a vertical semantic on purpose: **height is dependency depth**.
-Sheet 01 establishes it, sheet 04 carries it through unchanged, sheet 02 uses hop
-distance instead and says so in its own legend rather than borrowing the authority
-of the elevation axis.
+Sheets 01 and 04 use height for dependency depth. Sheet 02 uses hop distance
+instead and labels it in its legend.
 
-## House rules, and how each sheet keeps them
+## Shared design rules
 
-**Every position, size, elevation and width encodes a stated measurement.** There
-is no decorative mark on any of the four sheets. Blob roughness is fed the region's
-own connectivity, node width is the symbol's `degree`, channel width is the call-site
-count, band height is `end_line − start_line`, the rail is cyclomatic complexity,
-the tint is churn. Where a value is derived rather than stored (sheet 04's x axis is
-symbols ÷ drawn bodies), the sheet says "derived".
+Each mark encodes a named measurement. Region roughness uses the region's
+connectivity. Node width uses the symbol's `degree`, and channel width uses
+call-site count. Band height is `end_line − start_line`. The rail shows cyclomatic
+complexity, and the tint shows churn. The sheets label derived values. For
+example, sheet 04 divides the number of symbols by the number of drawn bodies
+to get its x-axis values.
 
-**Captions say exactly what encodes what.** Every sheet carries a `channel → data`
-list naming the channel, the underlying quantity, and whether the graph really holds
-it. Legends state units and intervals like a real instrument plate: sheet 01 prints
-its contour interval (0.50 internal edges per symbol, index contour every fifth
-line) and its aggregation ratio; sheet 03 prints its vertical scale (1 px = 1.35
-source lines) and its datum; sheet 04 prints the aggregation ratio on the ruler
-itself.
+Each caption names what produces each visual channel and whether the graph
+stores that quantity. Legends give units and intervals. Sheet 01 prints its
+aggregation ratio and its contour interval of 0.50 internal edges per symbol,
+with an index contour every fifth line. Sheet 03 gives its vertical scale of
+1 px per 1.35 source lines and marks the shared line datum. Sheet 04 labels the
+aggregation ratio on the ruler itself.
 
-**Absence is drawn, not cropped. One deliberate beat per sheet.**
+Each sheet shows one example of missing data:
 
 - 01 `hooks/src/vendor/` is on the map at its true position and true area with a
   dashed shoreline and an empty interior: *no relief, 0 of 11 files parsed*.
@@ -77,7 +71,7 @@ of the arithmetic. The same pattern `kindColorVars` uses in the app.
 - **Magnitude through area, not radius** comes from `CodePage.tsx`'s
   `markDiameter`: symbol counts go through a square root before they become a width.
 
-## Wire truth these were designed against
+## Graph data the designs use
 
 - Nodes carry `{id, name, kind, file_path, start_line, end_line, degree}`; edges
   carry kinds `calls` / `uses` / `imports` / `contains`, with per-edge call-site
@@ -87,18 +81,17 @@ of the arithmetic. The same pattern `kindColorVars` uses in the app.
   directory clustering exist. They are sheet 01's two axes.
 - Per-symbol cyclomatic complexity exists. It is sheet 03's rail.
 - Churn / hotspots (git) exist. They are sheet 01's tint.
-- **Live SSE activity is project-granular today.** Sheet 01's weather strip is
-  therefore captioned as project-level, in the strip itself, with per-region weather
-  named as a future state. No other sheet claims liveness.
-- **The subgraph endpoint serves roughly 80–250 nodes.** Sheet 01 declares itself an
-  aggregate (19 regions standing for 1 206 symbols) and prints the ratio. Sheets 02
-  and 03 declare themselves direct renders and print their node counts to show they
-  are inside the band. Sheet 04 turns the cap into a labelled position on its ruler
- . The point where bodies stop being masses and start being symbols.
+- Live SSE reports activity at the project level. Sheet 01 labels that scope in
+  its weather strip and identifies per-region activity as future work. No other
+  sheet shows live data.
+- The subgraph endpoint serves roughly 80 to 250 nodes. Sheet 01 labels its
+  aggregation of 1 206 symbols into 19 regions and prints the ratio. Sheets 02
+  and 03 show individual nodes and print their counts. Sheet 04 labels where the
+  display switches from aggregates to individual symbols.
 
 ## Known weaknesses
 
-Each sheet prints its own open question. The three that cut across all four:
+Each sheet prints its own open question. The designs also have these limits:
 
 1. **Correlated channels.** Area and contour density on sheet 01 both grow with
    module size, so a reader can double-count. Coupling ratio (internal ÷ external
@@ -107,7 +100,6 @@ Each sheet prints its own open question. The three that cut across all four:
 2. **Two containments.** Modules and types are different nestings. Sheet 02 draws
    both, as relief and as membranes, and they already overlap awkwardly at three
    hops; a type whose methods span two files cannot be one convex membrane.
-3. **Scale.** Sheet 02 is legible at depth 3 and its tributary count roughly cubes
-   by depth 5; sheet 03 fits six cores and the ask said "many files". Each sheet
-   names its degradation strategy as an open question rather than pretending it
-   scales.
+3. **Scale.** Sheet 02 is legible at depth 3, and its tributary count roughly
+   cubes by depth 5. Sheet 03 fits six cores, but the brief asks for "many files".
+   Each sheet leaves open what to show when the full view no longer fits.

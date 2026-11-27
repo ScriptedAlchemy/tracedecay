@@ -1,10 +1,9 @@
 import { PACK, type PackLoomEvent, type PackSession } from "../data/pack";
 
 /**
- * The profile pack has no planned Work graph (no tasks, no dependencies).
- * The only honest DAG in the snapshot is the observed delegation spine:
- * parent_session_id links between root threads and subagent threads.
- * Everything below is derived from those records, nothing is invented.
+ * The profile pack has no planned tasks or task dependencies. The snapshot's
+ * delegation graph uses only recorded `parent_session_id` links between root
+ * threads and subagent threads.
  */
 
 const SESSIONS = PACK.sessions;
