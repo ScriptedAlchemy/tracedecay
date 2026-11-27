@@ -835,6 +835,14 @@ launchd has no enforced memory ceiling, so the LaunchAgent passes the same
 `MemoryMax` budget to the daemon as `TRACEDECAY_RESIDENT_MEMORY_LIMIT_BYTES`,
 where it bounds admission and triggers the same cache shedding.
 
+The LaunchAgent keeps `ProcessType=Interactive` and runs the daemon at
+`Nice` 10. The daemon answers MCP and hook requests in the same process that
+indexes, so it is not classified as a `Background` job: that is a process-wide
+CPU ceiling which also slows interactive requests on an idle host. `Nice` only
+costs the daemon CPU when the host is contended, which is when a runaway daemon
+should yield to your foreground work. `tracedecay update` rewrites an older
+plist with the same values.
+
 Use `tracedecay daemon start`, `stop`, or `restart` for explicit lifecycle control. Remove the service with:
 
 ```bash

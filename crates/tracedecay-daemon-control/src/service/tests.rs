@@ -1653,6 +1653,127 @@ fn systemd_unit_runs_the_profile_that_installed_it() {
 
 #[cfg(unix)]
 #[test]
+fn launchd_plist_keeps_interactive_scheduling_and_nices_the_daemon() {
+    let profile_dir = tempfile::TempDir::new().expect("profile temp dir");
+    let home = tempfile::TempDir::new().expect("home temp dir");
+    let profile = ProfileRoot::new(profile_dir.path()).with_home(home.path());
+    let spec = DaemonServiceSpec {
+        tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
+        socket_path: profile_dir.path().join("daemon.sock"),
+        data_dir_override: None,
+        profile: profile.clone(),
+        remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(16 << 30),
+    };
+
+    let plist = spec.render_launchd_plist().expect("launchd plist");
+    let lines: Vec<&str> = plist.lines().map(str::trim).collect();
+
+    assert!(
+        lines.contains(&"<key>ProcessType</key>")
+            && lines.contains(&"<string>Interactive</string>"),
+        "the daemon answers interactive MCP and hook requests in-process, so \
+         launchd must not cap it as a Background job, got:\n{plist}"
+    );
+    assert!(
+        lines
+            .windows(2)
+            .any(|pair| pair[0] == "<key>Nice</key>" && pair[1] == "<integer>10</integer>"),
+        "a runaway daemon must yield the CPU to the operator's foreground work, got:\n{plist}"
+    );
+    assert!(
+        !lines.contains(&"<string>Background</string>"),
+        "ProcessType=Background is a process-wide CPU ceiling that also slows \
+         the interactive request path on an idle host, got:\n{plist}"
+    );
+}
+
+/// An operator who installed the daemon before `Nice` existed holds a plist
+/// with `ProcessType=Interactive` and no `Nice`. The `tracedecay update`
+/// refresh journey must rewrite that on-disk plist from the one renderer, so
+/// the installed artifact and a fresh install carry the same scheduling
+/// contract instead of stranding the old one.
+#[cfg(target_os = "macos")]
+#[test]
+fn update_refresh_rewrites_an_installed_plist_with_the_current_scheduling() {
+    let root = TempDir::new().expect("fixture root");
+    let profile = fixture_profile(root.path());
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("fake bin dir");
+    std::fs::create_dir_all(profile.data_dir()).expect("data dir");
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    let spec = DaemonServiceSpec {
+        tracedecay_bin: bin.join("tracedecay"),
+        socket_path: profile.data_dir().join("daemon.sock"),
+        data_dir_override: None,
+        profile: profile.clone(),
+        remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
+    };
+
+    // The pre-`Nice` artifact an operator already has on disk: the current
+    // plist with the Nice key and its value removed, line by line.
+    let service_path = super::write_service_unit(&spec).expect("installed plist path");
+    let current = std::fs::read_to_string(&service_path).expect("rendered plist");
+    let mut stale = String::with_capacity(current.len());
+    let mut skipping_value = false;
+    for line in current.lines() {
+        if line.trim() == "<key>Nice</key>" {
+            skipping_value = true;
+            continue;
+        }
+        if skipping_value {
+            skipping_value = false;
+            continue;
+        }
+        stale.push_str(line);
+        stale.push('\n');
+    }
+    assert!(
+        !stale.contains("<key>Nice</key>") && stale.len() < current.len(),
+        "the fixture must actually remove Nice, or it proves nothing"
+    );
+    std::fs::write(&service_path, &stale).expect("install the stale plist");
+
+    // The refresh reports the job running so the runner takes the restart path.
+    let launchctl = fake_service_program(
+        &bin,
+        "launchctl",
+        &format!(
+            "#!/bin/sh\n[ \"$1\" = print ] && printf 'state = running\\npath = {}\\n'\nexit 0\n",
+            service_path.display()
+        ),
+    );
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).expect("fixture launchd runner");
+
+    super::refresh_installed_service_with_state_and_runner(
+        &runner,
+        &spec,
+        Some(DaemonServiceState::RunningEnabled),
+        TEST_BUILD_VERSION,
+    )
+    .expect("refresh the installed daemon service");
+
+    let rewritten = std::fs::read_to_string(&service_path).expect("refreshed plist");
+    let lines: Vec<&str> = rewritten.lines().map(str::trim).collect();
+    assert!(
+        lines
+            .windows(2)
+            .any(|pair| pair[0] == "<key>Nice</key>" && pair[1] == "<integer>10</integer>"),
+        "the update journey must carry Nice onto the operator's installed plist, got:\n{rewritten}"
+    );
+    assert!(
+        lines.contains(&"<string>Interactive</string>"),
+        "the update journey must preserve interactive scheduling, got:\n{rewritten}"
+    );
+    assert_eq!(
+        rewritten, current,
+        "a refreshed plist must be byte-identical to a fresh install"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn launchd_plist_hands_the_memory_budget_to_the_daemon_authority() {
     let profile_dir = tempfile::TempDir::new().expect("profile temp dir");
     let home = tempfile::TempDir::new().expect("home temp dir");
