@@ -11,7 +11,7 @@ pub mod support;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::json;
 use support::DrainFixture;
@@ -34,6 +34,9 @@ use tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub;
 const DAYS: usize = 6;
 const ROLLOUTS_PER_DAY: usize = 4;
 const MAX_PASSES: usize = 64;
+/// The rollout count of the corpus the re-offer cost was first measured on.
+const MEASURED_ROLLOUTS: usize = 2_010;
+const MAX_MEASURED_PASSES: usize = 4_096;
 
 struct FixtureIdentity {
     profile_root: PathBuf,
@@ -53,6 +56,15 @@ impl ProfileIdentityReadPort for FixtureIdentity {
     }
 }
 
+fn rollout_path(home: &Path, day: usize, index: usize) -> PathBuf {
+    let session = format!("019a0000-0000-7000-8000-{day:04}{index:08}");
+    home.join(format!(".codex/sessions/2026/01/{:02}", day + 1))
+        .join(format!(
+            "rollout-2026-01-{:02}T00-00-00-{session}.jsonl",
+            day + 1
+        ))
+}
+
 /// A settled rollout: its mtime is a day old, as on a daemon re-importing
 /// history after a store reset.
 fn write_rollout(home: &Path, project: &Path, day: usize, index: usize) {
@@ -69,10 +81,7 @@ fn write_rollout(home: &Path, project: &Path, day: usize, index: usize) {
                "payload": {"type": "agent_message", "message": format!("reply {day}/{index}")}}),
     ];
     let body: String = records.iter().map(|record| format!("{record}\n")).collect();
-    let path = dir.join(format!(
-        "rollout-2026-01-{:02}T00-00-00-{session}.jsonl",
-        day + 1
-    ));
+    let path = rollout_path(home, day, index);
     std::fs::write(&path, body).unwrap();
     let settled = SystemTime::now() - Duration::from_secs(24 * 60 * 60);
     std::fs::File::options()
@@ -141,11 +150,21 @@ fn write_corpus(fixture: &DrainFixture, home: &Path) -> usize {
     in_scope
 }
 
+/// The measured corpus: every rollout belongs to this one project and is
+/// settled, so after the import the next sweep finds every one unchanged.
+fn write_measured_corpus(fixture: &DrainFixture, home: &Path) -> usize {
+    for index in 0..MEASURED_ROLLOUTS {
+        write_rollout(home, &fixture.project, index % DAYS, index);
+    }
+    MEASURED_ROLLOUTS
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct Cost {
     passes: usize,
     transactions: u64,
     vm_steps: u64,
+    wall: Duration,
 }
 
 /// Runs passes until history completes, returning the writer work they did.
@@ -153,13 +172,22 @@ async fn run_to_completion(
     ingestor: &ProjectSessionHistoricalIngestor,
     database: &RegisteredGlobalDbLeaseV1,
 ) -> Cost {
+    run_to_completion_bounded(ingestor, database, MAX_PASSES).await
+}
+
+async fn run_to_completion_bounded(
+    ingestor: &ProjectSessionHistoricalIngestor,
+    database: &RegisteredGlobalDbLeaseV1,
+    max_passes: usize,
+) -> Cost {
     let before = writer_telemetry(database);
+    let started = Instant::now();
     let mut passes = 0;
     loop {
         passes += 1;
         let pass = ingestor.run_pass().await;
         assert!(
-            passes <= MAX_PASSES,
+            passes <= max_passes,
             "history never completed; last pass {:?} units {:?}",
             pass.outcome,
             pass.provider_units
@@ -171,12 +199,14 @@ async fn run_to_completion(
             outcome => panic!("history pass failed: {outcome:?}"),
         }
     }
+    let wall = started.elapsed();
     let after = writer_telemetry(database);
     Cost {
         passes,
         transactions: after.transactions.committed_transactions
             - before.transactions.committed_transactions,
         vm_steps: after.sqlite_vm.vm_steps - before.sqlite_vm.vm_steps,
+        wall,
     }
 }
 
@@ -234,6 +264,19 @@ async fn a_completed_codex_import_stays_idle_across_restart() {
     assert_eq!(restart.passes, 1, "a settled restart needs one pass");
 }
 
+/// The store work of one empty sweep over a settled corpus, whatever its
+/// size: the fixed per-pass cost the daemon pays on every idle poll.
+async fn empty_sweep_vm_steps() -> u64 {
+    let (fixture, database, home, cpu) = open().await;
+    write_corpus(&fixture, &home);
+    let ingestor = ingestor(&fixture, &database, &home, &mounted_hub(&cpu), &cpu);
+    run_to_completion(&ingestor, &database).await;
+    let idle = run_to_completion(&ingestor, &database).await;
+    ingestor.cancel();
+    assert_eq!(idle.transactions, 0, "an idle re-pass commits nothing");
+    idle.vm_steps
+}
+
 /// A daemon restarted between the passes of an import finishes it with no
 /// more writer work than an uninterrupted import: committed rollouts are not
 /// re-admitted.
@@ -289,5 +332,87 @@ async fn a_restart_mid_import_resumes_without_rewriting_committed_rollouts() {
         interrupted <= uninterrupted.transactions,
         "a restart re-committed work: {interrupted} > {}",
         uninterrupted.transactions
+    );
+}
+
+/// Committed transactions the import pays per settled rollout it admits.
+/// The product with the corpus size proves every rollout was admitted once:
+/// a skipped rollout falls short and a re-admitted one overshoots.
+const IMPORT_TRANSACTIONS_PER_ROLLOUT: u64 = 5;
+
+/// The re-offer acceptance measurement for #4374: a full second sweep over
+/// 2,010 settled rollouts in one project commits nothing and does no
+/// per-file store work, where the import that first admitted them paid a
+/// durable write for every rollout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_sweep_over_the_measured_corpus_commits_nothing() {
+    let (fixture, database, home, cpu) = open().await;
+    let rollouts = write_measured_corpus(&fixture, &home);
+
+    let first = ingestor(&fixture, &database, &home, &mounted_hub(&cpu), &cpu);
+    let import = run_to_completion_bounded(&first, &database, MAX_MEASURED_PASSES).await;
+    let reoffer = run_to_completion_bounded(&first, &database, MAX_MEASURED_PASSES).await;
+
+    eprintln!(
+        "codex re-offer cost over {rollouts} settled rollouts in one project: \
+         import={import:?} reoffer={reoffer:?}"
+    );
+    // Every rollout was discovered and admitted: the import's durable writes
+    // are exactly the per-rollout cost times the corpus.
+    assert_eq!(
+        import.transactions,
+        IMPORT_TRANSACTIONS_PER_ROLLOUT * rollouts as u64,
+        "the import must admit every rollout exactly once"
+    );
+    assert_eq!(
+        reoffer.transactions, 0,
+        "a second sweep over unchanged rollouts must commit nothing"
+    );
+    // The second sweep's store work is the fixed per-pass cost, not per file:
+    // it equals one empty sweep over the 12-rollout corpus, whatever that
+    // costs. A per-file cost would scale with the 2,010 rollouts.
+    let small = empty_sweep_vm_steps().await;
+    assert_eq!(
+        reoffer.vm_steps, small,
+        "the second sweep must do only the fixed per-pass store work"
+    );
+    assert!(
+        reoffer.vm_steps.saturating_mul(10) < import.vm_steps,
+        "the second sweep must do far less store work than the import: \
+         {reoffer:?} vs {import:?}"
+    );
+    assert!(
+        reoffer.wall < import.wall,
+        "the second sweep must take less wall time than the import: \
+         {reoffer:?} vs {import:?}"
+    );
+
+    // The empty sweep is a live verdict, not a dead probe: one appended
+    // rollout is discovered and admitted on the next sweep, and only it.
+    let appended = rollout_path(&home, 0, 0);
+    assert!(appended.is_file(), "the appended rollout must exist");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&appended)
+        .unwrap();
+    use std::io::Write as _;
+    writeln!(
+        file,
+        "{}",
+        json!({"timestamp": "2026-01-01T00:00:03.000Z", "type": "event_msg",
+               "payload": {"type": "user_message", "message": "appended prompt"}})
+    )
+    .unwrap();
+    drop(file);
+    let live = run_to_completion_bounded(&first, &database, MAX_MEASURED_PASSES).await;
+    first.cancel();
+    eprintln!("codex sweep after one appended rollout: live={live:?}");
+    assert!(
+        live.transactions > 0,
+        "the appended frames must be committed: {live:?}"
+    );
+    assert!(
+        live.transactions < import.transactions,
+        "only the appended rollout may be re-admitted: {live:?} vs {import:?}"
     );
 }
