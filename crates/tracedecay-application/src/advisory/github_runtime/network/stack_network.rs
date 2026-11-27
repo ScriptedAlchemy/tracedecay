@@ -269,6 +269,65 @@ mod tests {
     }
 
     #[test]
+    fn omitted_stack_field_is_degraded_but_explicit_null_confirms_absence() {
+        let scope = scope("stack-absence");
+        let context = context(&scope);
+        let request = request(scope.clone());
+        let provider = ProviderId::new("provider.github").unwrap();
+        let (_credential_authority, resolution) = registered_fixture_credential(
+            "stack-absence",
+            FixtureCredentialAuthorityModeV1::Verified,
+        );
+        let RegisteredGitHubReadOnlyCredentialV1::Verified(credential) = resolution else {
+            panic!("verified fixture credential must resolve");
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for pull_request in [
+                json!({"stackEntry": null}),
+                json!({"stackEntry": null, "stack": null}),
+            ] {
+                let (mut graphql, _) = listener.accept().unwrap();
+                let _ = read_http_request(&mut graphql);
+                write_http_json(
+                    &mut graphql,
+                    &json!({"data": {"repository": {"pullRequest": pull_request}}}),
+                );
+            }
+        });
+        let client = local_stack_client(address, "stack-absence", &request, credential);
+        let stack_request = GitHubGraphQlReadRequestV1 {
+            scope,
+            pull_request_id: request.pull_request_id.clone(),
+            resume: GitHubReadResumeV1::empty(),
+        };
+        let missing = client.read_stack(
+            &context,
+            &stack_request,
+            &request,
+            &provider,
+            &RejectStackBinding,
+        );
+        let absent = client.read_stack(
+            &context,
+            &stack_request,
+            &request,
+            &provider,
+            &RejectStackBinding,
+        );
+        server.join().unwrap();
+        assert!(matches!(
+            missing,
+            GitHubStackProviderOutcomeV1::Degraded { .. }
+        ));
+        assert!(matches!(
+            absent,
+            GitHubStackProviderOutcomeV1::EnabledWithoutStack { .. }
+        ));
+    }
+
+    #[test]
     fn unavailable_compare_degrades_decoded_stack_without_enabling_snapshot() {
         let mut scope = scope("stack-compare-unavailable");
         scope.head_commit_id = CommitId::new("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();

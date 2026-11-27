@@ -1039,13 +1039,35 @@ impl DaemonGitHubStackCoordinatorV1 {
         }
         let previous =
             registered_current.and_then(|published| published.observation.snapshot.as_ref());
-        let (transitions, drift_kinds) = stack_drift(previous, snapshot.as_ref());
-        let drift_observations = transition::update_drift_intervals(
-            &mut state.drift_intervals,
-            &scope.scope_digest,
-            drift_kinds,
-            observed_at,
-        )?;
+        // Restored receipts retain the interval identity, not the provider
+        // snapshot it was compared against. A first sample establishes a
+        // baseline; it cannot prove that an open interval has ended. An
+        // unavailable provider sample likewise provides no comparison. The
+        // exception is an enabled provider response with no stack: only
+        // EnabledWithoutStack can produce that pair, which proves absence
+        // and can close intervals even without a retained snapshot.
+        let comparison = match (previous, snapshot.as_ref()) {
+            (Some(previous), Some(current)) => Some(stack_drift(previous, current)),
+            (_, None)
+                if matches!(&origin, ObservationOrigin::Provider(_))
+                    && capability.state == GitHubStackCapabilityStateV1::Enabled =>
+            {
+                Some((Vec::new(), Vec::new()))
+            }
+            _ => None,
+        };
+        let (transitions, drift_observations) = match comparison {
+            Some((transitions, drift_kinds)) => {
+                let observations = transition::update_drift_intervals(
+                    &mut state.drift_intervals,
+                    &scope.scope_digest,
+                    drift_kinds,
+                    observed_at,
+                )?;
+                (transitions, observations)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
         let observation = GitHubStackObservationV1 {
             scope: scope.clone(),
             observed_at,

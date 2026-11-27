@@ -513,14 +513,19 @@ mod tests {
 
     use serde_json::json;
     use tracedecay_contracts::CancellationContext;
+    use tracedecay_contracts::{
+        ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1, ResolvedScope,
+    };
     use tracedecay_domain::configuration::GitHubStackedPullRequestPolicyV1;
     use tracedecay_domain::feedback::{
         GitHubReviewCurrentBranchRemapV1, GitHubReviewImmutableAnchorV1,
     };
     use tracedecay_domain::{
         CommitId, GitHubStackCapabilityStateV1, GitTopologyAnchorTargetV1, IntervalStateV1,
-        ProviderId, RetrievalAnchorRecord, RetrievalAnchorTarget, UtcMicros,
+        ObservabilityPayloadV1, ProviderId, RefId, RetrievalAnchorRecord, RetrievalAnchorTarget,
+        StackDriftKindV1, UtcMicros, WorkStackDriftObservedV1, safe_work_topology_policy_v1,
     };
+    use tracedecay_global_db::RegisteredGlobalDbOwnerV1;
     use tracedecay_global_db::tests::harness::open_registered_test_database_fixture;
     use tracedecay_runtime_core::db::{
         DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
@@ -534,8 +539,15 @@ mod tests {
     use super::super::network::tests::{
         FixtureCredentialAuthorityModeV1, context, registered_fixture_credential, request, scope,
     };
-    use super::super::{GitHubProviderLifecycleV1, ProjectGitHubStackAnchorAuthorityV1};
+    use super::super::{
+        GitHubProviderLifecycleV1, GitHubReadOnlyCredentialAuthorityV1,
+        ProjectGitHubStackAnchorAuthorityV1,
+    };
     use super::*;
+    use crate::observability::{
+        BoundedObservabilityProducerV1, ObservabilityProducerIdentityV1,
+        RegisteredObservabilityPortV1,
+    };
     use crate::stack_coordinator::github_stack_circuit_policy;
 
     #[derive(Clone)]
@@ -758,12 +770,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_refresh_closes_provider_drift_without_a_stack_read() {
+    async fn disabled_refresh_preserves_drift_until_live_comparisons_resume() {
         policy_disable_journey(false).await;
     }
 
     #[tokio::test]
-    async fn superseded_refresh_closes_provider_drift_under_current_policy() {
+    async fn superseded_refresh_preserves_drift_under_current_policy() {
         policy_disable_journey(true).await;
     }
 
@@ -822,7 +834,7 @@ mod tests {
             .to_owned();
         let server = std::thread::spawn(move || {
             let mut arrived = Some(arrived);
-            for round in 0..3 {
+            for round in 0..5 {
                 // Complete collection refreshes require two agreeing scans.
                 for _ in 0..2 {
                     let (mut review, _) = listener.accept().unwrap();
@@ -970,7 +982,6 @@ mod tests {
             let outcome = owner.refresh(&context, &request).await;
             assert!(outcome.has_usable_observation(), "{outcome:?}");
         }
-        server.join().unwrap();
         let mut records = anchor_database
             .read_connection()
             .query("SELECT anchor_json FROM retrieval_anchors", ())
@@ -995,7 +1006,7 @@ mod tests {
             .observe_policy(
                 context.scope().clone(),
                 owner.stack_provider.clone(),
-                binding,
+                binding.clone(),
                 tracedecay_contracts::now_micros(),
             )
             .unwrap();
@@ -1005,7 +1016,635 @@ mod tests {
         );
         assert!(
             settled.drift_observations.is_empty(),
-            "the runtime refresh must already have closed provider drift"
+            "disabled policy supplies no evidence that provider drift has ended"
+        );
+        let _reenabled = coordinator
+            .register_scope(
+                context.scope(),
+                GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+                github_stack_circuit_policy().unwrap(),
+            )
+            .unwrap();
+        for round in 0..2 {
+            let outcome = owner.refresh(&context, &request).await;
+            assert!(outcome.has_usable_observation(), "{outcome:?}");
+            let comparison = coordinator
+                .observe_policy(
+                    context.scope().clone(),
+                    owner.stack_provider.clone(),
+                    binding.clone(),
+                    tracedecay_contracts::now_micros(),
+                )
+                .unwrap();
+            if round == 0 {
+                assert!(comparison.drift_observations.is_empty());
+            } else {
+                let [closed] = comparison.drift_observations.as_slice() else {
+                    panic!("the stable live pair must close the original interval: {comparison:?}");
+                };
+                let [opened] = open.drift_observations.as_slice() else {
+                    panic!("the base advance must open exactly one interval: {open:?}");
+                };
+                assert_eq!(closed.trace_id, opened.trace_id);
+                assert_eq!(closed.drift.state, IntervalStateV1::Closed);
+                assert_eq!(
+                    closed.drift.first_observed_micros,
+                    opened.drift.first_observed_micros
+                );
+            }
+        }
+        server.join().unwrap();
+    }
+
+    /// Everything one exact scope needs to mount real review runtime owners
+    /// the way the composition root does: the project database the anchor
+    /// authority and Observatory lane bind, the review store, the shared
+    /// daemon coordinator, and a verified loopback credential.
+    struct RuntimeJourney {
+        coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
+        producer: Arc<BoundedObservabilityProducerV1>,
+        producer_boot: u64,
+        project_database: RegisteredGlobalDbLeaseV1,
+        review_database: Database,
+        scope: FeedbackScopeV1,
+        context: RequestContext,
+        request: GitHubReviewReadRequestV1,
+        credential: GitHubReadOnlyCredentialV1,
+        _project_owner: RegisteredGlobalDbOwnerV1,
+        _credential_authority: Arc<dyn GitHubReadOnlyCredentialAuthorityV1>,
+        _storage: tempfile::TempDir,
+    }
+
+    const RUNTIME_HEAD: &str = "dddddddddddddddddddddddddddddddddddddddd";
+    const MERGE_BASE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const ADVANCED_BASE: &str = "cccccccccccccccccccccccccccccccccccccccc";
+    const FURTHER_ADVANCED_BASE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const DRIFT_EVENT_KIND: &str = "work.stack_drift.observed.v1";
+
+    /// One stack GraphQL response whose single entry is the selected pull
+    /// request, so the read binds an exact provider snapshot.
+    fn stack_response(base: &str, branch: &str) -> serde_json::Value {
+        json!({"data":{"repository":{"pullRequest":{
+            "stackEntry":{"position":1},
+            "stack":{"id":"runtime-stack","number":421,"baseRefName":"main","size":1,
+                "entries":{"totalCount":1,"pageInfo":{"hasNextPage":false,"endCursor":null},
+                    "nodes":[{"position":1,"pullRequest":{"number":421,"baseRefName":"main",
+                        "headRefName":branch,"baseRefOid":base,"headRefOid":RUNTIME_HEAD,"baseRef":null,
+                        "statusCheckRollup":{"state":"SUCCESS"},"mergeQueueEntry":null}}]}}
+        }}}})
+    }
+
+    /// Serves the two agreeing review scans one complete refresh needs.
+    fn serve_review_scans(listener: &TcpListener) {
+        for _ in 0..2 {
+            let (mut review, _) = listener.accept().unwrap();
+            let _ = read_http_request_with_headers(&mut review);
+            write_http_json(&mut review, &json!([]));
+        }
+    }
+
+    /// Serves the compare read that binds each layer's merge base.
+    fn serve_compare(listener: &TcpListener) {
+        let (mut compare, _) = listener.accept().unwrap();
+        let _ = read_http_request_with_headers(&mut compare);
+        write_http_json(
+            &mut compare,
+            &json!({"merge_base_commit":{"sha":MERGE_BASE}}),
+        );
+    }
+
+    /// Serves one complete refresh: two agreeing review scans, one stack
+    /// GraphQL read and one compare read.
+    fn serve_refresh(listener: &TcpListener, base: &str, branch: &str) {
+        serve_review_scans(listener);
+        let (mut stack, _) = listener.accept().unwrap();
+        let (headers, body) = read_http_request_with_headers(&mut stack);
+        assert!(
+            body["query"]
+                .as_str()
+                .is_some_and(|query| query.contains("stackEntry")),
+            "expected stack query, got {headers} {body}"
+        );
+        write_http_json(&mut stack, &stack_response(base, branch));
+        serve_compare(listener);
+    }
+
+    fn start_producer(
+        project_database: &RegisteredGlobalDbLeaseV1,
+        scope: &FeedbackScopeV1,
+        boot: u64,
+    ) -> Arc<BoundedObservabilityProducerV1> {
+        Arc::new(
+            BoundedObservabilityProducerV1::start(
+                project_database.clone(),
+                ObservabilityProducerIdentityV1 {
+                    authorized_scope_ref: scope.project_id.as_str().to_owned(),
+                    process_boot_id: format!("boot:github-runtime-lifetime:{boot}"),
+                    producer_revision: "github-runtime-lifetime.v1".to_owned(),
+                    configuration_revision: "github-runtime-lifetime.v1".to_owned(),
+                    policy_revision: "github-runtime-lifetime.v1".to_owned(),
+                },
+                256,
+            )
+            .unwrap(),
+        )
+    }
+
+    impl RuntimeJourney {
+        async fn mount(repository: &str) -> Self {
+            let mut scope = scope(repository);
+            scope.head_commit_id = CommitId::new(RUNTIME_HEAD).unwrap();
+            let context = context(&scope);
+            let mut request = request(scope.clone());
+            request.operation = GitHubReviewReadOperationV1::RestListPullRequestReviewComments;
+            let storage = tempfile::tempdir().unwrap();
+            let (project_database, project_owner) = open_registered_test_database_fixture(
+                &storage.path().join("project-sessions.db"),
+                TestDatabaseRuntimeScope::ProjectSessions {
+                    project_id: scope.project_id.clone(),
+                },
+            )
+            .await
+            .unwrap();
+            let producer = start_producer(&project_database, &scope, 0);
+            crate::register_test_schema_installer();
+            let review_path = storage.path().join("review.db");
+            let authority =
+                DatabaseAuthority::acquire_test(&review_path, "github-runtime-lifetime").unwrap();
+            let (review_database, _) = Database::publish_test_runtime(
+                &review_path,
+                &authority,
+                TestDatabaseRuntimeMode::Initialize,
+            )
+            .await
+            .unwrap();
+            let (credential_authority, resolution) = registered_fixture_credential(
+                repository,
+                FixtureCredentialAuthorityModeV1::Verified,
+            );
+            let RegisteredGitHubReadOnlyCredentialV1::Verified(credential) = resolution else {
+                panic!("verified fixture credential must resolve");
+            };
+            Self {
+                coordinator: Arc::new(DaemonGitHubStackCoordinatorV1::default()),
+                producer,
+                producer_boot: 0,
+                project_database,
+                review_database,
+                scope,
+                context,
+                request,
+                credential,
+                _storage: storage,
+                _project_owner: project_owner,
+                _credential_authority: credential_authority,
+            }
+        }
+
+        /// Mounts one review runtime owner for `scope` on `registration`, beside
+        /// the Observatory lane the composition root mounts for it. The
+        /// production builder admits only `https` providers, so the loopback
+        /// fixture mounts the same owner shape directly.
+        fn owner(
+            &self,
+            scope: &FeedbackScopeV1,
+            registration: &GitHubStackScopeV1,
+            address: std::net::SocketAddr,
+        ) -> GitHubReviewRuntimeOwnerV1<EmptyReviewAnchors, EmptyReviewAnchors> {
+            let repository_name = scope
+                .repository_id
+                .as_str()
+                .trim_start_matches("repository.github.")
+                .to_owned();
+            let client = local_client(
+                address,
+                GitHubRepositoryTargetV1 {
+                    owner: "ScriptedAlchemy".to_owned(),
+                    repository: repository_name.clone(),
+                    pull_request_number: 421,
+                    pull_request_id: self.request.pull_request_id.clone(),
+                },
+                self.credential.clone(),
+            );
+            let store =
+                ProjectGitHubReviewStoreV1::new(self.review_database.clone(), scope.clone())
+                    .unwrap();
+            let decoder = GitHubOfficialResponseDecoderV1::new(
+                GitHubReviewProviderIdentityV1 {
+                    provider: ProviderId::new("provider.github").unwrap(),
+                    repository_owner: "ScriptedAlchemy".to_owned(),
+                    repository_name,
+                    pull_request_number: 421,
+                    base_commit_id: CommitId::new(MERGE_BASE).unwrap(),
+                    head_commit_id: scope.head_commit_id.clone(),
+                    merge_base_commit_id: CommitId::new(MERGE_BASE).unwrap(),
+                },
+                EmptyReviewAnchors,
+            )
+            .unwrap();
+            let transport =
+                GitHubReadOnlyRuntimeTransportV1::new(store.clone(), client.clone(), decoder);
+            let connector = GitHubReadOnlyConnector::new(
+                GitHubReadOnlyDescriptorSetV1::new(vec![rest_descriptor(self.request.operation)])
+                    .unwrap(),
+                transport,
+                EmptyReviewAnchors,
+            )
+            .unwrap();
+            let source_access: Arc<dyn GitHubSourceAccessAuthorityV1> = Arc::new(ReadySource);
+            GitHubReviewRuntimeOwnerV1 {
+                coordinator: GitHubReviewRefreshCoordinatorV1::new(
+                    connector,
+                    store,
+                    Arc::clone(&source_access),
+                ),
+                source_access,
+                stack_client: client,
+                stack_scope: registration.clone(),
+                stack_provider: ProviderId::new("provider.github").unwrap(),
+                stack_coordinator: Arc::clone(&self.coordinator),
+                stack_anchors: ProjectGitHubStackAnchorAuthorityV1::new(
+                    self.project_database.clone(),
+                    scope.clone(),
+                )
+                .unwrap(),
+                stack_observability: Some(GitHubStackObservabilityV1 {
+                    probe_owner: GitHubStackProbeOwnerV1::mount(
+                        registration.scope().clone(),
+                        safe_work_topology_policy_v1(),
+                        "ScriptedAlchemy",
+                        "tracedecay",
+                        true,
+                    )
+                    .unwrap(),
+                    producer: Arc::clone(&self.producer),
+                    observation_db: self.project_database.clone(),
+                }),
+                stack_drift_restore: tokio::sync::OnceCell::new(),
+            }
+        }
+
+        /// The daemon restart boundary: the current producer drains and joins
+        /// so every receipt it accepted is durable, and a fresh producer
+        /// serves the next mount exactly as a restarted daemon would.
+        async fn restart_observability(&mut self) {
+            self.producer
+                .shutdown()
+                .await
+                .expect("flush the mounted producer");
+            self.producer_boot += 1;
+            self.producer = start_producer(&self.project_database, &self.scope, self.producer_boot);
+        }
+
+        /// Capability and snapshot anchors the mounted refreshes published to
+        /// the retrieval-anchor authority.
+        async fn stack_anchors(&self) -> Vec<GitTopologyAnchorTargetV1> {
+            let mut records = self
+                .project_database
+                .read_connection()
+                .query("SELECT anchor_json FROM retrieval_anchors", ())
+                .await
+                .unwrap();
+            let mut targets = Vec::new();
+            while let Some(row) = records.next().await.unwrap() {
+                let record: RetrievalAnchorRecord =
+                    serde_json::from_str(&row.get::<String>(0).unwrap()).unwrap();
+                if let RetrievalAnchorTarget::GitTopology(target) = record.target() {
+                    targets.push(target.as_ref().clone());
+                }
+            }
+            targets
+        }
+
+        /// Durable drift receipts the mounted refreshes published, read after
+        /// the producer has flushed them.
+        async fn drift_receipts(&mut self) -> Vec<WorkStackDriftObservedV1> {
+            self.restart_observability().await;
+            RegisteredObservabilityPortV1::new(self.project_database.as_ref())
+                .query(ObservabilityQueryV1 {
+                    authorized_scope_ref: self.scope.project_id.as_str().to_owned(),
+                    event_kinds: vec![DRIFT_EVENT_KIND.to_owned()],
+                    horizon: ObservabilityHorizonV1 {
+                        since_micros: 0,
+                        until_micros: i64::MAX,
+                    },
+                    after_watermark: None,
+                    limit: 256,
+                })
+                .await
+                .unwrap()
+                .events
+                .into_iter()
+                .map(|envelope| match envelope.payload {
+                    ObservabilityPayloadV1::WorkStackDrift(drift) => drift,
+                    other => panic!("unexpected payload {other:?}"),
+                })
+                .collect()
+        }
+    }
+
+    /// A stack read that outlives the registration that authorized it cannot
+    /// publish into the replacement registration of the same logical scope: it
+    /// emits no drift receipt for the base advance it observed.
+    #[tokio::test]
+    async fn late_read_cannot_publish_into_a_replacement_registration() {
+        let mut journey = RuntimeJourney::mount("runtime-late-read").await;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let circuit = github_stack_circuit_policy().unwrap();
+        let registration = journey
+            .coordinator
+            .register_scope(
+                journey.context.scope(),
+                GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+                circuit.clone(),
+            )
+            .unwrap();
+        let owner = Arc::new(journey.owner(&journey.scope, &registration, address));
+        let (arrived, request_arrived) = tokio::sync::oneshot::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let branch = journey
+            .scope
+            .branch_ref
+            .trim_start_matches("refs/heads/")
+            .to_owned();
+        let server = std::thread::spawn(move || {
+            serve_review_scans(&listener);
+            let (mut stack, _) = listener.accept().unwrap();
+            let _ = read_http_request_with_headers(&mut stack);
+            arrived.send(()).unwrap();
+            released.recv().unwrap();
+            write_http_json(&mut stack, &stack_response(ADVANCED_BASE, &branch));
+            serve_compare(&listener);
+        });
+
+        // The read is authorized by the probe registration, then held.
+        let (held_owner, context, request) = (
+            Arc::clone(&owner),
+            journey.context.clone(),
+            journey.request.clone(),
+        );
+        let held = tokio::spawn(async move { held_owner.refresh(&context, &request).await });
+        request_arrived.await.unwrap();
+
+        // The scope's policy changes while the read is in flight, which
+        // replaces the registration the read was authorized under.
+        let replacement = journey
+            .coordinator
+            .register_scope(
+                journey.context.scope(),
+                GitHubStackedPullRequestPolicyV1::Disabled,
+                circuit,
+            )
+            .unwrap();
+        release.send(()).unwrap();
+        let held = held.await.unwrap();
+        assert!(
+            held.has_usable_observation(),
+            "the review refresh itself still completes: {held:?}"
+        );
+        server.join().unwrap();
+
+        // The late read published nothing: it opened no drift receipt and
+        // wrote no provider snapshot anchor for the stack it observed.
+        let receipts = journey.drift_receipts().await;
+        assert!(
+            receipts.is_empty(),
+            "a superseded read must not publish drift: {receipts:?}"
+        );
+        let anchors = journey.stack_anchors().await;
+        assert!(
+            !anchors
+                .iter()
+                .any(|target| matches!(target, GitTopologyAnchorTargetV1::GitHubStackSnapshot(_))),
+            "a superseded read must not publish a provider snapshot: {anchors:?}"
+        );
+        drop(owner);
+        drop(registration);
+        drop(replacement);
+        assert_eq!(journey.coordinator.retained_scope_count(), 0);
+    }
+
+    /// A cold mount restores an interval's identity but not its prior provider
+    /// baseline. Its first sample must not close the interval, even when the
+    /// base advanced during the restart. Later live comparisons retain the
+    /// original trace until a stable pair actually proves closure.
+    #[tokio::test]
+    async fn restored_drift_waits_for_a_live_comparison_and_closes_its_original_trace() {
+        let mut journey = RuntimeJourney::mount("runtime-remount").await;
+        let probe = GitHubStackedPullRequestPolicyV1::ProbePrivatePreview;
+        let circuit = github_stack_circuit_policy().unwrap();
+        let branch = journey
+            .scope
+            .branch_ref
+            .trim_start_matches("refs/heads/")
+            .to_owned();
+
+        // The first mount observes the stack, then observes its base advance,
+        // which opens one drift interval. A third refresh sees the base
+        // advance again and must keep that one interval on its original trace.
+        let first = journey
+            .coordinator
+            .register_scope(journey.context.scope(), probe, circuit.clone())
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let first_branch = branch.clone();
+        let server = std::thread::spawn(move || {
+            serve_refresh(&listener, MERGE_BASE, &first_branch);
+            serve_refresh(&listener, ADVANCED_BASE, &first_branch);
+            serve_refresh(&listener, FURTHER_ADVANCED_BASE, &first_branch);
+        });
+        let owner = journey.owner(&journey.scope, &first, address);
+        for _ in 0..3 {
+            let outcome = owner.refresh(&journey.context, &journey.request).await;
+            assert!(outcome.has_usable_observation(), "{outcome:?}");
+        }
+        server.join().unwrap();
+        assert_eq!(journey.coordinator.retained_scope_count(), 1);
+        drop(owner);
+        drop(first);
+        assert_eq!(
+            journey.coordinator.retained_scope_count(),
+            0,
+            "retiring the mounted owner releases its scope state"
+        );
+
+        // The daemon restarts: the retired owner's receipts become durable
+        // before a fresh mount of the same scope reads them back.
+        journey.restart_observability().await;
+        // No in-memory coordinator state survives a daemon restart.
+        journey.coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
+        let second = journey
+            .coordinator
+            .register_scope(journey.context.scope(), probe, circuit)
+            .unwrap();
+        assert_eq!(journey.coordinator.retained_scope_count(), 1);
+        // The first post-restart sample has advanced again, but there is no
+        // retained snapshot to compare with. The second advances once more;
+        // the third is stable and can close the original interval.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let remount_branch = branch.clone();
+        let server = std::thread::spawn(move || {
+            serve_refresh(
+                &listener,
+                "ffffffffffffffffffffffffffffffffffffffff",
+                &remount_branch,
+            );
+            serve_refresh(
+                &listener,
+                "1111111111111111111111111111111111111111",
+                &remount_branch,
+            );
+            serve_refresh(
+                &listener,
+                "1111111111111111111111111111111111111111",
+                &remount_branch,
+            );
+        });
+        let owner = journey.owner(&journey.scope, &second, address);
+        for _ in 0..3 {
+            let outcome = owner.refresh(&journey.context, &journey.request).await;
+            assert!(outcome.has_usable_observation(), "{outcome:?}");
+        }
+        server.join().unwrap();
+
+        let receipts = journey.drift_receipts().await;
+        let base_advanced: Vec<_> = receipts
+            .iter()
+            .filter(|drift| drift.kind == StackDriftKindV1::BaseAdvanced)
+            .collect();
+        // A base that keeps advancing stays one interval: every receipt it
+        // produces, open or closed, carries the trace that opened it.
+        assert_eq!(
+            base_advanced.len(),
+            4,
+            "three observed advances and one proved close: {receipts:?}"
+        );
+        let first_observed = base_advanced[0].first_observed_micros;
+        assert!(
+            base_advanced
+                .iter()
+                .all(|drift| drift.first_observed_micros == first_observed),
+            "a persisting drift keeps its original trace instead of opening a new interval: {receipts:?}"
+        );
+        assert_eq!(base_advanced[0].state, IntervalStateV1::Open);
+        assert_eq!(base_advanced[1].state, IntervalStateV1::Open);
+        assert_eq!(base_advanced[2].state, IntervalStateV1::Open);
+        assert_eq!(base_advanced[3].state, IntervalStateV1::Closed);
+        drop(owner);
+        drop(second);
+        assert_eq!(journey.coordinator.retained_scope_count(), 0);
+    }
+
+    /// A provider read retains only its admitted state. Retiring the mounted
+    /// runtime must release the scope even while that read drains, and the old
+    /// read's eventual cleanup must leave a fresh mount usable.
+    #[tokio::test]
+    async fn a_draining_provider_read_cannot_retain_or_retire_a_remounted_owner() {
+        let journey = RuntimeJourney::mount("runtime-late-cleanup").await;
+        let probe = GitHubStackedPullRequestPolicyV1::ProbePrivatePreview;
+        let circuit = github_stack_circuit_policy().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let retired = journey
+            .coordinator
+            .register_scope(journey.context.scope(), probe, circuit.clone())
+            .unwrap();
+        let retired_owner = journey.owner(&journey.scope, &retired, address);
+        let draining_read = journey
+            .coordinator
+            .authorize_provider_read(journey.context.scope())
+            .unwrap()
+            .expect("the mounted probe registration admits a provider read");
+        drop(retired);
+        assert_eq!(journey.coordinator.retained_scope_count(), 1);
+        drop(retired_owner);
+        assert_eq!(
+            journey.coordinator.retained_scope_count(),
+            0,
+            "an admitted provider read must not keep its retired runtime mounted"
+        );
+
+        let replacement = journey
+            .coordinator
+            .register_scope(journey.context.scope(), probe, circuit)
+            .unwrap();
+        let replacement_owner = journey.owner(&journey.scope, &replacement, address);
+        drop(replacement);
+        drop(draining_read);
+        assert_eq!(
+            journey.coordinator.retained_scope_count(),
+            1,
+            "cleanup of the old read must not remove the new runtime's registration"
+        );
+        let branch = journey
+            .scope
+            .branch_ref
+            .trim_start_matches("refs/heads/")
+            .to_owned();
+        let server = std::thread::spawn(move || serve_refresh(&listener, MERGE_BASE, &branch));
+        let outcome = replacement_owner
+            .refresh(&journey.context, &journey.request)
+            .await;
+        assert!(outcome.has_usable_observation(), "{outcome:?}");
+        server.join().unwrap();
+        assert!(
+            journey.stack_anchors().await.iter().any(|target| {
+                matches!(target, GitTopologyAnchorTargetV1::GitHubStackSnapshot(_))
+            }),
+            "the replacement runtime must publish its provider snapshot"
+        );
+        drop(replacement_owner);
+        assert_eq!(
+            journey.coordinator.retained_scope_count(),
+            0,
+            "no scope state outlives the last mounted owner"
+        );
+    }
+
+    /// Many mounted runtimes each retain exactly their own scope, and dropping
+    /// them releases every scope.
+    #[tokio::test]
+    async fn mounted_runtimes_release_every_scope_on_drop() {
+        let journey = RuntimeJourney::mount("runtime-many").await;
+        let probe = GitHubStackedPullRequestPolicyV1::ProbePrivatePreview;
+        let circuit = github_stack_circuit_policy().unwrap();
+        let address = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let mut owners = Vec::new();
+        for index in 0..24 {
+            let mut scope = journey.scope.clone();
+            scope.worktree_id =
+                tracedecay_domain::WorktreeId::new(format!("worktree.github.runtime-many.{index}"))
+                    .unwrap();
+            let resolved = ResolvedScope::new(
+                scope.project_id.clone(),
+                scope.repository_id.clone(),
+                scope.worktree_id.clone(),
+                Some(RefId::new(scope.branch_ref.clone()).unwrap()),
+            )
+            .unwrap();
+            let registration = journey
+                .coordinator
+                .register_scope(&resolved, probe, circuit.clone())
+                .unwrap();
+            owners.push(journey.owner(&scope, &registration, address));
+            drop(registration);
+            assert_eq!(
+                journey.coordinator.retained_scope_count(),
+                index + 1,
+                "each mounted runtime retains exactly its own scope"
+            );
+        }
+        drop(owners);
+        assert_eq!(
+            journey.coordinator.retained_scope_count(),
+            0,
+            "no scope state outlives the last mounted owner"
         );
     }
 }
