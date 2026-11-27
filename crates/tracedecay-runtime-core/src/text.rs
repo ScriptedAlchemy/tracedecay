@@ -56,7 +56,7 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Formats a number with comma separators (e.g. 243302 -> "243,302").
+/// Formats a number with comma separators (for example, 243302 becomes "243,302").
 pub fn format_number(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::new();

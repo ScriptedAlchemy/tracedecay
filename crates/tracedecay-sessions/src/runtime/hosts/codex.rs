@@ -143,7 +143,7 @@ static CODEX_SCOPE_MATCHERS: LazyLock<ProjectRootMatcherCache> =
     LazyLock::new(ProjectRootMatcherCache::default);
 
 const PROVIDER: &str = "codex";
-/// `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` → date dirs add depth.
+/// `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`: the date directories add depth.
 const MAX_SCAN_DEPTH: u8 = 6;
 /// Bound on enumerated transcript directories (a decade of daily Codex
 /// directories is ~3700; this cap only guards against pathological trees).
@@ -2482,7 +2482,7 @@ fn retained_scan_step(
                                     }
                                     // Commit the closing witness so the idle
                                     // probe compares against the state this
-                                    // sweep actually certified.
+                                    // sweep certified.
                                     if let Some(closing) = closing
                                         && let Some(identity) =
                                             scan.directories[directory_index].identity.as_mut()
@@ -2771,7 +2771,7 @@ fn retained_scan_step(
         // This pass ran out of budget mid-sweep. Echoing a Complete frontier
         // back would let a truncated pass keep a sweep-complete watermark the
         // sweep has not earned, so coverage stays in-progress until a pass
-        // actually finishes the walk.
+        // finishes the walk.
         next_frontier: frontier.for_coverage(false),
         selected_sources,
         _shared_page_pin: None,

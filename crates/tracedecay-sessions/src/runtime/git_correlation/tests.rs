@@ -130,7 +130,7 @@ fn canonical_worktree_key_reresolves_a_path_created_after_the_miss() {
     // First operation: the path does not exist, the spelling stays lexical.
     assert_eq!(canonical_worktree_key(&spelling).unwrap(), spelling);
     // Next operation after the directory is created resolves the canonical
-    // identity — a stale miss may not be retained across operations.
+    // identity. A stale miss may not be retained across operations.
     std::fs::create_dir(&worktree).unwrap();
     let canonical = std::fs::canonicalize(&worktree).unwrap();
     assert_eq!(

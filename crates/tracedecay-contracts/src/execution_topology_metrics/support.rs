@@ -332,7 +332,7 @@ pub(super) const fn count_state(complete: bool) -> CoverageStateV1 {
 }
 
 /// A distribution is `Known` only when the whole event population was read and
-/// every eligible case was actually observed; any shortfall is `Partial`.
+/// every eligible case was observed; any shortfall is `Partial`.
 pub(super) const fn distribution_state(
     complete: bool,
     eligible: u64,
@@ -360,7 +360,7 @@ pub(super) const fn count_refusal(
     None
 }
 
-/// A distribution additionally needs 90% of its eligible population observed.
+/// A distribution also needs 90% of its eligible population observed.
 pub(super) fn distribution_refusal(
     complete: bool,
     eligible: u64,
@@ -375,7 +375,7 @@ pub(super) fn distribution_refusal(
     None
 }
 
-/// A rate additionally needs the support floor of eligible cases.
+/// A rate also needs the support floor of eligible cases.
 pub(super) fn rate_refusal(
     complete: bool,
     eligible: u64,

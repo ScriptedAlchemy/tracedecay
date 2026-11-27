@@ -176,7 +176,7 @@ impl IdentityIndexCache {
         // cache, so a matching epoch already proves the store's nodes are the
         // ones this index was built from. The cardinality re-check that used
         // to run here walked `all_labels()` and split every key on the
-        // composite separator - O(label universe) per page, which made the
+        // composite separator, costing O(label universe) per page, which made the
         // catalog warm quadratic again once paging itself was O(page): 1079
         // counts x 633ms measured against a 430k-chunk generation. The count is
         // no longer computed or retained: the epoch alone authorizes cache hits.

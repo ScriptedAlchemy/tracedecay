@@ -631,7 +631,7 @@ fn excessive_structure_is_complete_malformed_coverage() {
 fn fixture_backed_hermes_tool_call_reaches_canonical_envelope() {
     // Exact assistant tool-call shape from
     // tests/transcript_ingest_suite/hermes.rs::write_hermes_profile.
-    // Provider-parser path: native_observation_record → normalize_native_observation.
+    // Provider-parser path: native_observation_record, then normalize_native_observation.
     let input: Value = serde_json::from_str(include_str!(
         "../../../../../../tests/fixtures/provider_normalization/hermes/assistant_tool_call.input.json"
     ))
@@ -1216,7 +1216,7 @@ async fn hermes_reader_is_immutable_policy_bound_and_never_creates_files() {
 /// `cfg(unix)` is a compile gate, not a filesystem capability: APFS refuses
 /// such a name outright with `EILSEQ`, so a macOS run failed at the fixture
 /// instead of exercising the reader. Probing keeps the coverage everywhere the
-/// bytes are really accepted and makes the skip visible where they are not.
+/// bytes are accepted and makes the skip visible where they are not.
 #[cfg(unix)]
 fn non_utf8_file_names_supported(directory: &std::path::Path) -> bool {
     use std::os::unix::ffi::OsStringExt;

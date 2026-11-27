@@ -130,7 +130,7 @@ struct OpenedGraphState {
     state: FormatState,
     quarantined_projections: BTreeSet<(GraphNamespace, GraphProjectionId)>,
     /// The container the engine loaded, as its own handle reported it the
-    /// moment the open returned -- before this crate collapses a replayed WAL
+    /// moment the open returned, before this crate collapses a replayed WAL
     /// or initializes the format, either of which may checkpoint and move the
     /// header away from the one the marker was written against.
     identity: Option<ContainerIdentity>,
@@ -315,7 +315,7 @@ impl GraphDb {
     ) -> Result<Arc<Self>, GraphDbError> {
         let validated = options.validate(Some(persistent_store_state))?;
         // No engine is resident yet, so no marker is admitted: `ensure_opened`
-        // binds the proofs to the container the engine actually opens.
+        // binds the proofs to the container the engine opens.
         let markers = GenerationMarkers::new(validated.config.path.as_deref());
         Ok(Arc::new(Self {
             inner: Arc::new(Inner {
@@ -1090,8 +1090,8 @@ impl GraphDb {
         test_seams::fire(test_seams::Seam::MarkerPublish);
         // The container is closed and synced, so the identity the engine's own
         // handle reports now is the one the next open will read from the same
-        // bytes. Publishing the marker here -- and only here, under that
-        // identity -- is what makes the record bind the final bytes rather
+        // bytes. Publishing the marker here, and only here under that
+        // identity, is what makes the record bind the final bytes rather
         // than some intermediate state a later write would have invalidated,
         // and bind them to this container rather than to whatever file the
         // path names by the time a stat could run.
@@ -1605,7 +1605,7 @@ impl GraphDb {
     }
 
     /// Best-effort profiler observation that cannot change graph authority or
-    /// operation outcomes. A closed or poisoned database simply has no
+    /// operation outcomes. A closed or poisoned database has no
     /// trustworthy memory census to report.
     #[inline(always)]
     pub(crate) fn record_memory_checkpoint(&self, phase: crate::observe::GrafeoMemoryPhase) {
@@ -1966,9 +1966,9 @@ pub(crate) fn sync_wal(database: &GrafeoDB) -> Result<(), GraphDbError> {
 }
 
 /// Deterministic barriers on the engine lifecycle, for tests that must act
-/// between two runtime steps -- replace the container between marker admission
-/// and the engine open, or between the engine close and the marker publish --
-/// without sleeping or racing a second thread.
+/// between two runtime steps, such as replacing the container between marker
+/// admission and the engine open or between the engine close and the marker
+/// publish, without sleeping or racing a second thread.
 ///
 /// Hooks are thread-local, like the verification counters: every engine open
 /// and close runs synchronously on the calling thread, so a hook sees exactly

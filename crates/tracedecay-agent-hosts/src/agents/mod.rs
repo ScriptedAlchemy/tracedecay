@@ -993,7 +993,7 @@ pub fn select_detected_integrations(home: &Path, installed: &[String]) -> Option
 /// What to tell a user whose machine has no supported agent installed yet.
 ///
 /// Built from [`all_integrations`] so the list cannot drift from the set
-/// `tracedecay install` actually detects, and it names the directory that was
+/// `tracedecay install` detects, and it names the directory that was
 /// searched: an unexpected `HOME` is the other reason this comes up empty.
 pub fn no_detected_integrations_notice(home: &Path) -> String {
     let integrations = all_integrations();

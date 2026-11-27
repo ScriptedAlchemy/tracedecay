@@ -156,7 +156,7 @@ pub(super) async fn project_memory_graph(
     // cannot repair them. An unavailable head is probed once more first:
     // when the retry reads the head, the read serves it without the pass at
     // all, while a second unavailable proves the graph authority itself is
-    // down — refuse promptly instead of paying the pass's owner-wide source
+    // down, so refuse promptly instead of paying the pass's owner-wide source
     // load on every read while the mount cannot answer.
     let mut unavailable_head_retries = 0u8;
     let verified_snapshot = loop {

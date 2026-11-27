@@ -370,7 +370,7 @@ where
         };
         // The store begins the window at the committed projection frontier,
         // which may have advanced past the caller's view but never past the
-        // requested target; the handle binds the window that actually began.
+        // requested target; the handle binds the window that began.
         let effective = receipt.target_frontier();
         let requested = target.frozen_frontier();
         if receipt.session_id() != target.session_id()

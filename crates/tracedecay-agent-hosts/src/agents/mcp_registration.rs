@@ -327,7 +327,7 @@ pub fn doctor_check_mcp_registration(
 /// Shared doctor for host prompt files that must contain the word `tracedecay`.
 ///
 /// Vibe (`prompts/cli.md`) and OpenCode (`AGENTS.md`) use the same
-/// exists → contains → pass/fail/warn shape.
+/// exists, then contains, then pass/fail/warn shape.
 pub(crate) fn doctor_check_prompt_contains_tracedecay(
     dc: &mut DoctorCounters,
     prompt_path: &Path,

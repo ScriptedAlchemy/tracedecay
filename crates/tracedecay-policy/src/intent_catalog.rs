@@ -1,7 +1,7 @@
 //! The intent catalog: the user-visible text, skill, and expected tools for
 //! every [`ContextScoutIntentKindV1`].
 //!
-//! This is the single source for both the hook hint surface and the Context
+//! This is the single source for both the hook hint and the Context
 //! Scout intent pass. The text is mirrored by `evals/agent_adoption/grade.py`
 //! and hint settlement credits a later call against `expected_tools`, so any
 //! wording change here is a behavior change in both places.
@@ -377,7 +377,7 @@ pub fn expected_tools_for_key(key: &str) -> Option<&'static [&'static str]> {
 }
 
 /// The context line with its bundled-skill trigger, exactly as the hook hint
-/// surface renders it.
+/// renders it.
 pub fn suggestion_context(intent: ContextScoutIntentKindV1) -> String {
     let entry = entry(intent);
     format!("{}\nSkill: tracedecay:{}.", entry.context, entry.skill)

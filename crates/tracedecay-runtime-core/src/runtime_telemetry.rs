@@ -219,7 +219,7 @@ pub struct DatabaseSnapshot {
     pub generation_census: GenerationCensusSnapshot,
     /// Live reader-pool occupancy for this store, when the pool is attached.
     ///
-    /// Reader saturation is the failure users actually hit, a query reports
+    /// Reader saturation is the failure users hit, a query reports
     /// `reader acquisition saturated` and there is otherwise nothing to look
     /// at. This is the after-the-fact evidence: where the workers went, and
     /// whether anyone is queued behind them.

@@ -223,7 +223,7 @@ pub(crate) fn record_grafeo_memory(
 /// that assert on exact counts, and the work they count runs synchronously on
 /// whichever thread called into the store. Process-global counters therefore
 /// let a concurrently running test's publication land inside another test's
-/// reading -- a flake that tracks the scheduler rather than the code under
+/// reading, a flake that tracks the scheduler rather than the code under
 /// test. Scoping to the calling thread makes each reading exactly the work
 /// that thread drove, at any `--test-threads`.
 ///

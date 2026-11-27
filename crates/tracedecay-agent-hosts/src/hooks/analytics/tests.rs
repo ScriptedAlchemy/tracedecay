@@ -1315,7 +1315,7 @@ fn readiness_aggregate_bounds_untrusted_hook_dimensions() {
 /// The readiness fold is only reachable through the application port, and the
 /// port is only answerable once a composition mounts it. Mounting is
 /// process-global, so this test proves the mounted composition answers real
-/// `hook_completed` rows — and that a second mount is satisfied rather than a
+/// `hook_completed` rows, and that a second mount is satisfied rather than a
 /// conflict.
 #[test]
 fn installing_the_projection_answers_readiness_through_the_application_port() {

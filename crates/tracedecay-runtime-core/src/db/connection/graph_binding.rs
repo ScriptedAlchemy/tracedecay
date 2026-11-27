@@ -161,7 +161,7 @@ impl Database {
     /// Issues graph work through the exact weak map binding.
     ///
     /// The returned value is non-cloneable and keeps the database client
-    /// alive only while graph work is actually in progress. Its graph port is
+    /// alive only while graph work is in progress. Its graph port is
     /// supplied by the daemon's map owner, which must issue any native graph
     /// lease per operation and therefore remains retirement-fence visible.
     pub fn issue_memory_graph_runtime_operation(

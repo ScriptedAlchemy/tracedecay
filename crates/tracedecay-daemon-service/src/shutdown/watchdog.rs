@@ -13,7 +13,7 @@
 //! Semantics: arming happens exactly when the daemon commits to exiting (the
 //! accept loop has ended). From that instant the process has
 //! [`shutdown_exit_bound`] of wall clock to finish the graceful drain and
-//! exit on its own; a clean exit simply wins the race and the thread dies
+//! exit on its own; a clean exit wins the race and the thread dies
 //! with the process. The watchdog then logs one typed receipt and exits with
 //! [`DRAIN_BOUND_EXIT_CODE`] no later than the same absolute bound. Work
 //! abandoned this way tears recoverably (crash-atomic checkpoints), which is

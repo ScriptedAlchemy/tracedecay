@@ -30,7 +30,7 @@ pub enum NativeHookSignalV1 {
 }
 
 /// OpenCode's event bus and direct tool hook are distinct native plugin
-/// surfaces. The caller selects the callback it received; no synthetic
+/// interfaces. The caller selects the callback it received; no synthetic
 /// discriminator is inserted into provider payload bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenCodePluginSurfaceV1 {
@@ -248,7 +248,7 @@ pub fn decode_native_hook_event(
 }
 
 /// OpenCode plugin callbacks enter here directly instead of through
-/// [`decode_native_hook_event`], so this surface needs its own decode
+/// [`decode_native_hook_event`], so this path needs its own decode
 /// boundary to stay visible.
 #[tracing::instrument(name = "hooks.native.decode_plugin_event", level = "trace", skip_all)]
 pub fn decode_opencode_plugin_event(

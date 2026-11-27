@@ -26,7 +26,7 @@ pub(crate) struct AdmittedSourceAuthority {
 impl AdmittedSourceAuthority {
     /// Freezes the runtime's answers after validating its claimed identity
     /// against the admitted scope. Identity is denied before any other
-    /// runtime surface is consulted.
+    /// runtime method is consulted.
     pub(crate) fn capture(
         context: &RequestContext,
         source: SourceReadContext,

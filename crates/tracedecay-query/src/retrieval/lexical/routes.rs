@@ -406,7 +406,7 @@ impl LexicalRoutingV1 {
     /// `camelCase`, `a::b`, `limit-cap.ts`) after the caller's anchors, up to
     /// the anchor cap.
     /// An exact symbol-name hit on an ordinary task word would otherwise
-    /// outrank the one symbol the task actually names.
+    /// outrank the one symbol the task names.
     #[must_use]
     pub fn with_task_identifiers(mut self, task: &str) -> Self {
         for (_, token) in technical_tokens(task) {

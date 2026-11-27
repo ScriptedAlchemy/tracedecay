@@ -107,7 +107,7 @@ pub enum HookEventSupportV1 {
 }
 
 /// Checked-in native host matrix. `Unavailable` is truthful absence and never
-/// permission to infer an event from command text or another host surface.
+/// permission to infer an event from command text or another host interface.
 pub const fn stock_event_support(
     host: NativeHostIdentityV1,
     family: HookEventFamily,

@@ -1044,7 +1044,7 @@ pub fn cursor_project_slug(project_root: &Path) -> Option<String> {
 /// Enumerate every *existing* directory that [`cursor_project_slug`] would
 /// encode to `slug`, by walking the filesystem from `project_root`'s root and
 /// re-grouping dash-separated tokens into path components (pruned to
-/// directories that actually exist). Returns `None` when the probe budget is
+/// directories that exist). Returns `None` when the probe budget is
 /// exhausted, which callers must treat as "ambiguous".
 fn decode_slug_candidates(project_root: &Path, slug: &str) -> Option<Vec<PathBuf>> {
     let mut base = PathBuf::new();

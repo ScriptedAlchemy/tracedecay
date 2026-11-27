@@ -341,7 +341,7 @@ impl FeedbackPublicationV1 {
 
 /// Result of the daemon-serialized publication compare-and-insert.
 /// `Duplicate` is reserved for a completed result or its exact replay.
-/// `Reused` carries the actual committed incomplete result, preserving its
+/// `Reused` carries the committed incomplete result, preserving its
 /// read handles without inserting a false identity or claiming remote success.
 /// Cancellation, timeout and unavailable states do not write a publication.
 #[derive(Clone, Debug, PartialEq, Eq)]

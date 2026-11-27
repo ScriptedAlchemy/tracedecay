@@ -929,7 +929,7 @@ fn warn_isolated_source(path: &Path, failure_kind: &'static str) {
 }
 
 /// A wire's session identity: its session, its agent, and whether that agent
-/// is the session's main wire — the one file that is the session transcript.
+/// is the session's main wire, the one file that is the session transcript.
 fn kimi_session_identity(path: &Path) -> TranscriptIngestResult<(String, String, bool)> {
     let session_dir = path
         .parent()

@@ -69,7 +69,7 @@ pub fn classify(tool_names: &[&str], bash_commands: &[&str]) -> TaskCategory {
         return TaskCategory::Conversation;
     }
 
-    // Agent tool → delegation
+    // The Agent tool means delegation.
     if tool_names.contains(&"Agent") {
         return TaskCategory::Delegation;
     }

@@ -51,7 +51,7 @@ pub struct DaemonRuntimeHealthSignalV1 {
 /// authority signals prove a failure is `Stuck`; one that is serving but has not
 /// converged is `Degraded`; one that is serving, converged, and clean is
 /// `Healthy`, but only with complete coverage when both storage probes were
-/// actually observed. A missing storage probe drops coverage to partial (an
+/// observed. A missing storage probe drops coverage to partial (an
 /// honest "healthy so far as observed", never a healthy-complete claim).
 /// Session temporal health only ever proves a failure here.
 #[must_use]

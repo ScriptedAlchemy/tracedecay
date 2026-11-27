@@ -93,7 +93,7 @@ pub trait RemoteRecoveryProjectLifecycle: Send + Sync {
 /// Sanity ceiling on concurrently mounted project runtime owners, not a bound
 /// on how many projects a profile may enrol.
 ///
-/// This was 8, which is where enrolment actually stopped: a profile with four
+/// This was 8, which is where enrolment stopped: a profile with four
 /// projects was refused with `graph capacity budget exhausted (limit 8)`, and
 /// once the budget was exhausted even a read-only `projects list` failed. Two
 /// graph owners per mounted project plus two profile-wide ones is exactly 8,
@@ -103,7 +103,7 @@ pub trait RemoteRecoveryProjectLifecycle: Send + Sync {
 /// these owners: capacity eviction cannot reclaim a mounted project, because
 /// it holds its owner attachment for the life of the mount and so is never a
 /// candidate. A ceiling this high therefore lets residency grow with the
-/// number of projects actually touched. That is the deliberate trade,
+/// number of projects touched. That is the deliberate trade,
 /// refusing the fourth project was the worse failure, and the real fix is
 /// idle-project hibernation, which is follow-up work.
 ///
@@ -119,7 +119,7 @@ const PROFILE_WIDE_GRAPH_DB_OWNERS: usize = 2;
 const PROJECT_GRAPH_OWNER_ADMISSION_DEMAND: usize = 3;
 
 /// Graph registry slot ceiling, derived so the project ceiling above is
-/// actually reachable. Written as arithmetic rather than a literal because the
+/// reachable. Written as arithmetic rather than a literal because the
 /// profile-wide owners take their slots first: a hand-picked number is short by
 /// exactly that many, and the last project then fails inside the graph registry
 /// before ever reaching `MAX_RETAINED_PROJECT_RUNTIME_OWNERS`.

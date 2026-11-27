@@ -1845,7 +1845,7 @@ fn lexical_admission_rank(
 // name this row. An incidental prose word (`get`) cannot outrank stronger
 // evidence just because a method has that name. A short alias still names
 // the row when every term is a subtoken of the declared identifier
-// (`cache grant` → `VerifiedCacheGrantSnapshotV1`).
+// (`cache grant` matches `VerifiedCacheGrantSnapshotV1`).
 fn lexical_definition_match(
     row: &ArtifactRowV1,
     prepared: &PreparedLexicalQueryV1<'_>,

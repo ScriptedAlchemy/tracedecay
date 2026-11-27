@@ -416,7 +416,7 @@ pub fn compute_profile_material_digest(
 /// Hash the declared corpus and every byte-exact checked-in document.
 ///
 /// Including document metadata prevents ambiguous concatenation while each
-/// content digest binds the bytes actually read from `repo_root`.
+/// content digest binds the bytes read from `repo_root`.
 pub fn compute_corpus_digest(
     repo_root: &Path,
     workload: &CandidateWorkloadV1,
@@ -1083,7 +1083,7 @@ mod need_provenance_tests {
         );
     }
 
-    /// Every checked-in quote resolves in the bytes the package actually ships,
+    /// Every checked-in quote resolves in the bytes the package ships,
     /// so provenance is verified against the evaluated corpus rather than a
     /// working-tree copy.
     #[test]

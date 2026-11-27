@@ -884,8 +884,8 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     // The relational open never waits for the derived graph: the memory-graph
     // attachment is a retained background task, so the operation reads
     // `Unbound` until that task settles. Recovery then rebuilds the corrupt
-    // derived graph and binds it -- on Linux roughly one tick after the mount
-    // returns, on macOS before the first read -- so asserting the warm-up
+    // derived graph and binds it. On Linux that happens roughly one tick after the
+    // mount returns, and on macOS before the first read, so asserting the warm-up
     // window is asserting a race. Wait for the settled outcome instead, and
     // keep refusing the one result that would mean the relational owner was
     // damaged.
@@ -975,8 +975,8 @@ async fn corrupt_session_relation_graph_preserves_relational_session_database() 
     // is a retained background task, so a lease issued the instant the mount
     // returns reads the warming window and reports the graph unavailable.
     // Recovery then rebuilds the corrupt graph and binds it into the same
-    // registered owner every lease shares -- on Linux a tick after the mount
-    // returns, on macOS before this first read -- so asserting the warming
+    // registered owner every lease shares. On Linux that happens a tick after the
+    // mount returns, and on macOS before this first read, so asserting the warming
     // window is asserting a race. Settle the task through the typed signal
     // that exists for exactly this fixture, then assert the terminal outcome.
     reopened_registry

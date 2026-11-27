@@ -121,7 +121,7 @@ const fn source_census(outcome: &RetrieverOutcome<()>) -> SourceCensusV1 {
     }
 }
 
-/// A lane counts as admitted only when it actually contributed evidence. A
+/// A lane counts as admitted only when it contributed evidence. A
 /// denied, unavailable, or cancelled lane was requested, not admitted.
 const fn lane_was_admitted(census: SourceCensusV1) -> bool {
     matches!(census, SourceCensusV1::Observed | SourceCensusV1::Stale)

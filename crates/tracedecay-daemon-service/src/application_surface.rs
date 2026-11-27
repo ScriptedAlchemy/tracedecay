@@ -322,7 +322,7 @@ pub fn assemble_http_application_router(
 ///
 /// It is the core route subset of the application Work router: the same
 /// descriptor, the same owner, the same dispatch and problem taxonomy. The
-/// attempt-runtime routes are simply not registered here, so the lease protocol
+/// attempt-runtime routes are not registered here, so the lease protocol
 /// is unreachable from the dashboard rather than merely undocumented.
 #[tracing::instrument(
     name = "application_surface.http.dashboard_work_router",

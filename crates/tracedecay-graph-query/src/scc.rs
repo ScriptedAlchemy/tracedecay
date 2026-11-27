@@ -206,7 +206,7 @@ fn intern<'a, N: Eq + Hash>(
 
 /// True when an SCC represents a genuine cycle. A single-node component
 /// is only cyclic if it has an explicit self-edge in `adj`; otherwise
-/// it's just an isolated vertex. Components of size >= 2 are always
+/// it is an isolated vertex. Components of size >= 2 are always
 /// cyclic by Tarjan's definition.
 #[allow(clippy::implicit_hasher)]
 pub fn is_cyclic_scc<N>(scc: &[N], adj: &HashMap<N, HashSet<N>>) -> bool

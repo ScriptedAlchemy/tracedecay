@@ -6,7 +6,7 @@
 //! `droid mcp …`). This module records why OpenCode is the exception, and
 //! encodes the parts of that decision that must not rot silently.
 //!
-//! # What `opencode plugin` actually is
+//! # What `opencode plugin` is
 //!
 //! `opencode plugin add|remove|list|check|update` (OpenCode 2.x) is a
 //! *package* manager: it installs npm names with versions, tags, or ranges

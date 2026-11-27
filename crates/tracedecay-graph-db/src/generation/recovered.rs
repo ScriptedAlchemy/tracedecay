@@ -289,8 +289,8 @@ impl EncodedProofChunk {
 /// chunks are still encoding; the shared abort flag then stops in-flight
 /// encodes between rows instead of letting them finish stale work.
 ///
-/// The drain runs queued local work between polls so a Rayon-worker caller
-/// — the publication lane almost always is — still makes progress on a
+/// The drain runs queued local work between polls so a Rayon-worker caller,
+/// which the publication lane almost always is, still makes progress on a
 /// one-worker or saturated pool. When `yield_local` reports `Idle` or the
 /// caller is not a pool worker, it parks on a bounded receive instead of
 /// spinning, and `check` still runs while the oldest encode is outstanding.

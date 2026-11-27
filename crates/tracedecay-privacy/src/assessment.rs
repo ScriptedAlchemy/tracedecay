@@ -128,7 +128,7 @@ impl SanitizationCalibrationProfileV1 {
 ///
 /// Scores are fixed-point per-mille integers, never floats: findings are
 /// sorted, deduplicated, and compared for equality, and a float would make all
-/// three unsound while adding no precision a detector can actually justify.
+/// three unsound while adding no precision a detector can justify.
 ///
 /// No variant has a field for matched text, so an assessment cannot leak the
 /// value it describes.

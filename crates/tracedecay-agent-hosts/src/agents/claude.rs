@@ -222,7 +222,7 @@ impl AgentIntegration for ClaudeIntegration {
     ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
     {
         let claude_md_path = project_root.join(".claude").join("CLAUDE.md");
-        // Only refresh a project that is actually tracedecay-managed. A project
+        // Only refresh a project that is tracedecay-managed. A project
         // qualifies when its local `.mcp.json` declares the tracedecay server
         // (the install/init signal) or its `.claude/CLAUDE.md` references
         // tracedecay. An unrelated project `.claude/CLAUDE.md` with neither

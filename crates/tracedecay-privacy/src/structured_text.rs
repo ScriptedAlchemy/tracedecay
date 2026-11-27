@@ -1051,7 +1051,7 @@ fn closing_quote(body: &[u8], quote: u8) -> Option<usize> {
     None
 }
 
-/// First occurrence of `key` in `raw` that is actually a key, not incidental
+/// First occurrence of `key` in `raw` that is a key, not incidental
 /// text mentioning the key's name.
 ///
 /// A qualifying occurrence sits at the start of its line, modulo leading

@@ -821,7 +821,7 @@ async fn retention_protected_generations(
 /// files, not `SQLite` tables, so dbstat/table attribution cannot observe them.
 ///
 /// The census is metadata-only by construction: gating this family on a byte
-/// budget made the finding unreachable on every profile that actually had
+/// budget made the finding unreachable on every profile that had
 /// something to report, because one sealed generation alone exceeds any budget
 /// small enough to be called cheap.
 #[tracing::instrument(

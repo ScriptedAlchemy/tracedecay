@@ -117,9 +117,9 @@ fn capability(
             // index transactions implement all three, and callers reach them by
             // naming the operation on `git_preview`/`git_apply`, which own the
             // transport surface. Labelling them `NotImplemented` was false. They
-            // stay non-callable as direct catalog routes -- and stay registered so
+            // stay non-callable as direct catalog routes. They stay registered so
             // a direct route resolves to a typed unavailable decision rather than
-            // an unknown capability -- but the reason now says why.
+            // an unknown capability, and the reason now says why.
             availability: AvailabilityContract::Unavailable {
                 reason: UnavailabilityReason::ReachedThroughAnotherCapability,
             },

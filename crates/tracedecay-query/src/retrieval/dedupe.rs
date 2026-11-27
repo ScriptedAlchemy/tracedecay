@@ -47,7 +47,7 @@ impl DeterministicDedupe {
     /// Select one representative per evidence-backed logical-copy cluster.
     ///
     /// The input is already in fused order, so a cluster's representative is
-    /// simply its first member and the survivors keep that order without
+    /// its first member and the survivors keep that order without
     /// another sort. Collapsed copies move into the decision that excluded
     /// them, keeping the comparator provenance they already carry.
     #[tracing::instrument(name = "query.dedupe.select", level = "trace", skip_all)]

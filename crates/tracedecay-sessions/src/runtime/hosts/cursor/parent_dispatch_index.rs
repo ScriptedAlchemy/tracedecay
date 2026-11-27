@@ -35,7 +35,7 @@ use crate::runtime::source::{
 /// process sees tens of live sessions, not hundreds; 512 is an order of
 /// magnitude above that so a warming sweep across many projects still
 /// hits, while a pathological long-lived daemon cannot grow without bound.
-/// Eviction only drops memoized (agent → model) maps; the next lookup
+/// Eviction only drops memoized (agent to model) maps; the next lookup
 /// rescans that parent from byte zero.
 const MAX_PARENT_ENTRIES: usize = 512;
 

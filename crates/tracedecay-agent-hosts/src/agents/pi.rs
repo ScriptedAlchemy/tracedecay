@@ -6,14 +6,14 @@
 //! therefore deploys a first-party extension plus a companion skill into the
 //! Pi agent directory:
 //!
-//! - `~/.pi/agent/extensions/tracedecay/` — the `Core` component: `index.ts`
+//! - `~/.pi/agent/extensions/tracedecay/`: the `Core` component: `index.ts`
 //!   (the extension), its `package.json`, and `schemas.json`, the tool
 //!   definitions generated from the MCP catalog exactly as the Hermes bridge
 //!   renders them. The extension registers one Pi tool per catalog entry,
 //!   bridged over `tracedecay tool` through the daemon socket, forwards Pi's
 //!   `session_start` and `agent_end` events to `hook-pi-event`, and adds the
 //!   `/tracedecay{, -sync, -version}` commands.
-//! - `~/.pi/agent/skills/tracedecay-cli/SKILL.md` — the `Agent` component,
+//! - `~/.pi/agent/skills/tracedecay-cli/SKILL.md`: the `Agent` component,
 //!   the routing skill that tells the model which tool answers which task.
 //!
 //! The receipt-backed component transaction owns those bytes under

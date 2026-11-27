@@ -2026,7 +2026,7 @@ struct CheckedDigestWriter<'a> {
     rows: GraphRowDigestSum,
     bytes_since_check: u64,
     /// Every byte fed to the digest. Counted here rather than derived from row
-    /// counts so the verify outcome reports the work the proof actually did.
+    /// counts so the verify outcome reports the work the proof did.
     total_bytes: u64,
     check: &'a dyn Fn() -> Result<(), GraphDbError>,
     failure: Option<GraphDbError>,

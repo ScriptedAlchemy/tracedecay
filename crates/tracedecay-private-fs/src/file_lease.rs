@@ -17,7 +17,7 @@ pub struct FileLease {
 }
 
 impl FileLease {
-    /// Adopts `file`, whose lock the caller has just acquired. `label` names
+    /// Adopts `file`, whose lock the caller has acquired. `label` names
     /// the lease in the warning logged if the implicit release on drop fails.
     pub fn held(file: File, label: &'static str) -> Self {
         Self {

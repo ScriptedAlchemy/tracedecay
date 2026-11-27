@@ -1,4 +1,4 @@
-//! Capability-relative durable directory primitives shared by the quarantine
+//! Capability-relative durable directory operations shared by the quarantine
 //! and retirement authorities: atomic no-replace rename between already-open
 //! parent capabilities, sibling replacement, directory metadata sync, recursive no-follow removal,
 //! and create-or-open of one entry that survives the Darwin create race.
@@ -157,7 +157,7 @@ fn look_again_on_not_found<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io:
 /// Atomically renames one directory entry between already-open parent
 /// capabilities without allowing an occupied destination to be replaced.
 /// Both names must be single, unnormalized directory entries, not paths.
-/// Platforms without a suitable primitive fail closed: retaining bytes is
+/// Platforms without an atomic no-replace rename fail closed: retaining bytes is
 /// always preferable to risking a replacement.
 pub fn rename_noreplace(
     from_parent: &Dir,
@@ -250,7 +250,7 @@ fn require_entry_name(name: &OsStr) -> io::Result<()> {
 }
 
 /// Resolves an open directory capability back to its live filesystem path so
-/// path-based Win32 primitives can address entries below it.
+/// path-based Win32 calls can address entries below it.
 #[cfg(windows)]
 fn dir_path(directory: &Dir) -> io::Result<std::path::PathBuf> {
     use std::os::windows::ffi::OsStringExt;
@@ -522,7 +522,7 @@ impl HeldDirectory {
     /// occupied the name at creation, then opens the entry without following
     /// a link and holds it. Directory creation and acquisition are separate
     /// operating-system operations; a concurrent substitution between them
-    /// remains outside this primitive's authority.
+    /// remains outside this function's authority.
     pub fn create_exclusive(root_path: &Path, name: &OsStr) -> io::Result<Self> {
         require_entry_name(name)?;
         let root = open_root_nofollow(root_path)?;

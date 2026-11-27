@@ -8,7 +8,7 @@ under an isolated `$XDG_CONFIG_HOME`, during a real
 The plugin recorded every `execute.after` tool hook and every event on
 `ctx.event.subscribe()`. The public V2 stream emitted no `file.edited`,
 `filesystem.changed`, `session.idle`, `session.status`, or `lsp.updated` event
-for that run; edits surface only through the tool hook, and the turn boundary
+for that run; edits appear only through the tool hook, and the turn boundary
 is the durable `session.execution.succeeded` event, which carries no
 `location`. The bundle keeps one edit tool callback, one non-mutating tool
 callback, and that boundary event.

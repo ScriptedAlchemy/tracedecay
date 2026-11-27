@@ -217,7 +217,7 @@ where
 /// Every snapshot provider drives the same loop: bound discovery, defer when
 /// discovery truncated, then charge each discovered path against the sweep
 /// budget before loading and admitting its records. Providers supply only what
-/// actually differs, how paths are discovered, which files make up a path's
+/// differs, how paths are discovered, which files make up a path's
 /// source, how a path's input bytes are charged, and how a path becomes
 /// complete source-generation batches.
 ///

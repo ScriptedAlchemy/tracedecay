@@ -378,7 +378,7 @@ fn doctor_check_plugin_mcp(dc: &mut DoctorCounters, mcp_path: &Path, serve_args:
 
 /// `(event, hook subcommand)` pairs parsed from the embedded plugin
 /// `hooks/hooks.json` template, so the doctor check can never drift from the
-/// hooks the bundle actually registers.
+/// hooks the bundle registers.
 fn cursor_plugin_hook_expectations() -> Vec<(String, String)> {
     let files = embedded_plugin_files();
     let raw = files

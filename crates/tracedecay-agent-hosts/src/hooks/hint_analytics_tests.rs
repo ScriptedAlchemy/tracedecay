@@ -161,7 +161,7 @@ fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
     let profile = ProfileRoot::new(&profile_root);
     let data_root = enroll_project(&project_root, &profile_root, "proj_terminal_invariant");
 
-    // Branch: root known, session known → on-disk dedupe emits once.
+    // Branch: root known, session known. On-disk dedupe emits once.
     let emit_id = mint_hint_id();
     assert!(
         deduped_project_hint_with_id(
@@ -175,7 +175,7 @@ fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
         .is_some()
     );
 
-    // Branch: same (session, category) again → suppressed as duplicate.
+    // Branch: same (session, category) again. Suppressed as a duplicate.
     let dup_id = mint_hint_id();
     assert!(
         deduped_project_hint_with_id(
@@ -189,7 +189,7 @@ fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
         .is_none()
     );
 
-    // Branch: root known, session missing → single `missing_session` terminal.
+    // Branch: root known, session missing. A single `missing_session` terminal.
     let no_session_id = mint_hint_id();
     assert!(
         deduped_project_hint_with_id(
@@ -203,7 +203,7 @@ fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
         .is_some()
     );
 
-    // Branch: no root at all → emits with no attribution.
+    // Branch: no root at all. Emits with no attribution.
     let no_root_id = mint_hint_id();
     assert!(
         deduped_project_hint_with_id(

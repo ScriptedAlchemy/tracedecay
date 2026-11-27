@@ -17,7 +17,7 @@
 //!
 //! A row the delta carries shadows the base row of the same identity, a
 //! hidden identity serves nothing from the base, and every other base row
-//! serves as is. Every layered generation is a delta over a cold base, never
+//! serves unchanged. Every layered generation is a delta over a cold base, never
 //! over another delta, so reads always merge exactly two stores and the
 //! delta is cumulative since that base; the producer decides when a delta is
 //! large enough to rebuild cold instead.

@@ -15,7 +15,7 @@ use tracedecay_domain::configuration::{
 #[derive(Clone, Copy, Debug)]
 pub struct IntentDecisionInputV1<'a> {
     /// Observed tool actions, in classification priority order. Only actions
-    /// the session actually recorded count: prompt text is not evidence.
+    /// the session recorded count: prompt text is not evidence.
     pub facts: &'a [ContextScoutIntentKindV1],
     /// Score an action fact contributes for its intent.
     pub action_fact_score_permille: u16,

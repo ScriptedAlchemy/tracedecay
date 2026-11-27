@@ -8,7 +8,7 @@
 //! the worktree walks up and silently resolves the MAIN checkout's index.
 //!
 //! Every query then returns results from the main tree's code, usually a
-//! different branch, rather than the worktree the user is actually editing.
+//! different branch, rather than the worktree the user is editing.
 //! Symbols added or changed only in the worktree are invisible to the agent.
 //! This module detects that "borrowed index" situation so callers can warn.
 //!

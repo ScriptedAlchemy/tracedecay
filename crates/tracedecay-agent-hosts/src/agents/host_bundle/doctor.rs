@@ -46,7 +46,7 @@ pub trait HostBundleRegistrationInspectorV1 {
     /// [`HostBundleComponentDoctorStateV1::ActivationDeferred`]: a host that
     /// returns `None` here keeps the blocking `Missing` classification for
     /// absent receipt-owned artifacts, because for such a host an unattended
-    /// reinstall really can converge the state.
+    /// reinstall can converge the state.
     fn interactive_activation_guidance(&self, _host: HostKindV1) -> Option<String> {
         None
     }
@@ -255,7 +255,7 @@ pub fn inspect_installed_host_bundle_components_at(
             // An uninstall receipt owns nothing, so there are no artifacts to
             // check. The host can still advertise the component (a leftover
             // `extensions.json` entry, a stale plugin registration), and that
-            // orphan is invisible if discovery simply skips the receipt.
+            // orphan is invisible if discovery skips the receipt.
             let registration = registrations.inspect_registration(receipt.host, receipt.component);
             if !matches!(
                 registration,

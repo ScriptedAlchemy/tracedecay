@@ -3,14 +3,14 @@
 //!
 //! These predicates were the hook-local hint classifier. They are pure string
 //! inspection over values already in hand (no file reads, no clock), and are
-//! shared by the hook hint surface and the Context Scout intent pass so both
+//! shared by the hook hint and the Context Scout intent pass so both
 //! read one event identically.
 
 use tracedecay_domain::configuration::ContextScoutIntentKindV1;
 
 use crate::shell::shell_invocations;
 
-/// Borrowed view of one hook event. Every field is optional; a surface that
+/// Borrowed view of one hook event. Every field is optional; a caller that
 /// lacks a value leaves it `None`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ActionFactInputV1<'a> {
@@ -32,7 +32,7 @@ pub struct ActionFactInputV1<'a> {
 
 /// Every intent whose action fact holds for `input`, in classification
 /// priority order and without repeats. The first element is the intent the
-/// hook hint surface shows.
+/// hook hint shows.
 pub fn action_facts(input: &ActionFactInputV1<'_>) -> Vec<ContextScoutIntentKindV1> {
     classify(input, |_| true)
 }

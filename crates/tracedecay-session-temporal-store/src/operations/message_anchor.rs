@@ -113,7 +113,7 @@ pub(super) async fn resolve_message_anchors(
 }
 
 /// Resolves every requested message that has an occurrence in the active
-/// temporal generation. Messages without one are simply absent from the map.
+/// temporal generation. Messages without one are absent from the map.
 async fn resolve_materialized_occurrences(
     conn: &impl crate::handle::SessionTemporalExec,
     provider: &str,

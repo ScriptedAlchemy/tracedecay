@@ -8,7 +8,7 @@
 //! framed encoding, and SHA-256s the stream. That is the only proof that the
 //! rows the database will now serve are the exact rows the relational
 //! authority journaled. It is also work proportional to the whole generation,
-//! and a sealed generation never changes -- so a daemon that restarts pays the
+//! and a sealed generation never changes, so a daemon that restarts pays the
 //! identical proof over identical bytes, every time, forever.
 //!
 //! The optimization here is *not* skipping verification. It is not re-hashing
@@ -18,7 +18,7 @@
 //!
 //! A marker records, for one `.grafeo` container:
 //!
-//! * the container's identity -- the checkpoint generation the engine's own
+//! * the container's identity: the checkpoint generation the engine's own
 //!   handle reported after the container was closed and synced (see
 //!   [`ContainerIdentity`]), and
 //! * for each generation proven against that container, the recovered digest
@@ -28,10 +28,10 @@
 //! moment the engine has opened the container, and compared against the
 //! recorded identity. An exact match means the bytes that back the in-RAM
 //! store are the bytes the proof already ran over, so the recorded digest
-//! stands and the enumeration is skipped. Anything else -- a missing marker,
+//! stands and the enumeration is skipped. Anything else falls back to the full proof: a missing marker,
 //! an unparseable one, a self-digest mismatch, an identity mismatch, an
 //! engine that could not report its container, or a generation the marker
-//! does not list -- falls back to the full proof.
+//! does not list.
 //!
 //! # One owner: the engine
 //!
@@ -72,7 +72,7 @@
 //! the CRC-32 of its section directory, and that directory carries the
 //! CRC-32 of every section, so any change to the rows that went through the
 //! container format changes the identity. It does not detect bytes that
-//! changed underneath an unchanged header -- neither silent bit rot nor an
+//! changed underneath an unchanged header, such as silent bit rot or an
 //! adversary who rewrites sections and their checksums in place.
 //!
 //! Two things stand behind that boundary:
@@ -80,7 +80,7 @@
 //! * **Grafeo's own per-section CRC-32.** Every section read out of a
 //!   `.grafeo` container is CRC-checked before it is deserialized, on both the
 //!   heap and mmap paths (`grafeo-storage` `file/manager.rs`). Accidental
-//!   corruption -- bit rot, a partial write, a bad sector -- fails the open
+//!   corruption such as bit rot, a partial write, or a bad sector fails the open
 //!   with `StorageCorrupted`, which `recovery::map_open_error` maps to
 //!   `GraphDbError::Corrupt` on a preexisting store. That is the layer a
 //!   marker was never covering: the SHA-256 replay proof only ever ran *after*
@@ -89,7 +89,7 @@
 //! What a marker genuinely gives up is the *cryptographic* half against an
 //! adversary who can write to the store directory while keeping the header
 //! consistent. That adversary can already rewrite the marker, the container,
-//! and -- being inside the daemon's private store -- the relational
+//! and, being inside the daemon's private store, the relational
 //! authority's expected digest as well. The proof it would have skipped was
 //! not defending against it either.
 //!
@@ -153,15 +153,15 @@ impl GenerationVerification {
 
 /// The identity of a `.grafeo` container as the engine that opened it reports
 /// it: the file header's creation stamp, the active database header the
-/// engine loaded from -- field for field -- and the container length, all read
+/// engine loaded from, copied field for field, and the container length, all read
 /// through the engine's own file handle.
 ///
 /// The active header names one checkpoint of one container: its iteration,
 /// the time it was written, its row watermarks, and the CRC-32 of its section
 /// directory, which in turn checksums every section. Two containers holding
 /// different rows therefore report different identities, a checkpoint by any
-/// process moves the identity, and -- because it is read from the engine's
-/// handle -- it is the identity of the bytes the engine actually consumed,
+/// process moves the identity, and, because it is read from the engine's
+/// handle, it is the identity of the bytes the engine consumed,
 /// whatever file the path pointed at a moment earlier or later.
 ///
 /// This is the same on every platform: no device/inode or volume/file-index
@@ -349,7 +349,7 @@ impl GenerationKey {
 /// carried in against the identity this engine reported at open and that are
 /// still believable, and `proven`, the proofs this incarnation established
 /// itself. Only `proven` is ever published, because only those were
-/// established against rows this process actually streamed -- with one
+/// established against rows this process streamed, with one
 /// exception noted in `GenerationMarkers::record_fresh`.
 struct BoundEngine {
     /// The container the engine loaded, as its own handle reported it.
@@ -370,8 +370,8 @@ struct BoundEngine {
 /// Proofs are bound to an engine incarnation, not to the handle: they are
 /// admitted when the engine binds the container it opened, consulted only
 /// while that engine is resident, and published under the identity the same
-/// handle reports after it closes. Between incarnations -- before a lazy
-/// first use, or while hibernated -- there is nothing to consult, because
+/// handle reports after it closes. Between incarnations, before a lazy
+/// first use or while hibernated, there is nothing to consult, because
 /// there is no engine whose container a proof could be about.
 pub(crate) struct GenerationMarkers {
     /// The marker lives beside this container; `None` for an in-memory store.
@@ -392,8 +392,8 @@ impl GenerationMarkers {
     ///
     /// `identity` is what the engine's own handle reports for the container
     /// it just loaded; the marker beside the container is admitted only when
-    /// it was written against exactly that identity. `None` -- an in-memory
-    /// store, or an engine that could not report its container -- binds
+    /// it was written against exactly that identity. `None`, meaning an in-memory
+    /// store or an engine that could not report its container, binds
     /// nothing, so every lookup misses and nothing is published.
     pub(crate) fn bind(&self, identity: Option<ContainerIdentity>) {
         let Ok(mut engine) = self.engine.lock() else {
@@ -424,10 +424,9 @@ impl GenerationMarkers {
     /// container the resident engine opened.
     ///
     /// Returns the canonical byte count the original proof hashed, for the
-    /// verify outcome event, or `None` when the full proof has to run -- including
-    /// whenever no engine is resident. The caller's `expected` digest --
-    /// which comes from the relational authority, never from the marker --
-    /// must match exactly.
+    /// verify outcome event, or `None` when the full proof has to run, including
+    /// whenever no engine is resident. The caller's `expected` digest must match
+    /// exactly. It comes from the relational authority, never from the marker.
     pub(crate) fn lookup(&self, locator: &GenerationLocator, expected: &str) -> Option<u64> {
         let engine = self.engine.lock().ok()?;
         let engine = engine.as_ref().filter(|engine| engine.pristine)?;
@@ -637,8 +636,8 @@ mod tests {
         assert!(load(&container, identity(65)).is_empty());
     }
 
-    /// A marker written against a different checkpoint of the same container
-    /// -- same creation stamp, same length, later iteration -- is a miss: the
+    /// A marker written against a different checkpoint of the same container,
+    /// with the same creation stamp and length but a later iteration, is a miss: the
     /// rows behind the header the engine loaded are not the rows proven.
     #[test]
     fn a_marker_for_another_checkpoint_of_the_same_container_is_rejected() {
@@ -653,8 +652,8 @@ mod tests {
         assert!(load(&container, checkpointed).is_empty());
     }
 
-    /// A marker in the shape an earlier build wrote -- an OS file identity
-    /// instead of the engine-reported checkpoint -- is a miss, not an error.
+    /// A marker in the shape an earlier build wrote, with an OS file identity
+    /// instead of the engine-reported checkpoint, is a miss, not an error.
     #[test]
     fn a_marker_carrying_a_foreign_identity_shape_is_rejected() {
         let temp = tempfile::tempdir().unwrap();

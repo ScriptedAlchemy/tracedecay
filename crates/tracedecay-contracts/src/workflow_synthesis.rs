@@ -4,7 +4,7 @@
 //! never a rewrite of its evidence: settlement verifies that a claimed
 //! synthesis cites every sibling source artifact and that all source evidence
 //! remains in the completed output set. A provider that declines synthesis
-//! simply returns the unsynthesized evidence set; a provider that claims
+//! returns the unsynthesized evidence set; a provider that claims
 //! synthesis without complete citations is a typed protocol violation.
 
 use std::collections::BTreeSet;

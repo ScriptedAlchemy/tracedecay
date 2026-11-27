@@ -867,7 +867,7 @@ impl Drop for SharedJsonlBuildGuard {
 
 /// Test latch proving that independent frame preparations of one file overlap.
 /// A preparation with a peer in its window waits until two are inside at once,
-/// so the owning test passes only when the path really runs them concurrently.
+/// so the owning test passes only when the path runs them concurrently.
 /// A preparation that no other thread could join, because it runs outside a
 /// multi-worker pool, records the serialization and proceeds, so a serial path
 /// fails the owning test's assertion instead of hanging it.

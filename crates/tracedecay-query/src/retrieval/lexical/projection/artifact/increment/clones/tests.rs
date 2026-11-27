@@ -76,7 +76,7 @@ fn fixture() -> (TempDir, Connection) {
                  VALUES (?1, ?2, ?3, ?4)",
             )
             .unwrap();
-        // Consecutive ordinals share a key prefix. Expansion really collides
+        // Consecutive ordinals share a key prefix. Expansion collides
         // without staging, and each family crosses multiple scan windows.
         let digest = [7_u8; 32];
         for ordinal in 1_i64..=16_000 {

@@ -779,7 +779,7 @@ printf '%s' "$HOME" > "$HOME/home"
         // shell assigns itself a default `PATH` when it starts without one, so
         // a `#!/bin/sh` probe reports that synthesized default rather than
         // `<unset>` even though `env_clear` did remove the variable. What the
-        // admission actually promises, and what this asserts, is that the
+        // admission promises, and what this asserts, is that the
         // *ambient* value did not reach the child.
         let observed = std::fs::read_to_string(home.path().join("path")).unwrap();
         let ambient = std::env::var("PATH").unwrap_or_default();

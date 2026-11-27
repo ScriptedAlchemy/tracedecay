@@ -43,7 +43,7 @@
 //! * `open wall` is the figure that maps onto activation of a sealed
 //!   generation. This is the 619s number the investigation is chasing.
 //! * `VmRSS after open` is the residency a daemon carries per open generation.
-//! * `first read` exercises the reads that actually have to work afterwards,
+//! * `first read` exercises the reads that have to work afterwards,
 //!   point lookups and a bounded traversal, so a fast open that cannot answer
 //!   a query is not scored as a win.
 //! * `VmHWM delta over close` is the publish peak: the transient cost of
@@ -226,7 +226,7 @@ struct FirstReads {
     traversal_error: Option<String>,
 }
 
-/// Exercises the reads a reopened generation actually has to serve.
+/// Exercises the reads a reopened generation has to serve.
 ///
 /// These are deliberately real calls through the public read surface rather
 /// than a claim that the store "would" answer them: a columnar base that opens

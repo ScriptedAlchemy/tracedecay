@@ -202,8 +202,8 @@ pub(crate) enum JsonConfigMutation {
     Remove,
 }
 
-/// Read-under-lock → transform → publish-from-snapshot for a JSON-shaped host
-/// config. The transform sees the value parsed strictly from the exact bytes
+/// Reads under the lock, transforms, then publishes from the snapshot for a
+/// JSON-shaped host config. The transform sees the value parsed strictly from the exact bytes
 /// the write lock observed, so a concurrent writer can no longer slip between
 /// load and publish, and a corrupt config is a typed error instead of a
 /// silently-empty object.

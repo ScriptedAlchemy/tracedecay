@@ -186,7 +186,7 @@ pub const INGEST_WATERMARK_KEY: &str = "ingest_watermark_mtime";
 
 /// Reads the ingest watermark (max processed run-file mtime, unix seconds), or
 /// `0` when unset / the schema predates this table. Never errors: a store
-/// without the meta table simply reports no watermark, forcing a full sweep.
+/// without the meta table reports no watermark, forcing a full sweep.
 pub async fn read_ingest_watermark(conn: &impl QueryExecutor, key: &str) -> i64 {
     let Ok(mut rows) = conn
         .query(

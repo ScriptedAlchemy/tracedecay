@@ -246,7 +246,7 @@ fn central_authority_classification_matches_extraction_grammar() {
     };
     let field_for = |original: &str| literal_for(original).map(|literal| literal.field);
 
-    // Shapes the extraction grammar never mints are no longer admitted:
+    // Shapes the extraction grammar never mints are not admitted:
     // single-dash flags, underscore flags, and two-segment dotted keys.
     assert_eq!(field_for("-v"), None);
     assert_eq!(field_for("--flag_x"), None);

@@ -10,7 +10,7 @@
 //! the whole profile's `projects/` directory.
 //!
 //! A hook is a one-shot subprocess spawned by `hook_cmd` for a single event, so
-//! resolution is stable for its entire lifetime and the answer can simply be
+//! resolution is stable for its entire lifetime and the answer can be
 //! kept. The cache is keyed by (profile root, project root) so two profiles
 //! in one process never read each other's answer.
 //!

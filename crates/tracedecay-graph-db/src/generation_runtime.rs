@@ -129,7 +129,7 @@ enum GenerationStagePageKind {
     Relations,
 }
 
-/// Whether the native page transaction actually applied rows or replay
+/// Whether the native page transaction applied rows or replay
 /// adopted an already durable, matching receipt. This is a write verdict, not
 /// a read-side projection or a guessed number of graph pages.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -316,13 +316,13 @@ impl GraphDb {
     /// written against the exact container the resident engine opened, and
     /// that records this exact expected digest, means the full proof has
     /// already run over these bytes and does not run again. Every other case
-    /// -- no marker, a marker for other bytes, a marker that does not name
-    /// this generation, a digest that differs by one character, or a container
-    /// this process has since written to -- falls through to the full
-    /// row-streaming proof.
+    /// falls through to the full row-streaming proof: no marker, a marker for
+    /// other bytes, a marker that does not name this generation, a digest that
+    /// differs by one character, or a container this process has since written
+    /// to.
     ///
     /// The engine is opened first because the marker is only ever consulted
-    /// against the container the engine actually loaded: a proof admitted
+    /// against the container the engine loaded: a proof admitted
     /// before the open would be about whatever file the path named at that
     /// moment, not about the rows the engine serves.
     ///
@@ -401,7 +401,7 @@ impl GraphDb {
         let (recovered, canonical_bytes) =
             verify_recovered_generation(database, identity, expected, check)?;
         drop(guard);
-        // First-publication verification is untouched -- it still streams every
+        // First-publication verification is unchanged. It still streams every
         // row. Recording the proof it just established is what lets the *next*
         // open skip it.
         self.record_proven_generation(identity, &recovered, canonical_bytes);
@@ -594,8 +594,8 @@ impl GraphDb {
     /// receipt are durable the staged rows are recoverable from the database
     /// alone, so this releases them before the empty finalization batch runs.
     /// On a first index that reclaims gigabytes at exactly the point where the
-    /// caller is about to close, reopen, and rebuild the in-RAM store -- the
-    /// overlap that made publication the peak-RSS moment. Every later stage
+    /// caller is about to close, reopen, and rebuild the in-RAM store. That
+    /// overlap made publication the peak-RSS moment. Every later stage
     /// reads only the identity, which the caller keeps.
     /// Observable native stage work is emitted only after the real page
     /// transaction and matching receipt have settled, never on read/replay.
@@ -683,7 +683,7 @@ impl GraphDb {
     /// range ends beyond the resident count of its kind is durable proof that
     /// the count no longer describes a prefix. The count heuristic in
     /// [`Self::generation_stage_page_rows_present`] is then unusable for
-    /// *every* page of this stage -- the hole may sit anywhere -- and each
+    /// *every* page of this stage, because the hole may sit anywhere, and each
     /// page is re-applied unconditionally instead. Re-applying a page whose
     /// rows are still resident is an idempotent upsert of the exact same
     /// canonical batch, and applying the pages in their pipeline order
@@ -3769,7 +3769,7 @@ mod tests {
         assert_eq!(commit_b.source_generation.as_str(), "source-b");
         assert_eq!(commit_b.watermark.as_str(), "watermark-b");
 
-        // B's rows are really stored: the close/reopen recovered-digest
+        // B's rows are stored: the close/reopen recovered-digest
         // proof over B's generation (including the entity A never had)
         // seats B's sealed digest.
         let sealed_b = sealed_digest(&manifest_b);
