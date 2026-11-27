@@ -1160,13 +1160,13 @@ async fn install_registered_schema_stage_sequence(
         .execute_batch(WORK_SCHEMA_V1)
         .await
         .map_err(|error| global_db_operation_error("initialize Work runtime schema", error))?;
+    replace_empty_work_product_journal_predating_selection_lines(transaction).await?;
     transaction
         .execute_batch(WORK_PRODUCT_GRAPH_JOURNAL_SCHEMA_V1)
         .await
         .map_err(|error| {
             global_db_operation_error("initialize Work product graph journal", error)
         })?;
-    refuse_work_product_journal_predating_selection_lines(transaction).await?;
     transaction
         .execute_batch(AUTHORIZED_SCOPE_SET_SCHEMA_V1)
         .await
@@ -1791,45 +1791,107 @@ async fn inspect_workflow_schema_for_admission(
     Ok(Ok(WorkflowSchemaAdmission::Complete))
 }
 
+/// The Work product journal tables, in drop order: the chunks before their
+/// checkpoint headers, the derived tables before the journal they cache.
+const WORK_PRODUCT_JOURNAL_TABLES: [&str; 5] = [
+    "work_product_graph_checkpoint_chunks_v1",
+    "work_product_graph_checkpoints_v1",
+    "work_product_journal_invalidations_v1",
+    "work_product_graph_versions_v1",
+    "work_product_events_v1",
+];
+
+/// The tables whose shape gained the scope-set `selection_key`.
+const WORK_PRODUCT_SELECTION_KEYED_TABLES: [&str; 4] = [
+    "work_product_events_v1",
+    "work_product_graph_versions_v1",
+    "work_product_graph_checkpoints_v1",
+    "work_product_graph_checkpoint_chunks_v1",
+];
+
 /// The Work product journal keys every version line by the scope set an event
-/// was admitted under. A store written before that column exists opens, because
-/// `CREATE TABLE IF NOT EXISTS` leaves it untouched, and would then fail its
-/// first append on a missing column. The shape is refused here instead, as the
-/// typed reset the store's reset path already answers, so no old row is ever
-/// read under a key it never had and no shim converts it.
-async fn refuse_work_product_journal_predating_selection_lines(
-    conn: &impl QueryExecutor,
+/// was admitted under. An earlier release installed the journal without that
+/// key into EVERY registered store, the profile authority included, although
+/// only a project's session store ever hosts Work. `CREATE TABLE IF NOT
+/// EXISTS` would leave such a table untouched, so its earlier shape is settled
+/// here, before the current shape is installed.
+///
+/// An earlier journal that holds no row at all records no Work: there is
+/// nothing to read under a key it never had and nothing a reset would recover,
+/// so its tables are replaced by the current shape and the rest of the store
+/// keeps serving. Refusing it would reset a whole profile authority, its
+/// project registry included, for tables that were never written. An earlier
+/// journal that holds any row is the typed reset, left exactly as found:
+/// those events were never admitted under a scope set and no shim converts
+/// them.
+async fn replace_empty_work_product_journal_predating_selection_lines(
+    conn: &impl Executor,
 ) -> tracedecay_domain::errors::Result<()> {
     const AUTHORITY: &str = "work_product_graph_journal";
-    let mut columns = conn
-        .query(
-            "SELECT name FROM pragma_table_info('work_product_events_v1')",
-            (),
-        )
-        .await
-        .map_err(|error| global_db_operation_error("inspect Work product journal shape", error))?;
-    let mut has_selection_key = false;
-    let mut column_count = 0_usize;
-    while let Some(row) = columns
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error("read Work product journal shape", error))?
-    {
-        column_count += 1;
-        let column = row.get::<String>(0).map_err(|error| {
-            global_db_operation_error("decode Work product journal column", error)
-        })?;
-        has_selection_key |= column == "selection_key";
+    let mut predates_selection_lines = false;
+    for table in WORK_PRODUCT_SELECTION_KEYED_TABLES {
+        let mut columns = conn
+            .query(
+                &format!("SELECT name FROM pragma_table_info('{table}')"),
+                (),
+            )
+            .await
+            .map_err(|error| {
+                global_db_operation_error("inspect Work product journal shape", error)
+            })?;
+        let mut has_selection_key = false;
+        let mut column_count = 0_usize;
+        while let Some(row) = columns
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error("read Work product journal shape", error))?
+        {
+            column_count += 1;
+            let column = row.get::<String>(0).map_err(|error| {
+                global_db_operation_error("decode Work product journal column", error)
+            })?;
+            has_selection_key |= column == "selection_key";
+        }
+        // An absent table is a store this install creates fresh.
+        predates_selection_lines |= column_count > 0 && !has_selection_key;
     }
-    // A fresh store has the table with the column; a store that predates the
-    // column has the table without it. No table at all is not a state this
-    // install can produce, so it is left to the schema contract to refuse.
-    if column_count > 0 && !has_selection_key {
-        return Err(tracedecay_domain::errors::TraceDecayError::reset_required(
-            AUTHORITY,
-            "the Work product journal predates per-selection version lines and cannot be read; \
-             reset the profile so Work events are journaled under their authorized scope sets",
-        ));
+    if !predates_selection_lines {
+        return Ok(());
+    }
+    for table in WORK_PRODUCT_JOURNAL_TABLES {
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '{table}'
+                     AND EXISTS (SELECT 1 FROM {table})"
+                ),
+                (),
+            )
+            .await
+            .map_err(|error| {
+                global_db_operation_error("inspect Work product journal rows", error)
+            })?;
+        if rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error("read Work product journal rows", error))?
+            .is_some()
+        {
+            return Err(tracedecay_domain::errors::TraceDecayError::reset_required(
+                AUTHORITY,
+                "the Work product journal predates per-selection version lines and holds Work \
+                 that cannot be read; reset this store so Work events are journaled under their \
+                 authorized scope sets",
+            ));
+        }
+    }
+    // Dropping a table drops its triggers, so the current shape installs whole.
+    for table in WORK_PRODUCT_JOURNAL_TABLES {
+        conn.execute_batch(&format!("DROP TABLE IF EXISTS {table}"))
+            .await
+            .map_err(|error| {
+                global_db_operation_error("replace empty earlier Work product journal", error)
+            })?;
     }
     Ok(())
 }
@@ -2208,48 +2270,174 @@ mod tests {
         }
     }
 
-    /// A Work product journal written before version lines were keyed by
-    /// scope set has no `selection_key`. `CREATE TABLE IF NOT EXISTS` leaves
-    /// such a table untouched, so without this refusal the store would open and
-    /// fail its first append on a missing column. The old shape is refused as
-    /// the typed reset, never converted.
+    /// The Work product journal tables a released binary installed into every
+    /// registered store, before version lines were keyed by scope set.
+    const WORK_PRODUCT_JOURNAL_BEFORE_SELECTION_LINES: &str = "
+        DROP TABLE work_product_events_v1;
+        DROP TABLE work_product_graph_versions_v1;
+        DROP TABLE work_product_graph_checkpoints_v1;
+        DROP TABLE work_product_graph_checkpoint_chunks_v1;
+        DROP TABLE work_product_journal_invalidations_v1;
+        CREATE TABLE work_product_events_v1 (
+            owner_brain_id TEXT NOT NULL,
+            owner_profile_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL CHECK (sequence > 0),
+            event_id TEXT NOT NULL,
+            command_id TEXT NOT NULL,
+            canonical_input_digest TEXT NOT NULL,
+            expected_graph_version INTEGER
+                CHECK (expected_graph_version IS NULL OR expected_graph_version > 0),
+            result_graph_version INTEGER NOT NULL CHECK (result_graph_version > 0),
+            occurred_at INTEGER NOT NULL,
+            event_payload TEXT NOT NULL,
+            PRIMARY KEY (owner_brain_id, owner_profile_id, sequence),
+            UNIQUE (owner_brain_id, owner_profile_id, event_id),
+            UNIQUE (owner_brain_id, owner_profile_id, command_id),
+            UNIQUE (owner_brain_id, owner_profile_id, result_graph_version)
+        ) STRICT;
+        CREATE TABLE work_product_graph_versions_v1 (
+            owner_brain_id TEXT NOT NULL,
+            owner_profile_id TEXT NOT NULL,
+            graph_version INTEGER NOT NULL CHECK (graph_version > 0),
+            event_sequence INTEGER NOT NULL CHECK (event_sequence > 0),
+            valid_at INTEGER NOT NULL,
+            observed_at INTEGER NOT NULL CHECK (observed_at >= valid_at),
+            source_watermark TEXT NOT NULL,
+            recovered_graph_digest TEXT NOT NULL,
+            PRIMARY KEY (owner_brain_id, owner_profile_id, graph_version),
+            UNIQUE (owner_brain_id, owner_profile_id, event_sequence)
+        ) STRICT;
+        CREATE TABLE work_product_graph_checkpoints_v1 (
+            owner_brain_id TEXT NOT NULL,
+            owner_profile_id TEXT NOT NULL,
+            event_sequence INTEGER NOT NULL CHECK (event_sequence > 0),
+            graph_version INTEGER NOT NULL CHECK (graph_version > 0),
+            recovered_graph_digest TEXT NOT NULL,
+            payload_bytes INTEGER NOT NULL CHECK (payload_bytes > 0),
+            chunk_count INTEGER NOT NULL CHECK (chunk_count > 0),
+            PRIMARY KEY (owner_brain_id, owner_profile_id, event_sequence)
+        ) STRICT;
+        CREATE TABLE work_product_graph_checkpoint_chunks_v1 (
+            owner_brain_id TEXT NOT NULL,
+            owner_profile_id TEXT NOT NULL,
+            event_sequence INTEGER NOT NULL CHECK (event_sequence > 0),
+            chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+            chunk_payload BLOB NOT NULL CHECK (length(chunk_payload) BETWEEN 1 AND 1048576),
+            PRIMARY KEY (owner_brain_id, owner_profile_id, event_sequence, chunk_index)
+        ) STRICT;
+        CREATE TABLE work_product_journal_invalidations_v1 (
+            owner_brain_id TEXT NOT NULL,
+            owner_profile_id TEXT NOT NULL,
+            from_sequence INTEGER NOT NULL CHECK (from_sequence > 0),
+            PRIMARY KEY (owner_brain_id, owner_profile_id)
+        ) STRICT;";
+
+    fn work_product_journal_columns(path: &std::path::Path) -> Vec<String> {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        let mut statement = connection
+            .prepare("SELECT name FROM pragma_table_info('work_product_events_v1')")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// Every registered store received the Work product tables, including the
+    /// profile authority, which never hosts Work. An upgrade that finds those
+    /// tables in their earlier shape but holding no Work at all has nothing to
+    /// read and nothing to lose, so it must not cost the operator their
+    /// project registry: the empty tables are replaced by the current shape
+    /// and every other record of the store keeps serving.
     #[tokio::test]
-    async fn a_work_product_journal_predating_selection_lines_is_refused_as_a_reset() {
+    async fn an_empty_work_product_journal_predating_selection_lines_keeps_the_profile() {
         let directory = TempDir::new().unwrap();
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
         let path = directory.path().join("global.db");
-        install_registered_schema(&path).await;
+        let (lease, owner) =
+            open_registered_test_database_fixture(&path, TestDatabaseRuntimeScope::Profile)
+                .await
+                .unwrap();
+        lease
+            .upsert_code_project(
+                "project.registered",
+                &project_root,
+                None,
+                None,
+                Some("main"),
+            )
+            .await
+            .unwrap();
+        drop((lease, owner));
         rusqlite::Connection::open(&path)
             .unwrap()
+            .execute_batch(WORK_PRODUCT_JOURNAL_BEFORE_SELECTION_LINES)
+            .unwrap();
+        assert!(!work_product_journal_columns(&path).contains(&"selection_key".to_owned()));
+
+        let (lease, owner) =
+            open_registered_test_database_fixture(&path, TestDatabaseRuntimeScope::Profile)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("an empty earlier Work journal must not refuse the profile: {error}")
+                });
+        assert!(owner.reset_required().is_none());
+        let projects: Vec<String> = lease
+            .list_code_projects(10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|project| project.project_id)
+            .collect();
+        drop((lease, owner));
+        assert_eq!(projects, vec!["project.registered".to_owned()]);
+        assert!(
+            work_product_journal_columns(&path).contains(&"selection_key".to_owned()),
+            "the empty earlier journal must be replaced by the current shape"
+        );
+    }
+
+    /// A store whose earlier-shape Work product journal holds Work cannot be
+    /// read under scope-set version lines and is never converted: it is the
+    /// typed reset, and the refused rows stay exactly as found.
+    #[tokio::test]
+    async fn a_populated_work_product_journal_predating_selection_lines_is_a_reset() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("user-sessions.db");
+        install_registered_schema(&path).await;
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(WORK_PRODUCT_JOURNAL_BEFORE_SELECTION_LINES)
+            .unwrap();
+        connection
             .execute_batch(
-                "CREATE TABLE work_product_events_v1_old AS
-                     SELECT * FROM work_product_events_v1;
-                 DROP TABLE work_product_events_v1;
-                 CREATE TABLE work_product_events_v1 (
-                     owner_brain_id TEXT NOT NULL,
-                     owner_profile_id TEXT NOT NULL,
-                     sequence INTEGER NOT NULL CHECK (sequence > 0),
-                     event_id TEXT NOT NULL,
-                     command_id TEXT NOT NULL,
-                     canonical_input_digest TEXT NOT NULL,
-                     expected_graph_version INTEGER,
-                     result_graph_version INTEGER NOT NULL CHECK (result_graph_version > 0),
-                     occurred_at INTEGER NOT NULL,
-                     event_payload TEXT NOT NULL,
-                     PRIMARY KEY (owner_brain_id, owner_profile_id, sequence)
-                 ) STRICT;
-                 DROP TABLE work_product_events_v1_old;",
+                "INSERT INTO work_product_events_v1 VALUES (
+                    'brain.earlier', 'profile.earlier', 1, 'event.earlier', 'command.earlier',
+                    'sha256:earlier', NULL, 1, 10, '{}'
+                 );",
             )
             .unwrap();
+        drop(connection);
 
         let error = registered_admission_error(&path).await;
-        let (authority, reason) = error
-            .reset_required_context()
-            .unwrap_or_else(|| panic!("the old journal shape must be a typed reset: {error}"));
+        let (authority, reason) = error.reset_required_context().unwrap_or_else(|| {
+            panic!("a populated earlier journal must be a typed reset: {error}")
+        });
         assert_eq!(authority, "work_product_graph_journal");
         assert!(
             reason.contains("predates per-selection version lines"),
             "{reason}"
         );
+        let retained: i64 = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM work_product_events_v1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(retained, 1, "a refused journal is left exactly as found");
+        assert!(!work_product_journal_columns(&path).contains(&"selection_key".to_owned()));
     }
 
     /// Every registered store a released binary wrote carries the same
