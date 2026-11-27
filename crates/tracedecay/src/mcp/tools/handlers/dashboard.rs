@@ -553,6 +553,11 @@ static DASHBOARD_MANAGER: std::sync::OnceLock<
     tokio::sync::Mutex<HashMap<PathBuf, RunningDashboard>>,
 > = std::sync::OnceLock::new();
 
+/// Tests that start hosted dashboards or assert on the whole process manager
+/// share this lock, including the production-composition HTTP journey.
+#[cfg(test)]
+pub(crate) static DASHBOARD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn get_manager() -> &'static tokio::sync::Mutex<HashMap<PathBuf, RunningDashboard>> {
     DASHBOARD_MANAGER.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
 }
