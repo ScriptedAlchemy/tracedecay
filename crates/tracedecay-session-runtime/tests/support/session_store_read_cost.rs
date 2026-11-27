@@ -509,6 +509,11 @@ pub async fn probe_drain_after_wal_restart(
 /// Captures `messages_per_session` new messages on each of `sessions` without
 /// draining, then drains that whole backlog, returning the bytes read per
 /// projected message.
+///
+/// The drain starts from emptied connection caches. Capture leaves the
+/// backlog it just wrote resident, and a cache that holds the whole base
+/// backlog but only part of the grown one would read as growth; the drain
+/// must pay for the pages each projected message touches either way.
 pub async fn backlog_drain_read_per_message(
     facade: &HostAdmissionFacade<'_>,
     database: &RegisteredGlobalDb,
@@ -534,6 +539,7 @@ pub async fn backlog_drain_read_per_message(
         )
         .await;
     }
+    database.release_connection_memory().await.unwrap();
     let before = StoreReadWork::sample(database);
     let projected = drain(facade, scope).await;
     let after = StoreReadWork::sample(database);
@@ -617,6 +623,34 @@ pub async fn ingest_live_messages(
         work.drain.add_interval(&captured, &drained);
         work.refresh.add_interval(&drained, &refreshed);
     }
+    work
+}
+
+/// Streams `count` live messages from the start of a WAL generation, so the
+/// comparison counts what those messages read rather than which probe a
+/// threshold checkpoint of earlier writes happens to land in. Padding ingest
+/// on its own session restarts the log, and its refresh settles before the
+/// probe begins.
+pub async fn ingest_live_messages_after_wal_restart(
+    facade: &HostAdmissionFacade<'_>,
+    fixture: &DrainFixture,
+    database: &RegisteredGlobalDbLeaseV1,
+    refresh: &Arc<SessionTemporalRefreshWakeState>,
+    cursor: &mut SessionCursor,
+    padding: &mut SessionCursor,
+    count: u64,
+) -> MessageIngestWork {
+    let timestamp = SEED_TIMESTAMP + 10_000_000 + i64::try_from(padding.next_ordinal).unwrap();
+    advance_to_wal_restart(facade, fixture, padding, timestamp).await;
+    assert_eq!(refresh_until_idle(database, refresh).await, 1);
+    let work = ingest_live_messages(facade, fixture, database, refresh, cursor, count).await;
+    assert_eq!(
+        work.capture.checkpointed_frames
+            + work.drain.checkpointed_frames
+            + work.refresh.checkpointed_frames,
+        0,
+        "the live ingest comparison must not include a periodic checkpoint: {work:?}"
+    );
     work
 }
 
