@@ -1250,9 +1250,8 @@ mod tests {
         /// so every receipt it accepted is durable, and a fresh producer
         /// serves the next mount exactly as a restarted daemon would.
         async fn restart_observability(&self) {
-            self.producer
-                .lock()
-                .unwrap()
+            let producer = self.producer.lock().unwrap().clone();
+            producer
                 .shutdown()
                 .await
                 .expect("flush the mounted producer");
