@@ -303,7 +303,10 @@ fn event_from_draft(draft: &WorkProductEventDraftV1) -> WorkProductEventV1 {
         actor_id: draft.actor_id.clone(),
         owner_scope: draft.owner_scope.clone(),
         authorized_relation_scopes: draft.authorized_relation_scopes.clone(),
-        expected_graph_version: draft.expected_graph_version,
+        expected_graph_version: draft
+            .expected_head
+            .as_ref()
+            .map(VerifiedWorkGraphVersionV1::graph_version),
         result_graph_version: draft.result_graph_version,
         command_id: draft.command_id.clone(),
         canonical_input_digest: draft.canonical_input_digest.clone(),
@@ -345,13 +348,13 @@ fn event_for_replay(
             WorkProductExpectedAuthorityV1::NoPriorGraph => panic!("change requires authority"),
         },
     };
-    let (expected_graph_version, source_watermark) = match &mutation.expected_authority {
+    let (expected_head, source_watermark) = match &mutation.expected_authority {
         WorkProductExpectedAuthorityV1::NoPriorGraph => (
             None,
             WorkProductSourceWatermarkV1::new(BTreeMap::new()).unwrap(),
         ),
         WorkProductExpectedAuthorityV1::Verified { verified_version } => (
-            Some(verified_version.graph_version()),
+            Some(verified_version.clone()),
             verified_version.source_watermark().clone(),
         ),
     };
@@ -366,7 +369,7 @@ fn event_for_replay(
             .selection()
             .relation_scopes()
             .map_or_else(Vec::new, |relations| relations.iter().cloned().collect()),
-        expected_graph_version,
+        expected_head,
         result_graph_version,
         command_id: mutation.command_id.clone(),
         canonical_input_digest,

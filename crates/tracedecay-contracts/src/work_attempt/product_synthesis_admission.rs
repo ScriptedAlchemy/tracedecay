@@ -143,7 +143,7 @@ where
             revisions,
             command_id(&prepared.identity)?,
             request_digest,
-            attempt.projection_binding().graph_version(),
+            attempt.projection_binding(),
             &prepared.identity,
             prepared.product.context.observed_at(),
         )?;

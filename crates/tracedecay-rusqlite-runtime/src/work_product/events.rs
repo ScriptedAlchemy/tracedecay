@@ -6,12 +6,12 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     ManifestDigest, WorkCommandId, WorkProductEventId, WorkProductEventInputV1,
-    WorkProductEventSequenceV1, WorkProductEventV1, canonical_sha256,
+    WorkProductEventSequenceV1, WorkProductEventV1, WorkProductGraphV1, canonical_sha256,
 };
 
 use super::{
-    FromStoreFault, StoreFault, WORK_PRODUCT_EVENT_ID_DOMAIN, insert_fault, line_params,
-    load_journal_tail, owner_params, selection_covers,
+    FromStoreFault, MAX_BOUND_SEQUENCE, StoreFault, VersionLineV1, WORK_PRODUCT_EVENT_ID_DOMAIN,
+    chain_head, insert_fault, last_owner_sequence, line_params, owner_params, selection_covers,
 };
 use crate::exact_sql::ExactSqlValue;
 use crate::work::{
@@ -45,7 +45,7 @@ impl WorkProductEventPortV1 for WorkSqliteJobStorage<'_> {
         context: &WorkProductPortContextV1,
         draft: &WorkProductEventDraftV1,
     ) -> Result<WorkProductEventCommitOutcomeV1, PortError> {
-        append_in_transaction(self.transaction, context, draft)
+        append_in_transaction(self.transaction, context, draft).map(|(outcome, _)| outcome)
     }
 }
 
@@ -68,7 +68,8 @@ impl WorkProductEventPortV1 for WorkSqliteStorage {
             .handle()
             .begin_immediate()
             .map_err(PortError::from_fault)?;
-        let outcome = append_in_transaction(&transaction, context, draft);
+        let outcome =
+            append_in_transaction(&transaction, context, draft).map(|(outcome, _)| outcome);
         match outcome {
             Ok(WorkProductEventCommitOutcomeV1::Appended(commit)) => {
                 transaction.commit().map_err(PortError::from_fault)?;
@@ -127,7 +128,7 @@ fn replay_from(
     let published = super::load_line_versions_between(
         source,
         scope,
-        event.authorized_relation_scopes(),
+        &VersionLineV1::of_event(&event).map_err(PortError::from_fault)?,
         sequence - 1,
         sequence,
     )
@@ -140,11 +141,22 @@ fn replay_from(
         .map_err(|_| PortError::Unavailable)
 }
 
+/// Append one draft and publish its verified version in the caller's writer
+/// transaction, answering the graph the new version recovered so a caller
+/// that admits against it does not fold the chain a second time. A replayed
+/// command answers no graph: nothing was folded for it.
+///
+/// The compare-and-swap is against the exact head this selection's chain ends
+/// at, read from the line indexes inside the transaction, so a concurrent
+/// writer on this chain is always seen, and an event on a sibling line, which
+/// this chain never folds, never stales it. The head is matched by its journal
+/// sequence, not only its version number: two lines both publish version 2,
+/// and a draft written against one must not commit on the other.
 pub(super) fn append_in_transaction(
     transaction: &impl RegisteredWorkWrite,
     context: &WorkProductPortContextV1,
     draft: &WorkProductEventDraftV1,
-) -> Result<WorkProductEventCommitOutcomeV1, PortError> {
+) -> Result<(WorkProductEventCommitOutcomeV1, Option<WorkProductGraphV1>), PortError> {
     let scope = context.authorized_scope();
     if draft.owner_scope.brain_id != *scope.owner_brain_id()
         || draft.owner_scope.profile_id != *scope.owner_profile_id()
@@ -157,25 +169,29 @@ pub(super) fn append_in_transaction(
         &draft.command_id,
         &draft.canonical_input_digest,
     )? {
-        return Ok(WorkProductEventCommitOutcomeV1::Replayed(commit));
+        return Ok((WorkProductEventCommitOutcomeV1::Replayed(commit), None));
     }
-    let tail = load_journal_tail(transaction, scope)
-        .map_err(PortError::from_fault)?
-        .ok_or(PortError::Unavailable)?;
-    // The compare-and-swap is against this selection's own line head, so an
-    // event another selection appended in between does not make this draft
-    // stale. The sequence is the owner's next, so it never collides with that
-    // other event.
-    let expected_matches = match (tail.line_head, draft.expected_graph_version) {
+    // A selection appends only to its own line. A draft naming any other scope
+    // set would land on a line whose head this writer never read.
+    let line = VersionLineV1::of_selection(scope.selection()).map_err(PortError::from_fault)?;
+    if draft.authorized_relation_scopes.as_slice() != line.scopes() {
+        return Err(PortError::NotFoundOrNotAuthorized);
+    }
+    let head =
+        chain_head(transaction, scope, &line, MAX_BOUND_SEQUENCE).map_err(PortError::from_fault)?;
+    let expected_matches = match (&head, &draft.expected_head) {
         (None, None) => true,
-        (Some(stored), Some(expected)) => stored == expected,
+        (Some(stored), Some(expected)) => {
+            stored.sequence == expected.event_sequence()
+                && stored.graph_version == expected.graph_version()
+        }
         _ => false,
     };
     if !expected_matches {
         return Err(PortError::VersionConflict);
     }
-    let sequence = tail
-        .last_sequence
+    let sequence = last_owner_sequence(transaction, scope)
+        .map_err(PortError::from_fault)?
         .map_or(Some(1), |sequence| sequence.get().checked_add(1))
         .and_then(|next| WorkProductEventSequenceV1::new(next).ok())
         .ok_or(PortError::Unavailable)?;
@@ -183,9 +199,19 @@ pub(super) fn append_in_transaction(
     // matched, so nothing another writer did could have caused this.
     let event = mint_event(draft, sequence).ok_or(PortError::Unavailable)?;
     insert_event(transaction, context, &event, sequence)?;
-    let verified = super::publication::publish_in_transaction(transaction, context, &event)?;
+    let (verified, graph) = super::publication::publish_in_transaction(
+        transaction,
+        context,
+        &event,
+        head.as_ref().zip(draft.expected_head.as_ref()),
+    )?;
     WorkProductEventCommitV1::new(event, verified)
-        .map(WorkProductEventCommitOutcomeV1::Appended)
+        .map(|commit| {
+            (
+                WorkProductEventCommitOutcomeV1::Appended(commit),
+                Some(graph),
+            )
+        })
         .map_err(|_| PortError::Unavailable)
 }
 
@@ -214,7 +240,10 @@ fn mint_event(
         actor_id: draft.actor_id.clone(),
         owner_scope: draft.owner_scope.clone(),
         authorized_relation_scopes: draft.authorized_relation_scopes.clone(),
-        expected_graph_version: draft.expected_graph_version,
+        expected_graph_version: draft
+            .expected_head
+            .as_ref()
+            .map(tracedecay_contracts::VerifiedWorkGraphVersionV1::graph_version),
         result_graph_version: draft.result_graph_version,
         command_id: draft.command_id.clone(),
         canonical_input_digest: draft.canonical_input_digest.clone(),
@@ -253,9 +282,8 @@ fn insert_event(
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 line_params(
                     context.authorized_scope(),
-                    event.authorized_relation_scopes(),
+                    &VersionLineV1::of_event(event).map_err(PortError::from_fault)?,
                 )
-                .map_err(PortError::from_fault)?
                 .into_iter()
                 .chain([
                     ExactSqlValue::Integer(

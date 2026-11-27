@@ -27,14 +27,15 @@
 //!    graph version commit in one transaction, so a caller can never observe an
 //!    event without the graph authority that verified and digested it.
 //! 4. **Each scope set is its own version line.** An event carries the relation
-//!    scopes it was admitted under, and its graph version belongs to the line
-//!    named by that scope set. A reader under a selection folds exactly the
-//!    events whose scopes the selection names, and only those, so an event
-//!    admitted under a scope the selection does not name is never folded into a
-//!    graph it returns. A writer pins the head of its own line, folded only from
-//!    events it is authorized to see. An unrelated scoped event cannot freeze
-//!    work the caller is authorized for, and no hidden event is ever replayed
-//!    into a visible response.
+//!    scopes it was admitted under and belongs to the line that scope set
+//!    names. A line's events extend one another; a line with no event yet is
+//!    rooted on its widest narrower line, so its first event extends exactly
+//!    one head. Ancestry is decided by journal sequence and scope-set
+//!    containment, never by a version number, because two lines both publish
+//!    version 2. A reader folds the chain its own line ends at, which only
+//!    ever holds events its selection covers, so no hidden event is replayed
+//!    into a visible response; a writer fences on the exact head it read and
+//!    folds only the events since that line's checkpoint.
 
 use tracedecay_contracts::{
     AuthorizedWorkProductScopeV1, VerifiedWorkGraphVersionV1, WorkEvidenceReadPortErrorV1,
@@ -43,11 +44,10 @@ use tracedecay_contracts::{
     WorkStorageFailureV1,
 };
 use tracedecay_domain::{
-    ManifestDigest, UtcMicros, WorkGraphVersionV1, WorkProductEventPayloadV1,
-    WorkProductEventSequenceV1, WorkProductEventV1, WorkProductGraphV1, canonical_sha256,
+    ManifestDigest, UtcMicros, WorkGraphVersionV1, WorkProductAuthorizedRelationScopeV1,
+    WorkProductEventPayloadV1, WorkProductEventSequenceV1, WorkProductEventV1, WorkProductGraphV1,
+    canonical_sha256,
 };
-
-use std::collections::BTreeMap;
 
 use crate::exact_sql::{ExactSqlError, ExactSqlReaderRefusalV1, ExactSqlValue};
 use crate::work::{RegisteredWorkQuery, exact_sql_integer, exact_sql_text, registered_work_query};
@@ -227,19 +227,13 @@ impl FromStoreFault for WorkProductApplicationErrorV1 {
 }
 
 /// Whether this selection authorizes every relation scope the event was
-/// admitted under, that is, whether this one event belongs to the selection's
-/// aggregate.
+/// admitted under.
 ///
 /// `ProfileOwnedNoGit` is an explicit no-Git selection, so it covers exactly
 /// the events that named no relation scope. A `Relations` selection covers any
-/// event whose scopes it names, which includes the scope-free ones. The
-/// selections therefore form a containment lattice rather than a partition: a
-/// scope-free event belongs to every aggregate, a repository-scoped event only
-/// to the aggregates naming that repository.
-///
-/// An event this returns `false` for is not a defect in the journal and does
-/// not invalidate the events that are inside: the aggregate's fold simply skips
-/// it and continues, on the aggregate's own version line.
+/// event whose scopes it names, which includes the scope-free ones. An event
+/// this returns `false` for is hidden from the selection: it is never folded
+/// into a graph, paired with a publication, or replayed under it.
 pub(crate) fn selection_covers(
     selection: &WorkProductSelectionScopeV1,
     event: &WorkProductEventV1,
@@ -255,45 +249,16 @@ pub(crate) fn selection_covers(
     }
 }
 
-/// Whether an event was admitted under exactly this selection's own scopes,
-/// that is, whether it is native to this selection's version line.
-///
-/// This is the line's identity, and it is decided by the scope set alone. Graph
-/// versions are per-line counters, so the no-Git line's second event and the
-/// repository line's second event are both version 2; a version number can
-/// never say which line an event belongs to. A `Relations` selection also
-/// covers the scope-free events, because its own events are rooted in them: a
-/// task created with no Git relation is the base a repository-scoped admission
-/// is written against. Those are not native to it, and once it has folded an
-/// event of its own they are siblings written against a head it has moved
-/// past. See [`JournalFoldV1`] for the rule that decides when a narrower event
-/// is still a base and when it is a sibling.
-pub(crate) fn same_line(
-    selection: &WorkProductSelectionScopeV1,
-    event: &WorkProductEventV1,
-) -> bool {
-    match selection.relation_scopes() {
-        None => event.authorized_relation_scopes().is_empty(),
-        Some(scopes) => {
-            event.authorized_relation_scopes().len() == scopes.len()
-                && event
-                    .authorized_relation_scopes()
-                    .iter()
-                    .all(|scope| scopes.contains(scope))
-        }
-    }
-}
-
 /// The canonical persisted identity of one version line: the scope set an
 /// event was admitted under.
 ///
 /// A graph version number is only meaningful together with the scope set it
-/// belongs to, so the event and its published version both carry this digest.
-/// It is the canonical digest of the scope set rather than the relation
-/// identities, so the key is stable, fixed-width, and never carries a project
-/// or repository id on its own.
+/// belongs to, so the event, its published version and the line's checkpoints
+/// all carry this digest. It is the canonical digest of the scope set rather
+/// than the relation identities, so the key is stable, fixed-width, and never
+/// carries a project or repository id on its own.
 pub(crate) fn scope_set_key(
-    scopes: &[tracedecay_domain::WorkProductAuthorizedRelationScopeV1],
+    scopes: &[WorkProductAuthorizedRelationScopeV1],
 ) -> Result<String, StoreFault> {
     // The scopes are stored canonically sorted, so the sequence digest is
     // stable for one scope set.
@@ -302,14 +267,76 @@ pub(crate) fn scope_set_key(
         .map_err(|_| StoreFault::Corrupt("scope set key"))
 }
 
-/// The canonical persisted identity of one reader's fold.
+/// A selection names at most the request's project and its repository, so a
+/// line has at most two scopes and three narrower lines. Anything wider is not
+/// a scope set this authority admits, and enumerating its narrower lines is
+/// refused rather than attempted.
+const MAX_LINE_SCOPES: usize = 4;
+
+/// One version line: the exact scope set its events were admitted under.
 ///
-/// A checkpoint caches a fold, and a fold is a function of the selection it
-/// was folded under, so checkpoints are keyed by the selection's own digest.
-pub(crate) fn selection_key(selection: &WorkProductSelectionScopeV1) -> Result<String, StoreFault> {
-    canonical_sha256(selection)
-        .map(|digest| digest.as_str().to_owned())
-        .map_err(|_| StoreFault::Corrupt("selection key"))
+/// Every event belongs to exactly one line, the one its own scope set names,
+/// and a selection's own line is the one its scope set names. Graph versions
+/// are per-line counters, so a version number never says which line, or which
+/// head on a line, an event extends. Ancestry is decided by journal sequence
+/// and scope-set containment alone.
+#[derive(Clone, Debug)]
+pub(crate) struct VersionLineV1 {
+    scopes: Vec<WorkProductAuthorizedRelationScopeV1>,
+    key: String,
+}
+
+impl VersionLineV1 {
+    fn of_scopes(scopes: Vec<WorkProductAuthorizedRelationScopeV1>) -> Result<Self, StoreFault> {
+        let key = scope_set_key(&scopes)?;
+        Ok(Self { scopes, key })
+    }
+
+    /// The line a selection writes to and reads from.
+    pub(crate) fn of_selection(
+        selection: &WorkProductSelectionScopeV1,
+    ) -> Result<Self, StoreFault> {
+        Self::of_scopes(
+            selection
+                .relation_scopes()
+                .map_or_else(Vec::new, |relations| relations.iter().cloned().collect()),
+        )
+    }
+
+    /// The line an event was admitted on.
+    pub(crate) fn of_event(event: &WorkProductEventV1) -> Result<Self, StoreFault> {
+        Self::of_scopes(event.authorized_relation_scopes().to_vec())
+    }
+
+    pub(crate) fn scopes(&self) -> &[WorkProductAuthorizedRelationScopeV1] {
+        &self.scopes
+    }
+
+    pub(crate) fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Every line whose scope set is a proper subset of this one's: the lines
+    /// this line can be rooted on, and the only other lines a reader under it
+    /// is authorized to see.
+    fn narrower(&self) -> Result<Vec<Self>, StoreFault> {
+        let count = self.scopes.len();
+        if count > MAX_LINE_SCOPES {
+            return Err(StoreFault::Corrupt("version line scope set"));
+        }
+        (0_u32..(1_u32 << count) - 1)
+            .map(|mask| {
+                Self::of_scopes(
+                    self.scopes
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| mask & (1 << index) != 0)
+                        .map(|(_, scope)| scope.clone())
+                        .collect(),
+                )
+            })
+            .collect()
+    }
 }
 
 /// The leading parameters every owner-wide statement binds: the owner, in
@@ -322,28 +349,15 @@ pub(crate) fn owner_params(scope: &AuthorizedWorkProductScopeV1) -> Vec<ExactSql
 }
 
 /// The leading parameters every per-line statement binds: the owner and the
-/// scope set the line is named by, in column order.
+/// line's scope-set key, in column order.
 pub(crate) fn line_params(
     scope: &AuthorizedWorkProductScopeV1,
-    scopes: &[tracedecay_domain::WorkProductAuthorizedRelationScopeV1],
-) -> Result<Vec<ExactSqlValue>, StoreFault> {
-    Ok(vec![
-        ExactSqlValue::Text(scope.owner_brain_id().as_str().to_owned()),
-        ExactSqlValue::Text(scope.owner_profile_id().as_str().to_owned()),
-        ExactSqlValue::Text(scope_set_key(scopes)?),
-    ])
-}
-
-/// The leading parameters every per-selection statement binds: the owner and
-/// the reader's selection, in column order.
-pub(crate) fn selection_params(
-    scope: &AuthorizedWorkProductScopeV1,
-) -> Result<Vec<ExactSqlValue>, StoreFault> {
-    Ok(vec![
-        ExactSqlValue::Text(scope.owner_brain_id().as_str().to_owned()),
-        ExactSqlValue::Text(scope.owner_profile_id().as_str().to_owned()),
-        ExactSqlValue::Text(selection_key(scope.selection())?),
-    ])
+    line: &VersionLineV1,
+) -> Vec<ExactSqlValue> {
+    owner_params(scope)
+        .into_iter()
+        .chain([ExactSqlValue::Text(line.key.clone())])
+        .collect()
 }
 
 /// Rows one journal query may return. Payload bytes are bounded separately:
@@ -354,8 +368,9 @@ const JOURNAL_PAGE_BYTES: usize = crate::exact_sql::MAX_QUERY_BYTES / 2;
 /// Rows one published-version query may return.
 const PUBLISHED_PAGE_ROWS: usize = 512;
 
-/// Events between graph checkpoints. A checkpoint is written when an append
-/// would otherwise fold at least this many events past its base.
+/// A line's own events between graph checkpoints. A checkpoint is written
+/// when an append would otherwise fold at least this many of the line's own
+/// events past its base, so an append folds at most this many.
 pub(crate) const CHECKPOINT_INTERVAL: u64 = 256;
 
 /// The largest sequence an exact-SQL integer parameter can carry.
@@ -367,6 +382,16 @@ fn cursor_value(cursor: u64, what: &'static str) -> Result<ExactSqlValue, StoreF
         .map_err(|_| StoreFault::Corrupt(what))
 }
 
+fn stored_sequence(
+    value: Option<i64>,
+    what: &'static str,
+) -> Result<WorkProductEventSequenceV1, StoreFault> {
+    value
+        .and_then(|value| u64::try_from(value).ok())
+        .and_then(|value| WorkProductEventSequenceV1::new(value).ok())
+        .ok_or(StoreFault::Corrupt(what))
+}
+
 /// Load the owner's whole journal in canonical sequence order.
 ///
 /// A [`StoreFault`] means the rows could not be read or decoded, which every
@@ -375,38 +400,51 @@ pub(crate) fn load_journal(
     source: &impl RegisteredWorkQuery,
     scope: &AuthorizedWorkProductScopeV1,
 ) -> Result<Vec<WorkProductJournalEntryV1>, StoreFault> {
-    load_journal_between(source, scope, 0, MAX_BOUND_SEQUENCE)
+    load_journal_between(source, scope, None, 0, MAX_BOUND_SEQUENCE)
 }
 
 /// Load the journal events with `after < sequence <= through` in canonical
-/// order, one bounded page at a time.
-pub(crate) fn load_journal_between(
+/// order, one bounded page at a time, either the owner's whole journal or
+/// only the events of one line.
+///
+/// An event whose stored line key does not name its own decoded scope set is
+/// corrupt: the line is read by the key, so a payload that disagrees with it
+/// would otherwise be folded into a line it was never admitted on.
+fn load_journal_between(
     source: &impl RegisteredWorkQuery,
     scope: &AuthorizedWorkProductScopeV1,
+    line: Option<&VersionLineV1>,
     after: u64,
     through: u64,
 ) -> Result<Vec<WorkProductJournalEntryV1>, StoreFault> {
     let mut journal = Vec::new();
     let mut cursor = after;
+    let filter = if line.is_some() {
+        "AND selection_key = ?7"
+    } else {
+        "AND ?7 IS NULL"
+    };
     loop {
         let rows = registered_work_query(
             source,
-            "WITH candidates AS (
-                SELECT sequence, length(CAST(event_payload AS BLOB)) AS payload_bytes
-                FROM work_product_events_v1
-                WHERE owner_brain_id = ?1 AND owner_profile_id = ?2
-                  AND sequence > ?3 AND sequence <= ?4
-                ORDER BY sequence LIMIT ?5
-             ), sized AS (
-                SELECT sequence, sum(payload_bytes) OVER (ORDER BY sequence) AS page_bytes
-                FROM candidates
-             )
-             SELECT event.sequence, event.event_payload
-             FROM sized JOIN work_product_events_v1 AS event
-               ON event.owner_brain_id = ?1 AND event.owner_profile_id = ?2
-              AND event.sequence = sized.sequence
-             WHERE sized.page_bytes <= ?6 OR sized.sequence = (SELECT min(sequence) FROM sized)
-             ORDER BY event.sequence",
+            &format!(
+                "WITH candidates AS (
+                    SELECT sequence, length(CAST(event_payload AS BLOB)) AS payload_bytes
+                    FROM work_product_events_v1
+                    WHERE owner_brain_id = ?1 AND owner_profile_id = ?2
+                      AND sequence > ?3 AND sequence <= ?4 {filter}
+                    ORDER BY sequence LIMIT ?5
+                 ), sized AS (
+                    SELECT sequence, sum(payload_bytes) OVER (ORDER BY sequence) AS page_bytes
+                    FROM candidates
+                 )
+                 SELECT event.sequence, event.event_payload, event.selection_key
+                 FROM sized JOIN work_product_events_v1 AS event
+                   ON event.owner_brain_id = ?1 AND event.owner_profile_id = ?2
+                  AND event.sequence = sized.sequence
+                 WHERE sized.page_bytes <= ?6 OR sized.sequence = (SELECT min(sequence) FROM sized)
+                 ORDER BY event.sequence"
+            ),
             owner_params(scope)
                 .into_iter()
                 .chain([
@@ -414,6 +452,9 @@ pub(crate) fn load_journal_between(
                     cursor_value(through, "journal bound")?,
                     cursor_value(JOURNAL_PAGE_ROWS as u64, "journal page")?,
                     cursor_value(JOURNAL_PAGE_BYTES as u64, "journal byte page")?,
+                    line.map_or(ExactSqlValue::Null, |line| {
+                        ExactSqlValue::Text(line.key.clone())
+                    }),
                 ])
                 .collect(),
         )?;
@@ -422,283 +463,330 @@ pub(crate) fn load_journal_between(
         }
         for row in rows.rows {
             let corrupt = || StoreFault::Corrupt("journal row");
-            let sequence = exact_sql_integer(&row.values, 0)
-                .and_then(|value| u64::try_from(value).ok())
-                .and_then(|value| WorkProductEventSequenceV1::new(value).ok())
-                .ok_or_else(corrupt)?;
+            let sequence = stored_sequence(exact_sql_integer(&row.values, 0), "journal row")?;
             let event: WorkProductEventV1 =
                 serde_json::from_str(exact_sql_text(&row.values, 1).ok_or_else(corrupt)?)
                     .map_err(|_| corrupt())?;
+            if exact_sql_text(&row.values, 2) != Some(VersionLineV1::of_event(&event)?.key()) {
+                return Err(StoreFault::Corrupt("journal row line"));
+            }
             cursor = sequence.get();
             journal.push(WorkProductJournalEntryV1 { sequence, event });
         }
     }
 }
 
-/// A graph folded through `last`, resumed from the nearest checkpoint.
+/// The owner's last journal sequence. The journal is one physical sequence
+/// per owner, so the next event takes the one after it whichever line it is on.
+pub(crate) fn last_owner_sequence(
+    source: &impl RegisteredWorkQuery,
+    scope: &AuthorizedWorkProductScopeV1,
+) -> Result<Option<WorkProductEventSequenceV1>, StoreFault> {
+    let rows = registered_work_query(
+        source,
+        "SELECT sequence FROM work_product_events_v1
+         WHERE owner_brain_id = ?1 AND owner_profile_id = ?2
+         ORDER BY sequence DESC LIMIT 1",
+        owner_params(scope),
+    )?;
+    rows.rows
+        .first()
+        .map(|row| stored_sequence(exact_sql_integer(&row.values, 0), "journal tail"))
+        .transpose()
+}
+
+/// The event a chain ends at: its line, its journal sequence, and the graph
+/// version it recorded.
+#[derive(Clone, Debug)]
+pub(crate) struct ChainHeadV1 {
+    pub(crate) line: VersionLineV1,
+    pub(crate) sequence: WorkProductEventSequenceV1,
+    pub(crate) graph_version: WorkGraphVersionV1,
+}
+
+/// The last event `line` holds before `before`, read from the line's index.
+fn last_on_line(
+    source: &impl RegisteredWorkQuery,
+    scope: &AuthorizedWorkProductScopeV1,
+    line: &VersionLineV1,
+    before: u64,
+) -> Result<Option<ChainHeadV1>, StoreFault> {
+    let rows = registered_work_query(
+        source,
+        "SELECT sequence, result_graph_version FROM work_product_events_v1
+         WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND selection_key = ?3
+           AND sequence < ?4
+         ORDER BY sequence DESC LIMIT 1",
+        line_params(scope, line)
+            .into_iter()
+            .chain([cursor_value(before, "line head bound")?])
+            .collect(),
+    )?;
+    rows.rows
+        .first()
+        .map(|row| {
+            Ok(ChainHeadV1 {
+                line: line.clone(),
+                sequence: stored_sequence(exact_sql_integer(&row.values, 0), "line head")?,
+                graph_version: exact_sql_integer(&row.values, 1)
+                    .and_then(|value| u64::try_from(value).ok())
+                    .and_then(|value| WorkGraphVersionV1::new(value).ok())
+                    .ok_or(StoreFault::Corrupt("line head"))?,
+            })
+        })
+        .transpose()
+}
+
+/// The first event `line` holds at or before `through`.
+fn first_on_line(
+    source: &impl RegisteredWorkQuery,
+    scope: &AuthorizedWorkProductScopeV1,
+    line: &VersionLineV1,
+    through: u64,
+) -> Result<Option<WorkProductEventSequenceV1>, StoreFault> {
+    let rows = registered_work_query(
+        source,
+        "SELECT sequence FROM work_product_events_v1
+         WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND selection_key = ?3
+           AND sequence <= ?4
+         ORDER BY sequence LIMIT 1",
+        line_params(scope, line)
+            .into_iter()
+            .chain([cursor_value(through, "line root bound")?])
+            .collect(),
+    )?;
+    rows.rows
+        .first()
+        .map(|row| stored_sequence(exact_sql_integer(&row.values, 0), "line root"))
+        .transpose()
+}
+
+/// The head `line`'s chain ends at among the events before `before`.
+///
+/// A line that holds an event ends at its own last event: its events extend
+/// one another, and a narrower event written after it took root is a sibling
+/// written against a head it has moved past. A line that holds no event yet is
+/// rooted on its WIDEST narrower line that holds one, the newest of equally
+/// wide ones: a repository line extends the no-Git line it covers, and a
+/// project-and-repository line extends the repository line, never a fold of
+/// two siblings that each expected the same base. `None` is a line with no
+/// covered event at all.
+///
+/// This one rule is both what a writer's compare-and-swap fences on and what
+/// every reader reconstructs, so the base a first write extended is always
+/// exactly the chain readers fold beneath it.
+pub(crate) fn chain_head(
+    source: &impl RegisteredWorkQuery,
+    scope: &AuthorizedWorkProductScopeV1,
+    line: &VersionLineV1,
+    before: u64,
+) -> Result<Option<ChainHeadV1>, StoreFault> {
+    if let Some(own) = last_on_line(source, scope, line, before)? {
+        return Ok(Some(own));
+    }
+    let mut root: Option<ChainHeadV1> = None;
+    for narrower in line.narrower()? {
+        if let Some(head) = last_on_line(source, scope, &narrower, before)? {
+            let rank = |head: &ChainHeadV1| (head.line.scopes.len(), head.sequence.get());
+            if root
+                .as_ref()
+                .is_none_or(|current| rank(&head) > rank(current))
+            {
+                root = Some(head);
+            }
+        }
+    }
+    Ok(root)
+}
+
+/// The events one chain folds, in sequence order, each paired with the
+/// publication that verified it, and the checkpoint it resumes from.
+pub(crate) struct ChainV1 {
+    /// The verified graph a writer's fold resumes from. A reader always folds
+    /// from the chain's root and never carries one.
+    pub(crate) base: Option<checkpoint::GraphCheckpoint>,
+    pub(crate) entries: Vec<WorkProductJournalEntryV1>,
+    pub(crate) published: Vec<WorkProductPublishedVersionV1>,
+}
+
+impl ChainV1 {
+    const fn empty() -> Self {
+        Self {
+            base: None,
+            entries: Vec::new(),
+            published: Vec::new(),
+        }
+    }
+}
+
+/// Load the chain that ends at `head`, walking down from each line's first
+/// event to the head it was rooted on.
+///
+/// With `resume_through`, the walk stops at the newest checkpoint of a line at
+/// or before that sequence, so a writer reads only the events since it. A
+/// reader passes `None` and loads the chain from its root.
+///
+/// `Ok(None)` is a chain this authority cannot vouch for: a line whose
+/// publications in the walked range are not exactly its events.
+fn load_chain(
+    source: &impl RegisteredWorkQuery,
+    scope: &AuthorizedWorkProductScopeV1,
+    head: &ChainHeadV1,
+    resume_through: Option<u64>,
+) -> Result<Option<ChainV1>, StoreFault> {
+    let mut segments = Vec::new();
+    let mut base = None;
+    let mut current = head.clone();
+    loop {
+        let through = current.sequence.get();
+        if let Some(bound) = resume_through
+            && let Some(checkpoint) =
+                checkpoint::load(source, scope, &current.line, through.min(bound))?
+        {
+            segments.push((current.line, checkpoint.sequence, through));
+            base = Some(checkpoint);
+            break;
+        }
+        let root = first_on_line(source, scope, &current.line, through)?
+            .ok_or(StoreFault::Corrupt("version line root"))?;
+        segments.push((current.line.clone(), root.get() - 1, through));
+        match chain_head(source, scope, &current.line, root.get())? {
+            Some(rooted_on) => current = rooted_on,
+            None => break,
+        }
+    }
+    let mut chain = ChainV1 {
+        base,
+        ..ChainV1::empty()
+    };
+    for (line, after, through) in segments.into_iter().rev() {
+        let entries = load_journal_between(source, scope, Some(&line), after, through)?;
+        let published = load_line_versions_between(source, scope, &line, after, through)?;
+        // A line's publications in this range are exactly its events in it:
+        // a missing row is an event nobody verified, and a spare row is a
+        // published event the walk did not reach.
+        if entries.len() != published.len()
+            || entries
+                .iter()
+                .zip(&published)
+                .any(|(entry, version)| entry.sequence != version.event_sequence)
+        {
+            return Ok(None);
+        }
+        chain.entries.extend(entries);
+        chain.published.extend(published);
+    }
+    Ok(Some(chain))
+}
+
+/// The chain a reader under this selection folds: every event of its own
+/// line, and beneath them the chain it was rooted on. An event this selection
+/// does not cover is never on it, so no hidden event is ever folded into, or
+/// paired with a publication for, a response under this selection.
+pub(crate) fn selection_chain(
+    source: &impl RegisteredWorkQuery,
+    scope: &AuthorizedWorkProductScopeV1,
+) -> Result<Option<ChainV1>, StoreFault> {
+    let line = VersionLineV1::of_selection(scope.selection())?;
+    match chain_head(source, scope, &line, MAX_BOUND_SEQUENCE)? {
+        None => Ok(Some(ChainV1::empty())),
+        Some(head) => load_chain(source, scope, &head, None),
+    }
+}
+
+/// A graph folded through one chain head, resumed from the nearest checkpoint.
 pub(crate) struct CheckpointedFoldV1 {
     pub(crate) graph: WorkProductGraphV1,
-    /// The checkpoint sequence the fold resumed from; `0` means the journal
-    /// head.
-    pub(crate) base_sequence: u64,
-    /// An affected history this fold verified before accepting the new head.
-    pub(crate) invalidated_from: Option<WorkProductEventSequenceV1>,
-    /// The last event folded, `None` only when the checkpoint itself is the
-    /// requested sequence.
-    pub(crate) last: Option<WorkProductJournalEntryV1>,
+    /// How many of the head line's own events the fold applied past its
+    /// checkpoint, or past the line's root when no checkpoint covers it.
+    pub(crate) own_since_base: u64,
+    /// The digest the head's publication recorded, which the fold recomputed.
+    pub(crate) head_digest: String,
 }
 
-/// Fold one selection's graph through `through_sequence` from the latest
-/// checkpoint at or before it, verifying every covered event against the
-/// publication on its own version line before accepting the new head.
+/// Fold the chain ending at `head` from the newest checkpoint before any
+/// invalidated history, verifying every folded event against the publication
+/// on its own line. A writer reads only the events since that checkpoint, so
+/// its cost is bounded by the checkpoint interval and not by the retained
+/// journal.
 ///
-/// `Ok(None)` is a broken chain, exactly as for [`fold_graph`]. A checkpoint
-/// whose payload does not recompute to its recorded version and digest is a
-/// corrupt store, never a base to fold from.
-pub(crate) fn fold_graph_checkpointed(
+/// `Ok(None)` is a broken or unverifiable chain. A checkpoint whose payload
+/// does not recompute to its recorded version and digest is a corrupt store,
+/// never a base to fold from.
+pub(crate) fn fold_chain_checkpointed(
     source: &impl RegisteredWorkQuery,
     scope: &AuthorizedWorkProductScopeV1,
-    through_sequence: WorkProductEventSequenceV1,
+    head: &ChainHeadV1,
+    invalidated_from: Option<WorkProductEventSequenceV1>,
 ) -> Result<Option<CheckpointedFoldV1>, StoreFault> {
-    let invalidated_from = checkpoint::invalidated_from(source, scope, through_sequence)?;
-    let checkpoint_bound =
-        invalidated_from.map_or(through_sequence.get(), |sequence| sequence.get() - 1);
-    let (base_sequence, base_graph) = checkpoint::load(source, scope, checkpoint_bound)?
-        .map_or((0, None), |checkpoint| {
-            (checkpoint.sequence, Some(checkpoint.graph))
-        });
-    let tail = load_journal_between(source, scope, base_sequence, through_sequence.get())?;
-    // Fold this selection's own chain first. A narrower event written after
-    // this line took root is a sibling the fold skips, so it is not part of
-    // this aggregate and its publication is not checked here.
-    let mut folded = Vec::new();
-    {
-        let mut fold =
-            JournalFoldV1::resume(scope.selection(), base_graph.clone(), base_sequence, &tail);
-        for entry in &tail {
-            fold.visit_through(entry.sequence)
-                .ok_or(StoreFault::Corrupt("journal tail"))?;
-            if fold.folded_through() == Some(entry.sequence) {
-                folded.push(entry);
-            }
-        }
-    }
-    // Each folded event was published on the line its own scope set names, so
-    // the publications are loaded per line and every event is checked against
-    // the row that actually verified it. A line is loaded over the whole tail
-    // range rather than only the sequences this fold used, because a sibling
-    // the fold skipped was still published on that line and its row must not
-    // be mistaken for the next folded event's.
-    let mut published_by_line = BTreeMap::new();
-    for entry in &folded {
-        let key = scope_set_key(entry.event.authorized_relation_scopes())?;
-        if published_by_line.contains_key(&key) {
-            continue;
-        }
-        published_by_line.insert(
-            key,
-            load_line_versions_between(
-                source,
-                scope,
-                entry.event.authorized_relation_scopes(),
-                base_sequence,
-                through_sequence.get(),
-            )?,
-        );
-    }
-    let mut fold = JournalFoldV1::resume(scope.selection(), base_graph, base_sequence, &tail);
-    for entry in &folded {
-        let graph = fold
-            .advance_to(entry.sequence)
-            .ok_or(StoreFault::Corrupt("folded event"))?;
-        let line = published_by_line
-            .get_mut(&scope_set_key(entry.event.authorized_relation_scopes())?)
-            .ok_or(StoreFault::Corrupt("version line"))?;
-        let line_head = line.last().map(|version| version.event_sequence);
-        // The final event may still be in its append transaction without a
-        // publication. Attempt admission also folds an already published
-        // final event. Every earlier event must be published, including any
-        // prefix whose cache was invalidated. Ordinary appends hash only the
-        // recovered published head. A historical mutation requires every
-        // affected publication to agree, even if a later event overwrote the
-        // changed value and left the current graph unchanged.
-        //
-        // The publication is paired by its exact sequence, so a sibling this
-        // fold skipped is passed over instead of being consumed as this
-        // event's own row.
-        let published = line
-            .iter()
-            .position(|version| version.event_sequence == entry.sequence);
-        match published {
-            None if entry.sequence == through_sequence => {}
-            None => return Ok(None),
-            Some(index) => {
-                let version = &line[index];
-                if version.graph_version != graph.version()
-                    || verified_version(version, &entry.event).is_none()
-                    || ((Some(entry.sequence) == line_head
-                        || invalidated_from.is_some_and(|from| entry.sequence >= from))
-                        && recovered_graph_digest(graph)
-                            .as_ref()
-                            .map(ManifestDigest::as_str)
-                            != Some(version.recovered_graph_digest.as_str()))
-                {
-                    return Ok(None);
-                }
-                line.remove(index);
-            }
-        }
-    }
-    // On this selection's OWN line every publication must have been claimed by
-    // the event it verified: a row left over is a published event the fold did
-    // not reach, so the fold stopped short of the line's real head. A narrower
-    // line legitimately keeps the rows of siblings this fold skipped, so it is
-    // not held to that rule.
-    let own_scopes = scope
-        .selection()
-        .relation_scopes()
-        .map_or_else(Vec::new, |relations| relations.iter().cloned().collect());
-    if published_by_line
-        .get(&scope_set_key(&own_scopes)?)
-        .is_some_and(|line| !line.is_empty())
-    {
-        return Ok(None);
-    }
-    let Some(graph) = fold.advance_to(through_sequence).cloned() else {
+    let resume_through = invalidated_from.map_or(MAX_BOUND_SEQUENCE, |sequence| sequence.get() - 1);
+    let Some(chain) = load_chain(source, scope, head, Some(resume_through))? else {
         return Ok(None);
     };
-    // The head is the last event this selection folded, which is the event
-    // being published, not the owner's last event.
-    let last = folded.last().map(|entry| (*entry).clone());
-    Ok(Some(CheckpointedFoldV1 {
-        graph,
-        base_sequence,
-        invalidated_from,
-        last,
-    }))
-}
-
-/// The events one selection's own chain folds, and the publication that
-/// verified each of them, in sequence order.
-///
-/// This is the one membership rule every reader shares, and it is the one
-/// [`JournalFoldV1`] applies: an event outside the selection, or a narrower
-/// event written after this line took root, is a sibling branch, so it is left
-/// out together with its publication. Every folded event must have exactly the
-/// publication that verified it, or the read fails closed.
-pub(crate) fn folded_publications(
-    source: &impl RegisteredWorkQuery,
-    scope: &AuthorizedWorkProductScopeV1,
-    journal: &[WorkProductJournalEntryV1],
-) -> Result<
-    Option<(
-        Vec<WorkProductJournalEntryV1>,
-        Vec<WorkProductPublishedVersionV1>,
-    )>,
-    StoreFault,
-> {
-    let mut fold = JournalFoldV1::new(scope.selection(), journal);
-    let mut folded = Vec::new();
-    for entry in journal {
-        // A chain that cannot be followed through the journal is unverifiable,
-        // the same answer a missing publication gets below.
-        if fold.visit_through(entry.sequence).is_none() {
-            return Ok(None);
+    let own_since_base = chain
+        .entries
+        .iter()
+        .filter(|entry| entry.event.authorized_relation_scopes() == head.line.scopes())
+        .count() as u64;
+    let mut base_digest = None;
+    let base = match chain.base {
+        Some(checkpoint) => {
+            base_digest = Some(checkpoint.digest);
+            Some((
+                WorkProductEventSequenceV1::new(checkpoint.sequence)
+                    .map_err(|_| StoreFault::Corrupt("graph checkpoint row"))?,
+                checkpoint.graph,
+            ))
         }
-        if fold.folded_through() == Some(entry.sequence) {
-            folded.push(entry.clone());
-        }
-    }
-    let mut published_by_line = BTreeMap::new();
-    for entry in &folded {
-        let key = scope_set_key(entry.event.authorized_relation_scopes())?;
-        if !published_by_line.contains_key(&key) {
-            published_by_line.insert(
-                key,
-                load_line_versions(source, scope, entry.event.authorized_relation_scopes())?,
-            );
-        }
-    }
-    let mut published = Vec::with_capacity(folded.len());
-    for entry in &folded {
-        let line = published_by_line
-            .get_mut(&scope_set_key(entry.event.authorized_relation_scopes())?)
-            .ok_or(StoreFault::Corrupt("version line"))?;
-        // The publication is paired by its exact sequence, so a sibling this
-        // fold skipped is passed over rather than consumed as this event's
-        // row. A folded event without the publication that verified it is a
-        // chain this authority cannot vouch for, not a decode failure: the
-        // caller answers it as unavailability, the same as any other
-        // unverifiable history.
-        let Some(index) = line
-            .iter()
-            .position(|version| version.event_sequence == entry.sequence)
-        else {
+        None => None,
+    };
+    let mut fold = JournalFoldV1::resume(base, &chain.entries);
+    for (entry, version) in chain.entries.iter().zip(&chain.published) {
+        let Some(graph) = fold.advance_to(entry.sequence) else {
             return Ok(None);
         };
-        published.push(line.remove(index));
-    }
-    Ok(Some((folded, published)))
-}
-
-/// What a new append under one selection must follow.
-pub(crate) struct JournalTailV1 {
-    /// The owner's last journal sequence. The journal is one physical sequence
-    /// per owner, so the next event takes `last_sequence + 1` whether or not
-    /// the last event belongs to this selection's line.
-    pub(crate) last_sequence: Option<WorkProductEventSequenceV1>,
-    /// The result version of the last event this selection covers, which is
-    /// the head of its own version line and the version a new event must
-    /// expect. `None` is a selection that has folded no event yet.
-    pub(crate) line_head: Option<WorkGraphVersionV1>,
-}
-
-/// The owner's journal tail and this selection's line head within it.
-///
-/// The two are deliberately separate. An event appended under another
-/// selection advances the owner's sequence without advancing this line, so the
-/// next sequence and the expected version come from different events.
-pub(crate) fn load_journal_tail(
-    source: &impl RegisteredWorkQuery,
-    scope: &AuthorizedWorkProductScopeV1,
-) -> Result<Option<JournalTailV1>, StoreFault> {
-    let journal = load_journal(source, scope)?;
-    // The line head is where this selection's own chain currently ends, which
-    // is the fold's result, not the last covered event's: a scope-free event
-    // written after this line moved past its base is a sibling the fold skips,
-    // and pinning its version would blame a stale head for a sibling's sake.
-    // A fold that cannot reach the journal's end is a broken chain, the same
-    // `None` the checkpointed fold answers, never a stale revision.
-    let mut fold = JournalFoldV1::new(scope.selection(), &journal);
-    let line_head = match journal.last() {
-        None => None,
-        Some(last) => {
-            if fold.visit_through(last.sequence).is_none() {
-                return Ok(None);
-            }
-            fold.graph().map(WorkProductGraphV1::version)
+        // Ordinary appends hash only the recovered published head. A
+        // historical mutation requires every affected publication to agree,
+        // even if a later event overwrote the changed value and left the
+        // current graph unchanged.
+        if version.graph_version != graph.version()
+            || verified_version(version, &entry.event).is_none()
+            || ((entry.sequence == head.sequence
+                || invalidated_from.is_some_and(|from| entry.sequence >= from))
+                && recovered_graph_digest(graph)
+                    .as_ref()
+                    .map(ManifestDigest::as_str)
+                    != Some(version.recovered_graph_digest.as_str()))
+        {
+            return Ok(None);
         }
+    }
+    let head_digest = match chain.published.last() {
+        Some(version) => version.recovered_graph_digest.clone(),
+        // The checkpoint is the head itself, and its digest was checked
+        // against the head's publication when it was loaded.
+        None => base_digest.ok_or(StoreFault::Corrupt("chain head"))?,
     };
-    Ok(Some(JournalTailV1 {
-        last_sequence: journal.last().map(|entry| entry.sequence),
-        line_head,
+    let Some(graph) = fold.advance_to(head.sequence).cloned() else {
+        return Ok(None);
+    };
+    if graph.version() != head.graph_version {
+        return Ok(None);
+    }
+    Ok(Some(CheckpointedFoldV1 {
+        graph,
+        own_since_base,
+        head_digest,
     }))
 }
 
-/// Load every verified graph version one scope-set line has published, oldest
-/// first, one bounded page at a time.
-pub(crate) fn load_line_versions(
+/// Load the verified graph versions one line published with
+/// `after < event_sequence <= through`, oldest first, one bounded page at a
+/// time.
+pub(crate) fn load_line_versions_between(
     source: &impl RegisteredWorkQuery,
     scope: &AuthorizedWorkProductScopeV1,
-    scopes: &[tracedecay_domain::WorkProductAuthorizedRelationScopeV1],
-) -> Result<Vec<WorkProductPublishedVersionV1>, StoreFault> {
-    load_line_versions_between(source, scope, scopes, 0, MAX_BOUND_SEQUENCE)
-}
-
-fn load_line_versions_between(
-    source: &impl RegisteredWorkQuery,
-    scope: &AuthorizedWorkProductScopeV1,
-    scopes: &[tracedecay_domain::WorkProductAuthorizedRelationScopeV1],
+    line: &VersionLineV1,
     after: u64,
     through: u64,
 ) -> Result<Vec<WorkProductPublishedVersionV1>, StoreFault> {
@@ -714,7 +802,7 @@ fn load_line_versions_between(
              WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND selection_key = ?3
                AND event_sequence > ?4 AND event_sequence <= ?5
              ORDER BY event_sequence LIMIT ?6",
-            line_params(scope, scopes)?
+            line_params(scope, line)
                 .into_iter()
                 .chain([
                     cursor_value(cursor, "published version cursor")?,
@@ -731,10 +819,10 @@ fn load_line_versions_between(
                     .and_then(|value| u64::try_from(value).ok())
                     .and_then(|value| WorkGraphVersionV1::new(value).ok())
                     .ok_or_else(corrupt)?,
-                event_sequence: exact_sql_integer(&row.values, 1)
-                    .and_then(|value| u64::try_from(value).ok())
-                    .and_then(|value| WorkProductEventSequenceV1::new(value).ok())
-                    .ok_or_else(corrupt)?,
+                event_sequence: stored_sequence(
+                    exact_sql_integer(&row.values, 1),
+                    "published version row",
+                )?,
                 valid_at: UtcMicros(exact_sql_integer(&row.values, 2).ok_or_else(corrupt)?),
                 observed_at: UtcMicros(exact_sql_integer(&row.values, 3).ok_or_else(corrupt)?),
                 recovered_graph_digest: exact_sql_text(&row.values, 4)
@@ -748,169 +836,79 @@ fn load_line_versions_between(
     }
 }
 
-/// Fold one selection's aggregate into the graph at `through_sequence`.
-///
-/// Returns `None` when the events on this selection's own line are not one
-/// canonical progression, a missing `Created` head, or a change whose folded
-/// result version does not match the version the event recorded. A narrower
-/// event written after this line took root is a sibling branch and is
-/// skipped, not an error. A broken chain is never repaired here and never
-/// partially folded: the caller turns it into a typed unavailability, because a
-/// graph folded from part of its history is a falsified graph, not a degraded
-/// one.
+/// Fold one chain into its graph at `through_sequence`, `None` when the chain
+/// is not one canonical progression: a missing `Created` root, or a change
+/// whose expected or folded result version does not match the version the
+/// event recorded. A broken chain is never repaired here and never partially
+/// folded: the caller turns it into a typed unavailability, because a graph
+/// folded from part of its history is a falsified graph, not a degraded one.
 pub(crate) fn fold_graph(
-    selection: &WorkProductSelectionScopeV1,
-    journal: &[WorkProductJournalEntryV1],
+    chain: &[WorkProductJournalEntryV1],
     through_sequence: WorkProductEventSequenceV1,
 ) -> Option<WorkProductGraphV1> {
-    let mut fold = JournalFoldV1::new(selection, journal);
-    fold.advance_to(through_sequence)?;
-    fold.graph
+    let mut fold = JournalFoldV1::new(chain);
+    fold.advance_to(through_sequence).cloned()
 }
 
-/// One forward pass over an owner's journal that yields one selection's
-/// aggregate at each requested sequence, so reading several versions folds
-/// every covered event once instead of refolding the whole prefix per version.
+/// One forward pass over a chain that yields its graph at each requested
+/// sequence, so reading several versions folds every event once instead of
+/// refolding the whole prefix per version.
 ///
-/// Events the selection does not cover are skipped, not folded: the aggregate's
-/// version line runs through the covered events alone, so an event admitted
-/// under another scope neither advances it nor breaks its chain. A narrower
-/// event is folded while it is still this line's base, and is a sibling
-/// branch once this line has folded an event of its own; a sibling is skipped
-/// the same way. Only an event native to this line is version-checked, and
-/// only such an event that fails to match is a broken chain.
+/// Every event on a chain extends the one before it, so every event is
+/// version-checked against it. Which events are on the chain is decided
+/// before folding, by journal sequence and scope set; the fold never infers
+/// membership from a version number.
 pub(crate) struct JournalFoldV1<'a> {
-    selection: &'a WorkProductSelectionScopeV1,
     remaining: &'a [WorkProductJournalEntryV1],
     graph: Option<WorkProductGraphV1>,
-    /// The journal sequence of the last event this aggregate folded.
-    last_sequence: u64,
-    /// The journal sequence through which every event has been visited,
-    /// whether folded or skipped as a sibling branch.
-    visited_through: u64,
-    /// Whether this line has folded an event admitted under its own scopes.
-    ///
-    /// Until it has, the narrower events it covers are still its base. Once it
-    /// has, they are siblings written against a head it has moved past.
-    rooted: bool,
+    /// The journal sequence of the last event folded, or of the checkpoint
+    /// the fold resumed from.
+    last_sequence: Option<WorkProductEventSequenceV1>,
 }
 
 impl<'a> JournalFoldV1<'a> {
-    pub(crate) const fn new(
-        selection: &'a WorkProductSelectionScopeV1,
-        journal: &'a [WorkProductJournalEntryV1],
-    ) -> Self {
+    /// A fold over `chain` from its root, the chain's `Created` event.
+    pub(crate) const fn new(chain: &'a [WorkProductJournalEntryV1]) -> Self {
         Self {
-            selection,
-            remaining: journal,
+            remaining: chain,
             graph: None,
-            last_sequence: 0,
-            visited_through: 0,
-            rooted: false,
+            last_sequence: None,
         }
     }
 
-    /// A fold that continues from `graph`, the verified graph a checkpoint
-    /// recorded at `base_sequence`, over the events that follow it.
-    ///
-    /// A checkpoint is written only for an event this line published, so a
-    /// resumed fold is rooted whenever it carries a graph.
-    pub(crate) const fn resume(
-        selection: &'a WorkProductSelectionScopeV1,
-        graph: Option<WorkProductGraphV1>,
-        base_sequence: u64,
-        journal: &'a [WorkProductJournalEntryV1],
+    /// A fold over `chain` that continues from `base`, the verified graph a
+    /// checkpoint recorded at the given sequence, just before the chain's
+    /// first event.
+    pub(crate) fn resume(
+        base: Option<(WorkProductEventSequenceV1, WorkProductGraphV1)>,
+        chain: &'a [WorkProductJournalEntryV1],
     ) -> Self {
+        let (last_sequence, graph) = base.map_or((None, None), |(sequence, graph)| {
+            (Some(sequence), Some(graph))
+        });
         Self {
-            selection,
-            remaining: journal,
-            rooted: graph.is_some(),
+            remaining: chain,
             graph,
-            last_sequence: base_sequence,
-            visited_through: base_sequence,
+            last_sequence,
         }
     }
 
-    /// The graph folded so far, `None` while the aggregate has folded nothing.
-    pub(crate) const fn graph(&self) -> Option<&WorkProductGraphV1> {
-        self.graph.as_ref()
-    }
-
-    /// The journal sequence of the last event this aggregate actually folded,
-    /// as opposed to one it visited and skipped as a sibling branch.
-    pub(crate) fn folded_through(&self) -> Option<WorkProductEventSequenceV1> {
-        WorkProductEventSequenceV1::new(self.last_sequence).ok()
-    }
-
-    /// Visit every event through `through_sequence`, folding the ones on this
-    /// aggregate's chain and skipping the rest. `None` is a broken chain, the
-    /// same answer [`Self::advance_to`] gives; `Some(())` means the fold
-    /// reached the sequence whether or not it has folded a graph yet.
-    pub(crate) fn visit_through(
-        &mut self,
-        through_sequence: WorkProductEventSequenceV1,
-    ) -> Option<()> {
-        self.step_through(through_sequence)
-            .filter(|reached| *reached)
-            .map(|_| ())
-    }
-
-    /// Folds forward through `through_sequence` with the same chain rules as
-    /// [`fold_graph`]. Requests must ascend and identify an exact journal row.
-    ///
-    /// A narrower event is folded while it is still this line's base. Once
-    /// this line has folded an event of its own, a later narrower event was
-    /// written against a head this line already moved past: it is a sibling
-    /// branch, skipped and not an error, so the two lines advance
-    /// independently. An event native to this line that does not match is a
-    /// broken chain and fails closed.
+    /// Folds forward through `through_sequence`, which must be an exact chain
+    /// event, or the checkpoint the fold resumed from, at or after the last
+    /// one folded. `None` is a broken chain or a sequence the chain does not
+    /// hold.
     pub(crate) fn advance_to(
         &mut self,
         through_sequence: WorkProductEventSequenceV1,
     ) -> Option<&WorkProductGraphV1> {
-        if !self.step_through(through_sequence)? {
-            return None;
-        }
-        self.graph.as_ref()
-    }
-
-    /// The shared forward pass. `None` is a broken chain; `Some(false)` means
-    /// the journal ended before `through_sequence`, so the fold never reached
-    /// it; `Some(true)` means every event through it has been visited.
-    ///
-    /// Membership is decided by the event's own scope set, never by its
-    /// version number. Graph versions are per-line counters, so the no-Git
-    /// line's second event and the repository line's second event are both
-    /// version 2; a version match therefore proves nothing about which line an
-    /// event belongs to.
-    ///
-    /// A wider selection is rooted in the narrower events it covers: a
-    /// repository-scoped admission is written against the no-Git graph. So a
-    /// narrower event is folded while it is still this line's base, which is
-    /// until this line has folded an event of its own. Once it has, the
-    /// narrower line's later events were written against a head this line has
-    /// moved past: they are siblings, skipped and never version-compared. Only
-    /// an event admitted under exactly this selection's scopes is on its chain
-    /// after that, and only such an event is version-checked.
-    fn step_through(&mut self, through_sequence: WorkProductEventSequenceV1) -> Option<bool> {
         while let Some((entry, rest)) = self.remaining.split_first() {
             if entry.sequence.get() > through_sequence.get() {
                 break;
             }
             self.remaining = rest;
-            self.visited_through = entry.sequence.get();
-            // An event outside the selection is never this line's. A narrower
-            // event is its base only while this line has folded nothing of its
-            // own.
-            let own = same_line(self.selection, &entry.event);
-            if !selection_covers(self.selection, &entry.event) || (!own && self.rooted) {
-                continue;
-            }
-            if entry.event.sequence() != entry.sequence {
-                return None;
-            }
-            if entry.event.expected_graph_version()
-                != self.graph.as_ref().map(WorkProductGraphV1::version)
+            if entry.event.sequence() != entry.sequence
+                || entry.event.expected_graph_version()
+                    != self.graph.as_ref().map(WorkProductGraphV1::version)
             {
                 return None;
             }
@@ -925,15 +923,12 @@ impl<'a> JournalFoldV1<'a> {
                 return None;
             }
             self.graph = Some(folded);
-            self.last_sequence = entry.sequence.get();
-            // Only an event admitted under this selection's own scopes takes
-            // root. Folding a narrower base event leaves the line unrooted, so
-            // the narrower line's next event is still its base too.
-            self.rooted |= own;
+            self.last_sequence = Some(entry.sequence);
         }
-        // The fold is complete through the requested sequence once every event
-        // up to it has been visited, whether folded or skipped as a sibling.
-        Some(self.visited_through == through_sequence.get())
+        if self.last_sequence != Some(through_sequence) {
+            return None;
+        }
+        self.graph.as_ref()
     }
 }
 

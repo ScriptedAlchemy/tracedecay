@@ -59,7 +59,7 @@ use tracedecay_domain::{
 
 use super::{
     FromStoreFault, JournalFoldV1, WorkProductJournalEntryV1, WorkProductPublishedVersionV1,
-    checkpoint, folded_publications, load_journal, recovered_graph_digest, verified_version,
+    checkpoint, recovered_graph_digest, selection_chain, verified_version,
 };
 use crate::work::WorkSqliteStorage;
 
@@ -134,16 +134,15 @@ fn read_graph(
     request: &WorkGraphReadRequestV1,
 ) -> Result<WorkGraphReadV1, PortError> {
     let scope = context.authorized_scope();
-    // The journal is the owner's, but this selection's aggregate is its own
-    // chain through that journal: the events native to it, plus the narrower
-    // events that are still its base, folded by their expected-version links.
-    // A narrower event written after this line took root is a sibling the fold
-    // skips, so it is not part of this aggregate and its publication is not
-    // paired here.
-    let journal = load_journal(storage.handle(), scope).map_err(PortError::from_fault)?;
-    let (folded, published) = folded_publications(storage.handle(), scope, &journal)
+    // The journal is the owner's, but this selection's aggregate is the chain
+    // its own line ends at: its own events, and beneath them the head its
+    // first event was rooted on. Each event is paired with the publication on
+    // its own line that verified it, so a sibling line's events and
+    // publications are never part of this aggregate.
+    let chain = selection_chain(storage.handle(), scope)
         .map_err(PortError::from_fault)?
         .ok_or(PortError::Unavailable)?;
+    let (folded, published) = (chain.entries, chain.published);
 
     // A read cannot include a version this authority had not observed at the
     // caller's observation instant. Besides preserving forensic truth, this
@@ -164,7 +163,6 @@ fn read_graph(
         build_entries(
             storage,
             authority,
-            scope.selection(),
             &folded,
             &visible,
             invalidated_from,
@@ -237,14 +235,13 @@ fn read_graph(
 fn build_entries(
     storage: &WorkSqliteStorage,
     authority: Option<&WorkAuthority>,
-    selection: &tracedecay_domain::WorkProductSelectionScopeV1,
     journal: &[WorkProductJournalEntryV1],
     visible: &[&WorkProductPublishedVersionV1],
     invalidated_from: Option<WorkProductEventSequenceV1>,
     selected: &dyn Fn(usize, &WorkProductPublishedVersionV1) -> bool,
     projected_at: UtcMicros,
 ) -> Result<Vec<WorkGraphVersionEntryV1>, PortError> {
-    let mut fold = JournalFoldV1::new(selection, journal);
+    let mut fold = JournalFoldV1::new(journal);
     let mut entries = Vec::new();
     for (index, version) in visible.iter().copied().enumerate() {
         let journal_index = journal

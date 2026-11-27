@@ -27,8 +27,8 @@ use tracedecay_contracts::{
 use tracedecay_domain::{
     AcceptanceCriterionId, CursorBindingMismatchV1, MAX_WORK_PRODUCT_TEXT_BYTES, ProjectId,
     ProposalId, TaskId, UtcMicros, WorkAcceptanceCriterionV1, WorkGraphVersionV1, WorkItemInputV1,
-    WorkItemV1, WorkProductEventPayloadV1, WorkProductEventSequenceV1, WorkProductEventV1,
-    WorkProductGraphV1, WorkProposalDispositionV1, WorkProposalV1, WorkRouteDecisionV1,
+    WorkItemV1, WorkProductEventPayloadV1, WorkProductEventV1, WorkProductGraphV1,
+    WorkProposalDispositionV1, WorkProposalV1, WorkRouteDecisionV1,
     WorkRuntimeProjectionCoverageV1, WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1,
     canonical_sha256,
 };
@@ -1144,10 +1144,6 @@ fn a_selection_naming_another_project_is_refused_rather_than_narrowed() {
     assert_eq!(refused, WorkProductApplicationErrorV1::NotAuthorized);
 }
 
-/// A selection that covers no event at all has no version to point at, so a
-/// `Current` read is the same typed absence an owner with no journal gets.
-/// This is the empty-covered-slice case, not the poisoning one below.
-
 /// The no-Git poisoning defect, stated as the contract that replaced it.
 ///
 /// A profile owner creates work with no Git relation, and later an authority
@@ -2000,4 +1996,416 @@ fn a_corrupted_historical_verified_version_makes_the_current_read_unavailable() 
         read_current(&store).expect_err("a broken verified history is not a readable head"),
         WorkProductApplicationErrorV1::GraphAuthorityUnavailable
     );
+}
+
+fn project_selection() -> WorkProductSelectionScopeV1 {
+    WorkProductSelectionScopeV1::relations(BTreeSet::from([
+        WorkProductAuthorizedRelationScopeV1::Project {
+            project_id: id::<ProjectId>(PROJECT),
+        },
+    ]))
+    .unwrap()
+}
+
+/// The current project together with its repository: the widest selection a
+/// request resolved to one repository may make. It covers the no-Git, the
+/// project-only and the repository-only lines.
+fn combined_selection() -> WorkProductSelectionScopeV1 {
+    WorkProductSelectionScopeV1::relations(BTreeSet::from([
+        WorkProductAuthorizedRelationScopeV1::Project {
+            project_id: id::<ProjectId>(PROJECT),
+        },
+        WorkProductAuthorizedRelationScopeV1::Repository {
+            project_id: id::<ProjectId>(PROJECT),
+            repository_id: id(REPOSITORY),
+        },
+    ]))
+    .unwrap()
+}
+
+fn add_on(
+    store: &RegisteredWorkStore,
+    selection: WorkProductSelectionScopeV1,
+    task: &str,
+    expected: &tracedecay_contracts::VerifiedWorkGraphVersionV1,
+    command: &str,
+    occurred_at: UtcMicros,
+) -> Result<tracedecay_contracts::WorkProductMutationReceiptV1, WorkProductApplicationErrorV1> {
+    mutations(store).add_task(
+        &context(),
+        &binding(),
+        AddWorkTaskRequestV1 {
+            selection,
+            item: item(task, &[], 1),
+            mutation: WorkProductMutationIdentityV1 {
+                expected_authority: WorkProductExpectedAuthorityV1::Verified {
+                    verified_version: expected.clone(),
+                },
+                ..mutation(command, occurred_at)
+            },
+        },
+    )
+}
+
+fn current_tasks(
+    store: &RegisteredWorkStore,
+    selection: WorkProductSelectionScopeV1,
+) -> Result<
+    (
+        tracedecay_contracts::VerifiedWorkGraphVersionV1,
+        Vec<String>,
+    ),
+    WorkProductApplicationErrorV1,
+> {
+    let WorkGraphReadV1::Current { snapshot, .. } = reads(store).read_graph(
+        &context(),
+        WorkGraphReadRequestV1::current(selection, PROJECTED_AT),
+    )?
+    else {
+        panic!("a current read must answer with a current snapshot");
+    };
+    Ok((
+        snapshot.verified_version().clone(),
+        snapshot
+            .graph()
+            .items()
+            .iter()
+            .map(|item| item.task_id().as_str().to_owned())
+            .collect(),
+    ))
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SiblingOrder {
+    RepositoryFirst,
+    NoGitFirst,
+}
+
+/// The repository line and the no-Git line both advance from the no-Git
+/// create, so each is the other's sibling. A selection naming the project and
+/// its repository covers both, but neither is its own line: until it writes,
+/// it reads the line it is rooted on, which is its widest covered line, the
+/// repository line, and never a fold of two siblings against each other's
+/// base. Its first write then roots on exactly that head, whichever sibling
+/// wrote last, and no narrower selection ever sees the combined event.
+#[test]
+fn a_combined_selection_reads_and_roots_after_both_sibling_lines_advance() {
+    for order in [SiblingOrder::RepositoryFirst, SiblingOrder::NoGitFirst] {
+        let store = RegisteredWorkStore::start("work-product-combined-siblings");
+        let prefix = format!("command.work-product.combined.{order:?}");
+        let created = mutations(&store)
+            .create(
+                &context(),
+                &binding(),
+                CreateWorkProductRequestV1 {
+                    selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                    initial_graph: graph(vec![item("task.no-git", &[], 2)]),
+                    mutation: mutation(&format!("{prefix}.create"), UtcMicros(100)),
+                },
+            )
+            .expect("create profile-owned work with no Git relation");
+        let repository_first = add_on(
+            &store,
+            repository_selection(),
+            "task.repository-first",
+            created.verified_graph_version(),
+            &format!("{prefix}.repository-first"),
+            UtcMicros(110),
+        )
+        .expect("the repository line roots on the no-Git create");
+        let advance_repository = || {
+            add_on(
+                &store,
+                repository_selection(),
+                "task.repository-second",
+                repository_first.verified_graph_version(),
+                &format!("{prefix}.repository-second"),
+                UtcMicros(120),
+            )
+            .expect("the repository line advances on its own head")
+        };
+        let advance_no_git = || {
+            add_on(
+                &store,
+                WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                "task.no-git-second",
+                created.verified_graph_version(),
+                &format!("{prefix}.no-git-second"),
+                UtcMicros(130),
+            )
+            .expect("the no-Git line advances past its sibling")
+        };
+        match order {
+            SiblingOrder::RepositoryFirst => {
+                advance_repository();
+                advance_no_git();
+            }
+            SiblingOrder::NoGitFirst => {
+                advance_no_git();
+                advance_repository();
+            }
+        }
+
+        let repository_view =
+            current_tasks(&store, repository_selection()).expect("the repository line is readable");
+        let (combined_head, combined_tasks) = current_tasks(&store, combined_selection())
+            .unwrap_or_else(|error| {
+                panic!("{order:?}: the combined selection must stay readable: {error:?}")
+            });
+        assert_eq!(
+            (combined_head.clone(), combined_tasks.clone()),
+            repository_view,
+            "{order:?}: an unrooted combined selection reads its widest covered line"
+        );
+        assert_eq!(
+            combined_tasks,
+            vec![
+                "task.no-git".to_owned(),
+                "task.repository-first".to_owned(),
+                "task.repository-second".to_owned(),
+            ]
+        );
+
+        let rooted = add_on(
+            &store,
+            combined_selection(),
+            "task.combined",
+            &combined_head,
+            &format!("{prefix}.combined"),
+            UtcMicros(140),
+        )
+        .unwrap_or_else(|error| {
+            panic!("{order:?}: the combined selection's first task must commit: {error:?}")
+        });
+        assert_eq!(rooted.verified_graph_version().graph_version().get(), 4);
+        assert_eq!(rooted.event().sequence().get(), 5);
+        assert_eq!(
+            current_tasks(&store, combined_selection()).unwrap(),
+            (
+                rooted.verified_graph_version().clone(),
+                vec![
+                    "task.combined".to_owned(),
+                    "task.no-git".to_owned(),
+                    "task.repository-first".to_owned(),
+                    "task.repository-second".to_owned(),
+                ]
+            ),
+            "{order:?}: the combined line carries its base and its own event"
+        );
+
+        // Every narrower selection is exactly as it was: none covers the
+        // combined event, and the project-only selection, which covers no
+        // repository event, reads the no-Git line it is rooted on.
+        assert_eq!(
+            current_tasks(&store, repository_selection()).unwrap(),
+            repository_view
+        );
+        let no_git = (
+            2,
+            vec!["task.no-git".to_owned(), "task.no-git-second".to_owned()],
+        );
+        for selection in [
+            WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+            project_selection(),
+        ] {
+            let (head, tasks) = current_tasks(&store, selection).unwrap();
+            assert_eq!((head.graph_version().get(), tasks), no_git, "{order:?}");
+        }
+    }
+}
+
+/// Graph versions are per-line counters, so a version number cannot say
+/// which head a writer read. The combined selection reads the repository head,
+/// version 2. Before it commits, the project-only line roots on the no-Git
+/// create and also publishes version 2, and becomes the head the combined
+/// selection is rooted on. The prepared write expected version 2 of a
+/// different head, so the writer refuses it as stale instead of folding its
+/// change onto a graph its caller never read.
+#[test]
+fn a_version_coincidence_on_another_line_never_passes_the_writer_fence() {
+    let store = RegisteredWorkStore::start("work-product-version-coincidence");
+    let created = mutations(&store)
+        .create(
+            &context(),
+            &binding(),
+            CreateWorkProductRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                initial_graph: graph(vec![item("task.no-git", &[], 2)]),
+                mutation: mutation("command.work-product.coincidence.create", UtcMicros(100)),
+            },
+        )
+        .expect("create profile-owned work with no Git relation");
+    let repository = add_on(
+        &store,
+        repository_selection(),
+        "task.repository",
+        created.verified_graph_version(),
+        "command.work-product.coincidence.repository",
+        UtcMicros(110),
+    )
+    .expect("the repository line roots on the create");
+    let request = WorkProductMutationRequestV1::AddTask(Box::new(AddWorkTaskRequestV1 {
+        selection: combined_selection(),
+        item: item("task.combined", &[], 1),
+        mutation: WorkProductMutationIdentityV1 {
+            expected_authority: WorkProductExpectedAuthorityV1::Verified {
+                verified_version: repository.verified_graph_version().clone(),
+            },
+            ..mutation("command.work-product.coincidence.combined", UtcMicros(130))
+        },
+    }));
+    let prefetched = PrefetchedWorkGraphReadV1::for_mutation(store.storage(), &context(), &request);
+
+    let project = add_on(
+        &store,
+        project_selection(),
+        "task.project",
+        created.verified_graph_version(),
+        "command.work-product.coincidence.project",
+        UtcMicros(120),
+    )
+    .expect("the project-only line roots on the create");
+    assert_eq!(
+        project.verified_graph_version().graph_version(),
+        repository.verified_graph_version().graph_version(),
+        "the two lines publish the same version number from different heads"
+    );
+
+    let revisions = request.mutation_identity().revisions.clone();
+    let stale = WorkProductMutationServiceV1::new(
+        prefetched,
+        store.storage().clone(),
+        store.storage().clone(),
+    )
+    .mutate(&context(), &binding(), request, &revisions)
+    .expect_err("a write prepared against another head must be refused");
+    assert_eq!(stale, WorkProductApplicationErrorV1::VersionConflict);
+    assert_eq!(store.count("work_product_events_v1"), 3);
+
+    // Read again, the combined selection is rooted on the newest of its
+    // equally wide lines, and a write against that head commits on it.
+    let (head, tasks) = current_tasks(&store, combined_selection()).unwrap();
+    assert_eq!(&head, project.verified_graph_version());
+    assert_eq!(
+        tasks,
+        vec!["task.no-git".to_owned(), "task.project".to_owned()]
+    );
+    let rooted = add_on(
+        &store,
+        combined_selection(),
+        "task.combined",
+        &head,
+        "command.work-product.coincidence.combined-retry",
+        UtcMicros(140),
+    )
+    .expect("a write against the real head commits");
+    assert_eq!(rooted.verified_graph_version().graph_version().get(), 3);
+}
+
+/// The writer holds the store's single write lock, so an append must cost
+/// the work since its line's checkpoint, never the retained history. Two
+/// appends that each sit the same distance past a checkpoint, one over a
+/// journal nearly twice as long, must execute about the same SQLite work in
+/// the writer.
+#[test]
+fn a_checkpointed_append_costs_the_writer_the_suffix_not_the_history() {
+    const SINCE_CHECKPOINT: i64 = 44;
+    let store = RegisteredWorkStore::start("work-product-writer-cost");
+    let mut latest = create(
+        &store,
+        "command.work-product.writer-cost.create",
+        UtcMicros(100),
+        vec![item("task.writer-cost.0", &[], 1)],
+    )
+    .expect("publish initial graph");
+    let append = |index: i64, latest: &mut tracedecay_contracts::WorkProductMutationReceiptV1| {
+        *latest = add_on(
+            &store,
+            repository_selection(),
+            &format!("task.writer-cost.{index}"),
+            latest.verified_graph_version(),
+            &format!("command.work-product.writer-cost.{index}"),
+            UtcMicros(100 + index),
+        )
+        .expect("publish next graph");
+    };
+    let writer_steps = || store.writer.telemetry_snapshot().sqlite_vm.vm_steps;
+    for index in 1..256 + SINCE_CHECKPOINT {
+        append(index, &mut latest);
+    }
+    let before = writer_steps();
+    append(256 + SINCE_CHECKPOINT, &mut latest);
+    let near = writer_steps() - before;
+    for index in 256 + SINCE_CHECKPOINT + 1..512 + SINCE_CHECKPOINT {
+        append(index, &mut latest);
+    }
+    let before = writer_steps();
+    append(512 + SINCE_CHECKPOINT, &mut latest);
+    let far = writer_steps() - before;
+    assert_eq!(store.count("work_product_graph_checkpoints_v1"), 2);
+    assert!(
+        far * 4 <= near * 5,
+        "the writer's work grew with retained history: {near} VM steps at {} events, \
+         {far} at {}",
+        257 + SINCE_CHECKPOINT,
+        513 + SINCE_CHECKPOINT
+    );
+}
+
+/// Two writers prefetch the same head before either enters the writer, so
+/// the application's own staleness check passes for both. The second must
+/// still lose inside the writer, against the line head the first advanced,
+/// and roll back without an event or a publication.
+#[test]
+fn a_writer_prefetched_against_a_superseded_head_loses_inside_the_writer() {
+    let store = RegisteredWorkStore::start("work-product-prefetched-writers");
+    let created = create(
+        &store,
+        "command.work-product.prefetched-writers.create",
+        UtcMicros(100),
+        vec![item("task.base", &[], 1)],
+    )
+    .expect("publish initial graph");
+    let request = |command: &str, task: &str| {
+        WorkProductMutationRequestV1::AddTask(Box::new(AddWorkTaskRequestV1 {
+            selection: repository_selection(),
+            item: item(task, &[], 1),
+            mutation: WorkProductMutationIdentityV1 {
+                expected_authority: WorkProductExpectedAuthorityV1::Verified {
+                    verified_version: created.verified_graph_version().clone(),
+                },
+                ..mutation(command, UtcMicros(200))
+            },
+        }))
+    };
+    let first = request(
+        "command.work-product.prefetched-writers.first",
+        "task.first",
+    );
+    let second = request(
+        "command.work-product.prefetched-writers.second",
+        "task.second",
+    );
+    let prefetched_first =
+        PrefetchedWorkGraphReadV1::for_mutation(store.storage(), &context(), &first);
+    let prefetched_second =
+        PrefetchedWorkGraphReadV1::for_mutation(store.storage(), &context(), &second);
+    let revisions = first.mutation_identity().revisions.clone();
+    let submit = |prefetched, request| {
+        WorkProductMutationServiceV1::new(
+            prefetched,
+            store.storage().clone(),
+            store.storage().clone(),
+        )
+        .mutate(&context(), &binding(), request, &revisions)
+    };
+
+    let committed = submit(prefetched_first, first).expect("the first writer commits");
+    assert_eq!(committed.verified_graph_version().graph_version().get(), 2);
+    assert_eq!(
+        submit(prefetched_second, second).expect_err("the second writer's head was superseded"),
+        WorkProductApplicationErrorV1::VersionConflict
+    );
+    assert_eq!(store.count("work_product_events_v1"), 2);
+    assert_eq!(store.count("work_product_graph_versions_v1"), 2);
 }

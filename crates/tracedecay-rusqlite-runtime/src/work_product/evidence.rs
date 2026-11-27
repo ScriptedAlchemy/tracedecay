@@ -50,7 +50,7 @@ use tracedecay_domain::{
     TaskEvidenceLinkV1, TaskId, WorkProductGraphV1, WorkTaskEvidenceCoverageV1, WorkTaskEvidenceV1,
 };
 
-use super::{FromStoreFault, fold_graph, folded_publications, load_journal, verified_version};
+use super::{FromStoreFault, fold_graph, selection_chain, verified_version};
 use crate::work::WorkSqliteStorage;
 
 type PortError = WorkEvidenceReadPortErrorV1;
@@ -154,16 +154,17 @@ fn verified_graph(
     requested: &VerifiedWorkGraphVersionV1,
 ) -> Result<(VerifiedWorkGraphVersionV1, WorkProductGraphV1), PortError> {
     let scope = context.authorized_scope();
-    let journal = load_journal(storage.handle(), scope).map_err(PortError::from_fault)?;
-    // The version is resolved over this selection's own aggregate: the events
-    // its chain folds, each published on the line its scope set names. A
-    // version on an event the chain skips is not this caller's to read.
-    let (folded, published) = folded_publications(storage.handle(), scope, &journal)
+    // The version is resolved over this selection's own aggregate: the chain
+    // its line ends at, each event published on the line its scope set names.
+    // A version on an event that chain does not hold is not this caller's to
+    // read.
+    let chain = selection_chain(storage.handle(), scope)
         .map_err(PortError::from_fault)?
         // A chain this authority cannot verify has no version to answer with,
         // which for evidence is the same absence as a version it never
         // published.
         .ok_or(PortError::NotFoundOrNotAuthorized)?;
+    let (folded, published) = (chain.entries, chain.published);
     let Some(version) = published
         .iter()
         .find(|version| version.graph_version == requested.graph_version())
@@ -185,8 +186,7 @@ fn verified_graph(
         .iter()
         .find(|entry| entry.sequence == version.event_sequence)
         .ok_or(PortError::Unavailable)?;
-    let graph = fold_graph(scope.selection(), &folded, version.event_sequence)
-        .ok_or(PortError::Unavailable)?;
+    let graph = fold_graph(&folded, version.event_sequence).ok_or(PortError::Unavailable)?;
     if graph.version() != version.graph_version {
         return Err(PortError::Unavailable);
     }

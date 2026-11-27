@@ -298,21 +298,23 @@ ON work_duplicate_adjudications_v1 (
 /// repository-scoped event owned by the same profile never share a version,
 /// even when both are the second event their own line has folded.
 ///
-/// A reader under a selection folds exactly the events whose scopes the
-/// selection names, and only those, so an event admitted under a scope the
-/// selection does not name is never folded into a graph it returns. A writer
-/// pins the head of its own line, folded only from events it is authorized to
-/// see. An unrelated scoped event cannot freeze work the caller is authorized
-/// for, and no hidden event is ever replayed into a visible response. A change
-/// that genuinely depends on an entity only another line holds fails the
-/// graph's own validation as an unknown task, which leaks nothing about it.
+/// A line's events extend one another. A line that holds no event yet is
+/// rooted on its widest narrower line, so its first event extends exactly one
+/// head, and a reader folds the chain its own line ends at: only events its
+/// selection covers, never a sibling written against a head it moved past.
+/// Ancestry is decided by journal sequence and scope-set containment, never by
+/// a version number. A change that genuinely depends on an entity only
+/// another line holds fails the graph's own validation as an unknown task,
+/// which leaks nothing about it.
 ///
-/// The event rows are one physical journal keyed by the owner-wide sequence.
-/// Published versions carry the same `selection_key` as their event. Checkpoints
-/// cache a fold, which is a function of the READER's selection, so they carry
-/// that selection's key instead. Invalidation markers are owner-wide: a journal
+/// The event rows are one physical journal keyed by the owner-wide sequence,
+/// and indexed per line so a line's head and its events since a checkpoint
+/// are read without scanning the owner's journal. Published versions and
+/// checkpoints carry the same `selection_key` as the line's events: a
+/// checkpoint is written at one of its line's own events and caches the chain
+/// that line ends at there. Invalidation markers are owner-wide: a journal
 /// mutation anywhere can affect any line that covers it, so one conservative
-/// marker is re-verified against every line rather than enumerated per line.
+/// marker is re-verified rather than enumerated per line.
 ///
 /// Checkpoints are a derived cache of the journal fold, written in the same
 /// transaction as the event that reaches a checkpoint boundary. An append
@@ -349,6 +351,9 @@ CREATE TABLE IF NOT EXISTS work_product_events_v1 (
     UNIQUE (owner_brain_id, owner_profile_id, selection_key, result_graph_version)
 ) STRICT;
 
+CREATE INDEX IF NOT EXISTS work_product_events_line_v1
+ON work_product_events_v1 (owner_brain_id, owner_profile_id, selection_key, sequence);
+
 CREATE TABLE IF NOT EXISTS work_product_graph_versions_v1 (
     owner_brain_id TEXT NOT NULL,
     owner_profile_id TEXT NOT NULL,
@@ -362,6 +367,12 @@ CREATE TABLE IF NOT EXISTS work_product_graph_versions_v1 (
     PRIMARY KEY (owner_brain_id, owner_profile_id, selection_key, graph_version),
     UNIQUE (owner_brain_id, owner_profile_id, selection_key, event_sequence)
 ) STRICT;
+
+-- The invalidation triggers ask whether any line published at or after a
+-- sequence, owner-wide, on every append; without this they scan the owner's
+-- publications.
+CREATE INDEX IF NOT EXISTS work_product_graph_versions_sequence_v1
+ON work_product_graph_versions_v1 (owner_brain_id, owner_profile_id, event_sequence);
 
 CREATE TABLE IF NOT EXISTS work_product_graph_checkpoints_v1 (
     owner_brain_id TEXT NOT NULL,

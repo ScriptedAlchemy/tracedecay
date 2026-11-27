@@ -15,7 +15,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{WorkProductAuthorizedRelationScopeV1, WorkProductGraphV1};
 
-use super::{FromStoreFault, fold_graph_checkpointed};
+use super::{ChainHeadV1, FromStoreFault, VersionLineV1, checkpoint, fold_chain_checkpointed};
 
 use crate::work::RegisteredWorkWrite;
 use crate::work_run_control::WorkSqliteJobStorage;
@@ -65,7 +65,7 @@ fn admit_attempt_in_transaction(
     transaction: &impl RegisteredWorkWrite,
     admission: &WorkProductAttemptAdmissionV1,
 ) -> Result<WorkProductAttemptAdmissionOutcomeV1, AdmissionError> {
-    let product = super::events::append_in_transaction(
+    let (product, appended_graph) = super::events::append_in_transaction(
         transaction,
         &admission.product_context,
         &admission.product_draft,
@@ -75,6 +75,7 @@ fn admit_attempt_in_transaction(
         transaction,
         &admission.product_context,
         product_commit(&product),
+        appended_graph,
     )?;
     admission
         .attempt
@@ -110,7 +111,7 @@ fn admit_retry_in_transaction(
     transaction: &impl RegisteredWorkWrite,
     admission: &WorkProductRetryAdmissionV1,
 ) -> Result<(WorkProductEventCommitV1, WorkRetryAttemptOutcomeV1), AdmissionError> {
-    let product = super::events::append_in_transaction(
+    let (product, appended_graph) = super::events::append_in_transaction(
         transaction,
         &admission.admission.product_context,
         &admission.admission.product_draft,
@@ -120,6 +121,7 @@ fn admit_retry_in_transaction(
         transaction,
         &admission.admission.product_context,
         product_commit(&product),
+        appended_graph,
     )?;
     admission
         .admission
@@ -169,7 +171,7 @@ fn admit_synthesis_in_transaction(
     transaction: &impl RegisteredWorkWrite,
     admission: &WorkProductSynthesisAdmissionV1,
 ) -> Result<(WorkProductEventCommitV1, WorkSynthesisInsertOutcome), AdmissionError> {
-    let product = super::events::append_in_transaction(
+    let (product, appended_graph) = super::events::append_in_transaction(
         transaction,
         &admission.admission.product_context,
         &admission.admission.product_draft,
@@ -179,6 +181,7 @@ fn admit_synthesis_in_transaction(
         transaction,
         &admission.admission.product_context,
         product_commit(&product),
+        appended_graph,
     )?;
     admission
         .synthesis
@@ -213,19 +216,41 @@ fn product_commit(outcome: &WorkProductEventCommitOutcomeV1) -> &WorkProductEven
     }
 }
 
+/// The graph the admitted product version recovered. A fresh append already
+/// recovered it while publishing, so it is reused; a replayed command folds
+/// its own line's chain to the replayed version from that line's checkpoint.
 fn graph_for_product(
     transaction: &impl RegisteredWorkWrite,
     context: &tracedecay_contracts::WorkProductPortContextV1,
     product: &WorkProductEventCommitV1,
+    appended: Option<WorkProductGraphV1>,
 ) -> Result<WorkProductGraphV1, AdmissionError> {
-    let graph = fold_graph_checkpointed(
-        transaction,
-        context.authorized_scope(),
-        product.event().sequence(),
-    )
-    .map_err(AdmissionError::from_fault)?
-    .ok_or(AdmissionError::Unavailable)?
-    .graph;
+    let graph = match appended {
+        Some(graph) => graph,
+        None => {
+            let event = product.event();
+            let head = ChainHeadV1 {
+                line: VersionLineV1::of_event(event).map_err(AdmissionError::from_fault)?,
+                sequence: event.sequence(),
+                graph_version: event.result_graph_version(),
+            };
+            let invalidated_from = checkpoint::invalidated_from(
+                transaction,
+                context.authorized_scope(),
+                event.sequence(),
+            )
+            .map_err(AdmissionError::from_fault)?;
+            fold_chain_checkpointed(
+                transaction,
+                context.authorized_scope(),
+                &head,
+                invalidated_from,
+            )
+            .map_err(AdmissionError::from_fault)?
+            .ok_or(AdmissionError::Unavailable)?
+            .graph
+        }
+    };
     if graph.version() != product.verified_graph_version().graph_version() {
         return Err(AdmissionError::VersionConflict);
     }

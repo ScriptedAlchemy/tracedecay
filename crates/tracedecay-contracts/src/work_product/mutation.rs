@@ -816,7 +816,12 @@ fn event_draft(
             profile_id: authorized_scope.owner_profile_id().clone(),
         },
         authorized_relation_scopes: selected_relations(selection),
-        expected_graph_version: mutation_expected_graph_version(&mutation.expected_authority),
+        expected_head: match &mutation.expected_authority {
+            WorkProductExpectedAuthorityV1::NoPriorGraph => None,
+            WorkProductExpectedAuthorityV1::Verified { verified_version } => {
+                Some(verified_version.clone())
+            }
+        },
         result_graph_version,
         command_id: mutation.command_id.clone(),
         canonical_input_digest,
@@ -936,7 +941,11 @@ fn validate_appended_event(
     if event.actor_id() != &draft.actor_id
         || event.owner_scope() != &draft.owner_scope
         || event.authorized_relation_scopes() != draft.authorized_relation_scopes
-        || event.expected_graph_version() != draft.expected_graph_version
+        || event.expected_graph_version()
+            != draft
+                .expected_head
+                .as_ref()
+                .map(VerifiedWorkGraphVersionV1::graph_version)
         || event.result_graph_version() != draft.result_graph_version
         || event.command_id() != &draft.command_id
         || event.canonical_input_digest() != &draft.canonical_input_digest

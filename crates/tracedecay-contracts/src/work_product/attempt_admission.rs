@@ -40,8 +40,16 @@ impl WorkProductAttemptAdmissionV1 {
             )
             || self.attempt.identity().task_id() != self.product_task_id()
             || self.product_attempt() != Some(self.attempt.identity())
-            || self.product_draft.expected_graph_version
-                != Some(self.attempt.projection_binding().graph_version())
+            || self
+                .product_draft
+                .expected_head
+                .as_ref()
+                .is_none_or(|head| {
+                    let binding = self.attempt.projection_binding();
+                    head.graph_version() != binding.graph_version()
+                        || head.event_sequence() != binding.event_sequence()
+                        || head.recovered_graph_digest() != binding.recovered_graph_digest()
+                })
         {
             return Err(WorkProductAttemptAdmissionErrorV1::InvalidAdmission);
         }

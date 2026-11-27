@@ -159,10 +159,21 @@ pub(crate) fn accepted_attempt_draft(
     revisions: &WorkProductRevisionPinsV1,
     command_id: WorkCommandId,
     canonical_input_digest: ManifestDigest,
-    expected_graph_version: tracedecay_domain::WorkGraphVersionV1,
+    bound_head: &tracedecay_domain::WorkAttemptProjectionBindingV1,
     identity: &WorkAttemptIdentityV1,
     occurred_at: UtcMicros,
 ) -> Result<WorkProductEventDraftV1, ApplicationProblem> {
+    // The attempt was admitted against this exact verified head, so the link
+    // is written against it, never against whatever head shares its version
+    // number on another line.
+    let expected_head = crate::VerifiedWorkGraphVersionV1::new(
+        bound_head.graph_version(),
+        bound_head.event_sequence(),
+        bound_head.source_watermark().clone(),
+        bound_head.recovered_graph_digest().clone(),
+    )
+    .map_err(|_| invalid_start_problem())?;
+    let expected_graph_version = expected_head.graph_version();
     let result_graph_version = expected_graph_version
         .next()
         .map_err(|_| invalid_start_problem())?;
@@ -183,7 +194,7 @@ pub(crate) fn accepted_attempt_draft(
                 .clone(),
         },
         authorized_relation_scopes,
-        expected_graph_version: Some(expected_graph_version),
+        expected_head: Some(expected_head),
         result_graph_version,
         command_id,
         canonical_input_digest,
@@ -394,7 +405,7 @@ where
             revisions,
             command_id,
             digest,
-            admission_binding_graph_version(&attempt),
+            attempt.projection_binding(),
             &identity,
             product.context.observed_at(),
         )?;
@@ -414,12 +425,6 @@ where
             | WorkProductAttemptAdmissionOutcomeV1::Replayed { attempt, .. } => Ok(attempt),
         }
     }
-}
-
-fn admission_binding_graph_version(
-    attempt: &WorkAttemptV1,
-) -> tracedecay_domain::WorkGraphVersionV1 {
-    attempt.projection_binding().graph_version()
 }
 
 fn command_requested_route(command: &StartWorkAttemptCommand) -> WorkProviderRouteV1 {
