@@ -151,7 +151,7 @@ export function useSchedulerControl() {
     // two projects' controls are two mutations rather than one shared entry.
     mutationKey: [...automationSchedulerKey, scopeKey(scope)],
     // Runs immediately before `mutationFn`, from the same options snapshot, so
-    // this is the scope the request is actually about to be sent under.
+    // this is the scope the request is about to be sent under.
     onMutate: () => ({ statusKey }),
     mutationFn: async (paused: boolean) => {
       // Nothing leaves the browser unless the scope is known to accept it. The

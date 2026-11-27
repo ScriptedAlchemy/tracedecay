@@ -16,13 +16,13 @@
  *     silently ignores that instruction. One variable file replaces the six
  *     static weights it succeeds.
  *   IBM Plex Sans (body), SIL OFL 1.1. Drawn for engineering documentation,
- *     so it holds its counters at the 11-13px this console actually sets, and
+ *     so it holds its counters at the 11-13px this console sets, and
  *     its flared stems and single-storey detailing are unmistakably not Inter.
- *   IBM Plex Mono (mono), SIL OFL 1.1. Here mono is a first-class face: it
+ *   IBM Plex Mono (mono), SIL OFL 1.1. Here mono is a primary face: it
  *     carries code symbols, file paths, graph node labels AND every measured
  *     numeral including the 34-60px display tier. Plex Mono is the only member
  *     of the family without a variable build, so the three weights the UI
- *     actually uses (400 body, 500 display numerals, 600 emphasis) ship as
+ *     uses (400 body, 500 display numerals, 600 emphasis) ship as
  *     statics rather than pulling a fourth family in for coherence.
  *
  * Latin and Latin-Extended only, and no italics. The app sets none. Non-Latin

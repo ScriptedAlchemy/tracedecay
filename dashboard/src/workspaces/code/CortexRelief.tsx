@@ -4,7 +4,7 @@
  *
  * The division of labour is the plan's honesty boundary (`:196`):
  *
- *   `cortexRelief.ts`   wire measurement → positions, areas, contour counts.
+ *   `cortexRelief.ts`   wire measurement to positions, areas, contour counts.
  *                       Every figure printed here comes from there.
  *   `cortexRender.ts`   draws. Decides nothing.
  *   this file           composes the two, and is responsible for one thing of

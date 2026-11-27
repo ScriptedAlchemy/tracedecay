@@ -141,7 +141,7 @@ describe('AgentsPage read coverage', () => {
   /**
    * The three measures beside the delegation rollup. The stub
    * `fetch` below answers `/api/work/views` with a dashboard envelope rather
-   * than the application envelope that route actually carries, so the graph
+   * than the application envelope that route carries, so the graph
    * read is refused as a shape this build cannot decode, which is exactly the
    * case the two graph-fed surfaces must render as a refusal rather than as a
    * frontier of nothing and a failure count of zero.

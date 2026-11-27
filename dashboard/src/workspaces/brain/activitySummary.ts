@@ -6,7 +6,7 @@ import type { LiveActivityPulse } from '../../data/sse/connect.ts';
  * print. Pure and framework-free, so it is testable without React or a live
  * stream.
  *
- * Every number here is counted straight off pulses that actually landed , 
+ * Every number here is counted straight off pulses that landed,
  * never smoothed, extrapolated, or defaulted to something friendlier than the
  * truth.
  */
@@ -109,7 +109,7 @@ export function formatDurationMs(ms: number | null): string {
  * ten minutes after the fact is a lie, and a silent stream is precisely the
  * case the viewer most needs told accurately.
  *
- * The cadence tracks the resolution actually on display, so an hour-old
+ * The cadence tracks the resolution on display, so an hour-old
  * reading is not recomputed sixty times a minute to no effect.
  */
 export function ageTickIntervalMs(ageMs: number): number {

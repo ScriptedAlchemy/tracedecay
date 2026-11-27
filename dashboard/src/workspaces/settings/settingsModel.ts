@@ -12,7 +12,7 @@
  *     The daemon really does merge two layers there, and then ships only the
  *     result. The winning layer is not on the wire.
  *   - `user` and `project.config` do not even address the same keys
- *     (`watcher_debounce`/`extraction_timeout_secs` vs `include`/`exclude`/…), so they
+ *     (`watcher_debounce`/`extraction_timeout_secs` versus `include`/`exclude`/…), so they
  *     are not competing layers over a shared namespace.
  *
  * Therefore this model does NOT rank groups into a resolution stack and does
@@ -21,10 +21,10 @@
  * the payload states directly via `config_endpoint`, and the
  * one place the payload carries genuine per-value provenance:
  * `environment.variables[]`, where `active` distinguishes an override that is
- * actually in force from one that is unset so a default applies.
+ * in force from one that is unset so a default applies.
  *
  * Nothing here invents a value. Every row is a literal from the payload and
- * every note is a restatement of a key the payload actually carries.
+ * every note is a restatement of a key the payload carries.
  */
 
 import { z } from 'zod';
@@ -130,7 +130,7 @@ export interface SettingsModel {
   readonly settingCount: number;
   /** Environment overrides, reported verbatim. Empty when absent. */
   readonly overrides: readonly EnvOverride[];
-  /** How many of `overrides` are actually in force. */
+  /** How many of `overrides` are in force. */
   readonly activeOverrides: number;
 }
 

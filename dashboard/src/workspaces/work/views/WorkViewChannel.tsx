@@ -11,7 +11,7 @@ import type { WorkChannel } from '../workChannel.ts';
  *
  *   ChannelAbsence  a measurement the view was asked to encode and cannot
  *   ViewCaption     the population, window and cap a projection ran under
- *   EmptyReading    a projection whose input was genuinely empty
+ *   EmptyReading    a projection whose input was empty
  *
  * `ChannelAbsence` is the one that matters. Absence must be drawn, and every
  * one of these views is missing at least one channel until the

@@ -37,7 +37,7 @@ export function splitCount(
   return { value: value.toLocaleString() };
 }
 
-/** A wall-clock stamp trimmed to what a dense row can actually carry.
+/** A wall-clock stamp trimmed to what a dense row can carry.
  *
  * `toLocaleString()` prints "7/24/2026, 9:07:20 PM", twenty-one glyphs of
  * which the seconds are noise in a list you scan for ordering, and the width
@@ -65,7 +65,7 @@ export function formatStamp(epochSeconds: number | null | undefined): string {
  * of a path anyone reads: "dashboard/src/workspac…" identifies nothing, while
  * "…/workspaces/code/CodePage.tsx" identifies the file exactly. The leading
  * ellipsis marks the elision, and callers keep the untruncated string on the
- * element's `title` so nothing is actually lost. */
+ * element's `title` so nothing is lost. */
 export function elideStart(path: string | null | undefined, max = 34): string {
   if (!path) return '';
   if (path.length <= max) return path;

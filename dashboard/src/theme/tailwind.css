@@ -59,7 +59,7 @@
    * Latin subsets do not, but it earned its place in the bundle rather than on
    * the screen: all seven of its faces measured `unloaded` at runtime, because
    * a `@font-face` is only fetched when a glyph in its unicode-range is
-   * actually needed and Plex answered every one. What it did do was keep a
+   * needed and Plex answered every one. What it did do was keep a
    * fourth typeface in a three-face system and sit between the designed face
    * and the system fallback, where it could quietly cover a gap in Plex instead
    * of letting that gap show. Non-Latin now resolves to `system-ui`, which
@@ -68,7 +68,7 @@
   --font-sans: 'IBM Plex Sans Variable', system-ui, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', monospace;
   /* The engraved tier: the design system's display face, Archivo Variable,
-   * whose width axis is what lets `--display-width` (112%) actually expand
+   * whose width axis is what lets `--display-width` (112%) expand
    * the wordmark and legends. Only ever reached through this token, never a
    * hard-coded family in a component. */
   --font-display: 'Archivo Variable', 'IBM Plex Sans Variable', system-ui, sans-serif;
@@ -76,7 +76,7 @@
   /* Instrument type scale. `3xs` is the annotation size, used only for
    * letterspaced uppercase legends and units, never for prose.
    *
-   * The scale runs 10 → 60px on purpose. The old ceiling was 26px, which meant
+   * The scale runs from 10 to 60px on purpose. The old ceiling was 26px, which meant
    * a surface's headline quantity was set barely larger than its own row text
    * and the eye had nowhere to land first. The top three steps are the display
    * tier: they are for the ONE number a surface exists to report. */
@@ -155,7 +155,7 @@
     letter-spacing: 0.16em;
     text-transform: uppercase;
     font-weight: 500;
-    /* Legends carry digits (nav channel numbers, `SAVED 7D` vs `SAVED 30D`),
+    /* Legends carry digits (nav channel numbers, `SAVED 7D` versus `SAVED 30D`),
      * so they hold the same tabular figures as the readouts they label. */
     font-variant-numeric: tabular-nums;
     font-feature-settings: 'tnum' 1;
@@ -245,7 +245,7 @@
    * looks, so the two are separated: the ELEMENT becomes a transparent 44x44
    * hit area and an inner span goes on drawing the bezel at exactly the size
    * it was designed. Nothing on screen changes; the target it reports is now
-   * the target a pointer actually gets.
+   * the target a pointer gets.
    *
    * Deliberately NOT a pseudo-element on the small box. The gate measures the
    * element's own border box, and an `::after` that merely overlaps a larger

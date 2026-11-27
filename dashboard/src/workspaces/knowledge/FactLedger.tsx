@@ -108,7 +108,7 @@ export function FactLedger({
     }
   }, [selectedFactId]);
   // Recall counts have no absolute ceiling, so the rail is scaled to the
-  // busiest fact actually on screen. That makes the column a ranking of what
+  // busiest fact on screen. That makes the column a ranking of what
   // is loaded, which is what it is, rather than an implied fraction of some
   // total the daemon never reported.
   const recallCeiling = facts.reduce(

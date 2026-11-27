@@ -40,7 +40,7 @@ function jsonOk(body: unknown) {
   return { ok: true, status: 200, json: async () => body } as Response;
 }
 
-/** Every graph route answers 200 with a genuinely empty index. */
+/** Every graph route answers 200 with an empty index. */
 function serveMeasuredZeros() {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);

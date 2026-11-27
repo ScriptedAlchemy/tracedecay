@@ -251,7 +251,7 @@ describe('SSE canonical refresh, signals during the window', () => {
     expect(reducerStats().stale).toBe(true);
     expect(refresh.spy).toHaveBeenCalledTimes(2);
 
-    // Only the refresh that actually covers the overflow clears it.
+    // Only the refresh that covers the overflow clears it.
     await settleRefreshes(() => refresh.resolveAll());
     expect(reducerStats().stale).toBe(false);
   });
@@ -291,7 +291,7 @@ describe('SSE canonical refresh, failure is not success', () => {
     });
     expect(refresh.spy).toHaveBeenCalledTimes(1);
 
-    // A genuinely newer signal is a new attempt, though, here a reconnect.
+    // A newer signal is a new attempt, though, here a reconnect.
     await tick(() => {
       source.emit('code_index_activity', frame('code_index_activity', NEUTRAL_FAMILY, 1, RECONNECTED_RUN_ID));
     });

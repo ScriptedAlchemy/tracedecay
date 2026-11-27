@@ -44,7 +44,7 @@ export function settleEmergentField(
   const { graph, nodeCount, edgeDensity } = prepared;
   const fa2 = forceAtlas2.inferSettings(graph);
   forceAtlas2.assign(graph, {
-    // A dense component needs more settling time to actually reach the
+    // A dense component needs more settling time to reach the
     // wider spread the settings below ask for; capped so a huge sparse
     // graph doesn't pay for iterations it does not need.
     iterations: Math.round(Math.min(400, 200 + edgeDensity * 40)),
@@ -54,7 +54,7 @@ export function settleEmergentField(
       // the tissue reads dense, not lost in the void. A DENSE graph needs
       // the opposite correction on top of that: less pull-to-centre and
       // more repulsion, or its own edges collapse it into a fused hairball
-      // no matter how few nodes it has -- node count alone (the previous
+      // no matter how few nodes it has. Node count alone (the previous
       // basis for both knobs) says nothing about how much mutual pull a
       // component's edges apply.
       gravity:
@@ -71,7 +71,7 @@ export function settleEmergentField(
  * Constellation composure: FA2 lets disconnected components drift apart
  * under nothing but mutual repulsion and per-node gravity, which pulls
  * each node toward the origin independently of which component it is
- * in -- it does not pull components toward EACH OTHER. On a small graph
+ * in. It does not pull components toward EACH OTHER. On a small graph
  * (a handful of repos, each an isolated hub-and-spokes component) that
  * reliably produces two or three tight clumps separated by a gap several
  * times their own size: exactly the "vast dead field" the camera then
@@ -129,15 +129,15 @@ export function composeConstellation(graph: Graph): void {
     0,
     ...membersOf.filter((_, index) => index !== dominant).map((m) => m.length),
   );
-  // Two genuinely different shapes share this code path. Brain-style
+  // Two different shapes share this code path. Brain-style
   // graphs are a constellation of many roughly EQUAL-sized components
-  // (one hub-and-spokes cluster per repo) -- there is no "main" body,
-  // so the original flat ring (every component equally spaced, sized
+  // (one hub-and-spokes cluster per repo). There is no "main" body, so
+  // the original flat ring (every component equally spaced, sized
   // from the single largest extent) is exactly right and reads as a
   // deliberate necklace. Code-style graphs are the opposite: ONE
   // component holds most of the real nodes and everything else is a
   // stray orphan or two. Forcing the orphan case through the flat-ring
-  // formula was the actual defect -- a near-zero-extent orphan was
+  // formula was the defect: a near-zero-extent orphan was
   // pushed out to the SAME radius the dominant cluster needed, which
   // inflates the camera's fitted bbox far more than it helps legibility
   // ("orphans set the extent," shrinking the real structure to a
@@ -171,14 +171,14 @@ export function composeConstellation(graph: Graph): void {
     });
     // Re-centre the dominant component itself onto the origin, so the
     // spokes above (measured from its pre-move centroid) and the frame
-    // both anchor to where the graph's real mass actually is.
+    // both anchor to where the graph's real mass is.
     for (const node of membersOf[dominant]!) {
       graph.updateNodeAttribute(node, 'x', (x) => (x as number) - domCentroid.x);
       graph.updateNodeAttribute(node, 'y', (y) => (y as number) - domCentroid.y);
     }
     return;
   }
-  // The ring only needs to be as large as geometry actually
+  // The ring only needs to be as large as geometry
   // requires: adjacent components sit `2π/N` apart in angle, so the
   // chord between two neighbouring centroids is `2·ring·sin(π/N)`,
   // and that chord must clear twice each component's own extent for

@@ -107,7 +107,7 @@ export function ExplorerSplit({
           >
             <BayLegend>Query</BayLegend>
             {/* The aside's name lives on the landmark; the element a reader
-              * actually scrolls is this inner div, so it carries its own name
+              * scrolls is this inner div, so it carries its own name
               * (axe: scrollable-region-focusable wants the operable node
               * labelled, not an ancestor). */}
             <div
@@ -137,7 +137,7 @@ export function ExplorerSplit({
           onKeyDown={onResultsKeyDown}
         >
           {/* Named, because internal scrolling is licensed for LABELLED
-            * regions only, and this is the element that actually scrolls, the
+            * regions only, and this is the element that scrolls, the
             * section around it is `overflow-hidden`, so its own name never
             * reaches the scroll container a reader operates. */}
           <div

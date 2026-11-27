@@ -27,7 +27,7 @@ function toggleTheme() {
  *
  * `channel` is the route's channel, resolved by the shell (which sits inside
  * the router) rather than read here, so the register can be rendered and
- * tested on its own. Absent, the channel cell is simply not drawn; nothing is
+ * tested on its own. Absent, the channel cell is not drawn; nothing is
  * invented for it.
  */
 export function ScopeBar({

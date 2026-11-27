@@ -4,7 +4,7 @@
  * The savings overview above it is the legacy rollup: real figures, but shaped
  * for a dashboard rather than for accounting. This is the projection the CLI
  * and MCP also serve, and it carries what the rollup cannot, the eligible
- * population behind each figure, how much of that population was actually
+ * population behind each figure, how much of that population was
  * observed, what the value was priced against, and the reason a measurement is
  * missing when it is.
  *

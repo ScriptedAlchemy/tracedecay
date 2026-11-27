@@ -19,8 +19,8 @@ import type { UmbrellaProjection } from './umbrella.ts';
  * The Delivery lanes field. X is time, Y is registered repositories in
  * canonical-id order. The inbox serves no opened or merged time, so a PR bar
  * spans its daemon observation window (provider read snapshots and attention
- * observations) and is labelled that way. Semantic zoom (portfolio →
- * repository → pull request) is the existing URL scope: lanes outside the
+ * observations) and is labelled that way. Semantic zoom (portfolio, then
+ * repository, then pull request) is the existing URL scope: lanes outside the
  * focus compress into density ribbons with exact counts.
  */
 export type LaneZoom = 'portfolio' | 'repository' | 'pull_request';

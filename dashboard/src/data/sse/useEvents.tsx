@@ -86,7 +86,7 @@ export function EventsProvider({ children, url }: { children: ReactNode; url?: s
   // Opening the EventSource and subscribing the clock are external effects, so
   // they live in a committed effect with a matching teardown, not in render: a
   // render discarded before commit has no cleanup for a connection it opened,
-  // and setup → cleanup → setup (StrictMode, a URL change) must reconnect rather
+  // and setup, cleanup, then setup again (StrictMode, a URL change) must reconnect rather
   // than keep handing out a closed memoized object. State, not a ref, so
   // consumers re-render once the stream exists; the first commit publishes
   // `null`, which every hook below already reads as "no stream".
@@ -134,7 +134,7 @@ export function EventsProvider({ children, url }: { children: ReactNode; url?: s
         else reducer.abortReseed(token, failure);
         // If a signal arrived while that was in flight, the commit superseded
         // nothing and exactly one follow-up runs here. The reducer refuses a
-        // further one until a genuinely newer signal arrives, so the chain is
+        // further one until a newer signal arrives, so the chain is
         // bounded by real signals rather than by ticks.
         pump();
       });

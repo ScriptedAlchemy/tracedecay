@@ -122,7 +122,7 @@ describe('prepareField', () => {
     const { graph, denseField, roominess } = prepare(nodes, edges);
 
     expect(denseField).toBe(true);
-    // 7.5 px relaxed by the room this canvas actually gives each body.
+    // 7.5 px relaxed by the room this canvas gives each body.
     const ceiling = 7.5 * Math.max(0.62, roominess);
     expect(graph.getNodeAttribute('node-0', 'size') as number).toBeCloseTo(ceiling, 10);
     const sizes = graph.nodes().map((id) => graph.getNodeAttribute(id, 'size') as number);

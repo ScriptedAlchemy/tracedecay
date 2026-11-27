@@ -214,7 +214,7 @@ const SYNTHETIC_REPOS: ReadonlyArray<{
   }));
 
 /** Branch names for a repository, shaped like a real one: `main`, then a
- * spread of the prefixes this registry actually carries. */
+ * spread of the prefixes this registry carries. */
 function branchNames(count: number): string[] {
   const prefixes = ['feat', 'fix', 'refactor', 'test', 'wt', 'integrate'];
   return [
@@ -2057,8 +2057,8 @@ function savingsModelsPayload(range: string): Record<string, unknown> {
  * ========================================================================== */
 
 /**
- * The categories `usage_summary_from_events` actually emits, at the
- * proportions a real store actually holds them in (captured 2026-07-25).
+ * The categories `usage_summary_from_events` emits, at the
+ * proportions a real store holds them in (captured 2026-07-25).
  *
  * This replaces a sixteen-row fixture that ramped smoothly from 1,840 to 86.
  * a distribution no analytics store produces, and one that let a linear bar
@@ -2719,7 +2719,7 @@ const DOCTOR_FAMILIES = [
  * envelope was the only way to keep the audited surface at zero axe violations.
  * It kept the gate green by keeping the defective markup off the page. The
  * badge now follows the `StateChip` idiom. Hue on the lamp and glyph, label on
- * an AA token, so the findings can be served and actually scanned.
+ * an AA token, so the findings can be served and scanned.
  *
  * All eight `DoctorEvidenceStateV1` values appear exactly once, so every badge
  * variant is on screen for the axe scan rather than a representative few. Only
@@ -3512,7 +3512,7 @@ const capabilities: Record<string, unknown> = {
  *     uniform fixture would never show that it needed to be.
  *   - `last_message_at` is null on most rows. On the real profile only 14 of
  *     100 sessions carry an end later than their start, and drawing open
- *     threads correctly is the single most load-bearing honesty behaviour on
+ *     threads correctly is the most important honesty behaviour on
  *     the surface. A fixture where every session has an end would render a
  *     weave that cannot exist.
  *   - Some rows report zero messages, which the weave draws hollow.
@@ -3521,7 +3521,7 @@ const capabilities: Record<string, unknown> = {
  * One deliberate deviation from the captured payload, recorded here rather
  * than hidden: the real store served a single provider ("cursor"), so its host
  * axis has one column. The fixture carries three providers so the audit
- * actually exercises column layout, dividers and the per-host readout row.
+ * exercises column layout, dividers and the per-host readout row.
  * ========================================================================== */
 
 const LOOM_PROVIDERS = ['claude', 'codex', 'cursor'] as const;
@@ -4973,7 +4973,7 @@ function feedbackProximityPayload(): Record<string, unknown> {
 }
 
 /** Outstanding and dropped tokens for the newest tree session the Agents
- * page actually names (`session.cursor.solo`). Counts match the rows. */
+ * page names (`session.cursor.solo`). Counts match the rows. */
 function listTaskHandoffsPayload(): Record<string, unknown> {
   const digest = (label: string): string =>
     `sha256:${label.padEnd(8, '0')}${'0'.repeat(56)}`.slice(0, 71);
@@ -5552,7 +5552,7 @@ function observatoryEnvelope(): Record<string, unknown> {
       denominator: 'outcome_observations',
       eligible: 1_884,
     }),
-    // Two the projector genuinely could not complete on a store with no
+    // Two the projector could not complete on a store with no
     // revocation or stack-transition observations. The audit needs these: a
     // fully-populated fixture never shoots the unavailable plate.
     feedbackMetric({
@@ -6002,7 +6002,7 @@ export function resolveFixture(pathname: string, search = ''): unknown {
 
 /**
  * The fixture payload for a request pathname, or `undefined` when no fixture
- * models that exact route. `search` is the raw query string (e.g.
+ * models that exact route. `search` is the raw query string (for example
  * `?node_id=sym-0`); it is used only for routes whose response body
  * legitimately varies by query (the graph subgraph neighborhood), and is
  * otherwise ignored so all other routes resolve by pathname alone.

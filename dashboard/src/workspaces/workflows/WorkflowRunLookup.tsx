@@ -46,7 +46,7 @@ export function RunLookupPanel({
   result: WorkResult<WorkflowRunProjection> | undefined;
   pending: boolean;
   /** Every `id@version` the registry currently serves, so a run can pivot to
-   * its pinned definition only when that definition is actually listed. */
+   * its pinned definition only when that definition is listed. */
   registryKeys: ReadonlySet<string>;
   onLookup: (runId: string | null) => void;
   onSelectDefinition: (definitionId: string, version: number) => void;

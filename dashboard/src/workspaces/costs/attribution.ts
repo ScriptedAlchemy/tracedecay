@@ -38,7 +38,7 @@ export interface ProviderRow {
   totalCostUsd: number | null;
   totalTokens: number | null;
   actual: TokenActualV1 | null;
-  /** This provider's share of the priced total across providers, 0–1. Null
+  /** This provider's share of the priced total across providers, 0 to 1. Null
    * when the row or the total has no priced dollars. */
   share: number | null;
 }
@@ -284,7 +284,7 @@ export function formatUsd(value: number | null | undefined): string {
   })}`;
 }
 
-/** A 0–1 fraction as a whole-number percentage, or an em dash. */
+/** A 0 to 1 fraction as a whole-number percentage, or an em dash. */
 export function formatShare(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return '—';
   return `${(value * 100).toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;

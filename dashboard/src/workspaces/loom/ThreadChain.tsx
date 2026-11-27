@@ -23,7 +23,7 @@ import {
 } from '../../contracts/generated.ts';
 
 /**
- * The selected session's exact evidence: prompt → turns → tools, then the
+ * The selected session's exact evidence: prompt, turns, then tools, then the
  * provider-qualified edits, commits and branch/worktree spans the temporal
  * read attaches to the same session identity.
  *
@@ -33,7 +33,7 @@ import {
  *
  * The LCM session endpoint may omit `timestamp`, so the chain is ordered by
  * the store's `ordinal` and presented as a sequence unless timestamps are
- * actually present, no elapsed times are inferred from ordinal positions.
+ * present, no elapsed times are inferred from ordinal positions.
  */
 interface ThreadRelations {
   commits: readonly LoomCommitV1[];

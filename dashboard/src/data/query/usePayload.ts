@@ -26,7 +26,7 @@ export function usePayload<T>(
   return useQuery<PayloadResult<T>>({
     queryKey: scopedQueryKey(scope, key, url),
     // React Query's signal, threaded through so a read this dashboard has
-    // stopped waiting for actually stops. Two callers abandon reads: a scope
+    // stopped waiting for stops. Two callers abandon reads: a scope
     // change (a scoped read's key carries its project, so every one of them is
     // replaced at once) and an SSE invalidation, which cancels the in-flight
     // refetch by default. Without the signal both abandoned the PROMISE while

@@ -11,7 +11,7 @@ import {
 
 /** How the connection state maps onto the sixteen-state domain taxonomy. Kept
  * beside the panel that renders it because the mapping is the whole honesty
- * claim: `offline` is a genuinely dead EventSource and is NEVER inferred from
+ * claim: `offline` is a dead EventSource and is NEVER inferred from
  * "nothing lately", which is only a quiet system. */
 const CONNECTION_STATE: Record<
   SseConnectionState,
@@ -36,7 +36,7 @@ const CONNECTION_STATE: Record<
 
 /**
  * The Brain's live-signal readout: connection honesty first, then what the
- * pulse ring actually holds.
+ * pulse ring holds.
  *
  * Two states this panel exists to keep apart:
  *

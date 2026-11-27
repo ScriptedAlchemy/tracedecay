@@ -25,7 +25,7 @@ describe('motion preference publication', () => {
     setMotionPreference('full');
     // 'full' must be distinguishable from absent: tokens.css keys its media-query
     // path on `:not([data-motion='full'])`, which only works if the attribute is
-    // actually present and carries the three-state value.
+    // present and carries the three-state value.
     expect(document.documentElement.dataset['motion']).toBe('full');
   });
 

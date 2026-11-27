@@ -290,7 +290,7 @@ function PathReading({ payload }: { payload: GraphPathPayloadV1 }) {
   );
 }
 
-/** The edge that carried one hop, with the direction it actually runs in.
+/** The edge that carried one hop, with the direction it runs in.
  *
  * The producer walks bidirectionally, so consecutive path entries can be joined
  * by an edge pointing either way, and which way it points changes what the hop

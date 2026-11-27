@@ -162,7 +162,7 @@ export function Panel({
 
 type ReadoutSize = 'sm' | 'md' | 'lg' | 'xl' | 'display';
 
-/** `sm`–`lg` stay on the text scale for cells that sit inside prose rhythm.
+/** `sm` to `lg` stay on the text scale for cells that sit inside prose rhythm.
  * `xl` and `display` switch to `.td-display`, which retunes tracking and
  * weight for large monospaced figures. The two tiers are different kinds of
  * object, not different sizes of the same one. */
@@ -451,7 +451,7 @@ export interface ReadoutItem {
   value: ReactNode;
   unit?: string | undefined;
   note?: ReactNode;
-  /** 0–1 magnitude for the readout's rail; omit when the quantity has no
+  /** 0 to 1 magnitude for the readout's rail; omit when the quantity has no
    * meaningful ceiling to be measured against. */
   fraction?: number | null | undefined;
 }

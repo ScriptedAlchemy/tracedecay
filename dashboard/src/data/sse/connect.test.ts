@@ -280,7 +280,7 @@ describe("dashboard SSE wire bridge", () => {
   });
 
   /**
-   * The shape the activity lane actually puts on the wire.
+   * The shape the activity lane puts on the wire.
    *
    * Every fixture above is a poll-lane frame: a `run-<n>-<micros>` run id and a
    * stream id of its own. The activity lane emits neither. It publishes on the

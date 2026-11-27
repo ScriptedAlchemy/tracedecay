@@ -40,7 +40,7 @@ interface VirtualListProps<T> {
   items: T[];
   renderItem: (item: T, index: number) => ReactNode;
   getKey: (item: T, index: number) => string | number;
-  /** Optional non-virtualized content pinned above the rows (e.g. a count
+  /** Optional non-virtualized content pinned above the rows (for example a count
    * strip). Scrolls with the list, matching the current inline-header idiom. */
   header?: ReactNode;
   estimateHeight?: number;

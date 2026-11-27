@@ -18,7 +18,7 @@ import { StateChip, type DomainStateKind } from './StateChip';
  *
  * That is the point of the type rather than a side effect of it. The ladders
  * previously terminated in two boundary components and eight hand-rolled
- * `pending → undefined → transport` chains, and those chains drifted: the same
+ * chains that tested `pending`, then `undefined`, then `transport`, and those chains drifted: the same
  * transport failure was `error` on one surface and the daemon's own state on
  * another, because each site re-derived the mapping. A single normalisation
  * makes drift a compile error instead of a screen nobody looks at twice.
@@ -334,7 +334,7 @@ export function CenteredState({
       }
     : STATE_GUIDANCE[kind];
   // A dead channel on an instrument still shows its ruled field and its bezel:
-  // the reader can see the surface is present and simply carrying no signal.
+  // the reader can see the surface is present and carrying no signal.
   // Sized by its CONTAINER, not the viewport: this plate renders both on
   // full-width channels and inside narrow query rails, and the wide-plate
   // padding (p-8 outside, px-8 inside) left a ~230px rail about 90px of text

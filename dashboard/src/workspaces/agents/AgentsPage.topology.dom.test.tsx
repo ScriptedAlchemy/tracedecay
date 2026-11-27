@@ -331,7 +331,7 @@ describe('AgentsPage delegation topology', () => {
     expect(mark('codex:session.codex.grandchild').getAttribute('aria-label')).toMatch(
       /^Codex, codex session session\.codex\.grandchild, generation 2\. Select to read its token frontier\.$/,
     );
-    // The generation headers say what generation 0 actually holds.
+    // The generation headers say what generation 0 holds.
     const gen0 = document.querySelector('[data-topology-generation="0"]')!;
     expect(gen0.textContent).toMatch(/gen 0/);
     expect(gen0.textContent).toMatch(/tops/);

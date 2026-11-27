@@ -135,7 +135,7 @@ function TrustHistoryBody({ data }: { data: MemoryTrustHistoryPayloadV1 }) {
             * and it scrolls once a fact has more than a handful of events. A
             * scrollable region has to be keyboard-operable (WCAG 2.1.1), so the
             * list itself takes the tab stop and carries its own accessible
-            * name, the name must sit on the node that actually scrolls, not on
+            * name, the name must sit on the node that scrolls, not on
             * an ancestor. */}
           <ol
             role="region"

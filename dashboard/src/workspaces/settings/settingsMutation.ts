@@ -96,7 +96,7 @@ export interface SettingsMutationRequest {
 export async function applySettingsMutation(
   request: SettingsMutationRequest,
 ): Promise<SettingsMutationResult> {
-  // Before the refresh, not just before the PATCH. A control the scope has
+  // Refuse before the refresh as well as before the PATCH. A control the scope has
   // disabled must issue no request at all: re-reading settings the user cannot
   // change is work the daemon was never asked for, and it would make the
   // disabled control look like it had started something.

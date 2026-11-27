@@ -226,7 +226,7 @@ export function createSseReducer<TPayload = unknown>(
    * <=10/s cadence. Returns the coalesced batch and clears the pending queue
    * and the (single) refetch signal. Draining is not the same as serving: the
    * cleared flag is only the notification, and the need it announced stays in
-   * `canonicalEpoch` until a refresh actually supersedes it. `stale` is sticky
+   * `canonicalEpoch` until a refresh supersedes it. `stale` is sticky
    * until {@link commitReseed} succeeds.
    */
   function takeBatch(): SseBatch<TPayload> {

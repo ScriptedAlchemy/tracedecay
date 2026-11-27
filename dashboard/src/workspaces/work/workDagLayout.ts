@@ -20,7 +20,7 @@ import type { WorkDagReading } from './workViewsModel.ts';
  *   informational   `informational_relations`, a named soft relation that
  *                   gates nothing. It may run in any direction.
  *   causal          `causal_candidates`, a nominated possible cause. Also
- *                   soft, also directional (cause → the task nominating it).
+ *                   soft, also directional (cause to the task nominating it).
  *
  * A relation whose far end the page did not return is reported in
  * `unresolved` rather than drawn to nowhere or dropped.

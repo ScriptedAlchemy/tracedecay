@@ -31,7 +31,7 @@ import {
  * request.
  *
  * `locked` rather than `denied`: nothing was refused by an authority, the
- * gateway simply will not accept a write for this scope, and the remedy is to
+ * gateway will not accept a write for this scope, and the remedy is to
  * change scope rather than to gain permission. */
 function notWritable<T>(reason: string): WorkResult<T> {
   return { outcome: "refused", state: "locked", detail: reason };
@@ -44,7 +44,7 @@ function notWritable<T>(reason: string): WorkResult<T> {
  * returned receipt into the cached graph. A product graph is a coherent version
  * with one verified runtime projection; splicing a newer event into it would
  * assemble a head the daemon never produced. Refetching costs a round trip and
- * keeps the page showing a state that actually existed.
+ * keeps the page showing a state that existed.
  */
 export function useWorkCommand<Request, Response>(
   route: WorkRoute<Request, Response>,

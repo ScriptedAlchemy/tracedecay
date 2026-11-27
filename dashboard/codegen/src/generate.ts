@@ -5,7 +5,7 @@
  * Design goals (binding, per docs/plans/tracedecay-v2/11-dashboard-frontend.md
  * §"Typed presentation contracts"):
  *   - The emitted file exposes an `assertNever` helper so the closed unions
- *     (e.g. the 17-value domain-state enum) stay exhaustively switchable.
+ *     (for example the 17-value domain-state enum) stay exhaustively switchable.
  *   - Internally-tagged `oneOf` variants remain exact discriminated unions;
  *     codegen never invents variants absent from Rust.
  *   - Generation is deterministic: stable (alphabetical) ordering, no
@@ -48,7 +48,7 @@ export interface JsonSchema {
 }
 
 interface GeneratedContracts {
-  /** Map of relative output path -> file content. */
+  /** Map of relative output path to file content. */
   files: Record<string, string>;
 }
 
@@ -285,7 +285,7 @@ function resolveType(schema: JsonSchema, ctx: ResolveCtx): Resolved {
     return applyNullable({ ts: "boolean", zod: "z.boolean()", ann: typeAnn("boolean") }, nullable);
   }
   if (nullable && !primary) {
-    // A null-only schema (e.g. the `{ "type": "null" }` arm of a nullable ref).
+    // A null-only schema (for example the `{ "type": "null" }` arm of a nullable ref).
     return { ts: "null", zod: "z.null()", ann: typeAnn("null") };
   }
 
@@ -454,7 +454,7 @@ function emitAlias(desc: string, name: string, ann: string, zod: string, ts: str
   };
 }
 
-// Bundle -> files.
+// Bundle to files.
 
 export function generateContracts(bundles: JsonSchema[]): GeneratedContracts {
   const defs: Array<[string, JsonSchema]> = [];

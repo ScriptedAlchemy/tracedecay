@@ -4,7 +4,7 @@
  *
  * Everything here is composition, not measurement. The ONLY quantities a body
  * carries from the registry are its crown radius (indexed mass, set by the
- * caller) and — applied later by the renderer — its resting brightness
+ * caller) and, applied later by the renderer, its resting brightness
  * (recency) and any admitted heat. Filaments are visual texture inside one
  * identity; they are never additional graph relations, and no particle is a
  * fact. The generator is seeded from the project id so the same registry
@@ -17,7 +17,7 @@
 export interface NeuralBodySpec {
   /** Stable identity; the sole seed. */
   readonly id: string;
-  /** Crown radius in field units — the caller's mass measurement. */
+  /** Crown radius in field units, the caller's mass measurement. */
   readonly radius: number;
   /** Depth layer, 0 (front) to 2 (back). Softens and thins the body. */
   readonly depth: number;

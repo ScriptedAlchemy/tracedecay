@@ -39,7 +39,7 @@ interface AnnotatedHub<T extends HubRow> {
 /** The headline a symbol is shown under, and the one place that decides it.
  *
  * `name` first: `qualified_name` is not served by the hub endpoint at all, so
- * the chain is honest about what the payload actually carries. The em dash is
+ * the chain is honest about what the payload carries. The em dash is
  * the end of the chain rather than a separate absent case, so a row with no
  * name and a row that is not there read the same way, which they should,
  * because neither can be named. `AnnotatedHub.display` is this same string

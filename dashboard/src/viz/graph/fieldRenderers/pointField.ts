@@ -34,7 +34,7 @@ import {
  *
  * A project body is a Vogel disc of its own stores (ice, at the core) and
  * artifacts (kind hue), so its area is its holdings and its luminance is the
- * density of what TraceDecay actually holds. Past {@link MAX_POINTS} units a
+ * density of what TraceDecay holds. Past {@link MAX_POINTS} units a
  * point stands for several, and the legend prints the ratio. A packed cell
  * is drawn as one counted frame until the camera is close enough for its
  * members to separate. Hand-written Canvas2D: no WebGL context, frames only

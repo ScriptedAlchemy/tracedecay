@@ -521,7 +521,7 @@ describe('ExplorerPage inspection', () => {
     await user.click(row);
     expect(await screen.findByText('Payload provenance')).toBeTruthy();
     // Nothing to measure is not a measurement of nothing: the section, the
-    // rail, and the payload key are all simply absent.
+    // rail, and the payload key are all absent.
     expect(screen.queryByText('Measured')).toBeNull();
     expect(screen.queryByRole('img', { name: /^degree/ })).toBeNull();
     const provenance = screen.getByText('Payload provenance').closest('details');

@@ -84,7 +84,7 @@ function Row({ term, value }: { term: string; value: string }) {
 }
 
 /** A titled grid of dimension cards with a header stating how many of them a
- * reader is actually being shown a figure for. */
+ * reader is being shown a figure for. */
 export function PlanDimensionGrid({
   label,
   dimensions,

@@ -21,7 +21,7 @@ import type { DomainStateKind } from '../../ui/StateChip.tsx';
 export interface StatusRegister {
   /** Stable per-workspace id; the strip keys on it. */
   readonly id: string;
-  /** The register's engraved name, e.g. `Graph`. */
+  /** The register's engraved name, for example `Graph`. */
   readonly label: string;
   /** The 14px monoline glyph that identifies the subsystem beside its name.
    * Identity only; the swatch and the word carry the state. */

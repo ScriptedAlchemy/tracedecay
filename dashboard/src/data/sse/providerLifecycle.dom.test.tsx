@@ -3,7 +3,7 @@
  * effect's cleanup closes it, never render. These cases pin the two failures
  * a render-time connection has, at the provider boundary and with the real
  * render clock: a render discarded before commit leaks a source nothing will
- * close, and effect setup → cleanup → setup (StrictMode, a URL change) leaves
+ * close, and effect setup, cleanup, then setup again (StrictMode, a URL change) leaves
  * the memoized, already-closed source in context so no event reaches a view.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -90,7 +90,7 @@ describe('EventsProvider connection lifecycle', () => {
       <StrictMode>{tree('/api/events', <LiveView />, client)}</StrictMode>,
     );
 
-    // StrictMode ran setup → cleanup → setup. Whatever that opened, one source
+    // StrictMode ran setup, cleanup, then setup again. Whatever that opened, one source
     // is live, every other one was closed exactly once, and the live one is the
     // one in context: a frame on it reaches the view through the render clock.
     const open = FakeEventSource.open();

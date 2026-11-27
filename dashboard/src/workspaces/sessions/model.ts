@@ -213,7 +213,7 @@ export function recordedModels(row: LoomSessionRowV1): { models: string[]; unrec
 }
 
 /* ------------------------------------------------------------------------ *
- * Selection → index row join
+ * Selection to index row join
  * ------------------------------------------------------------------------ */
 
 type IndexJoin<R> =

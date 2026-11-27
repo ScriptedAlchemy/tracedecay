@@ -294,7 +294,7 @@ interface FacetCount {
   readonly count: number;
 }
 
-/** Pivot counts over the rows actually loaded, never over the whole index. */
+/** Pivot counts over the rows loaded, never over the whole index. */
 export function facetCounts(hits: readonly Hit[]): FacetCount[] {
   const counts = new Map<string, number>();
   for (const hit of hits) {

@@ -28,7 +28,7 @@ import {
 import { SchemaConvergencePanel } from '../observatory/DoctorInspector.tsx';
 
 /**
- * The Brain, scoped to one project: "what does TraceDecay actually know about
+ * The Brain, scoped to one project: "what does TraceDecay know about
  * this project?"
  *
  * Selecting a project used to change nothing here, the surface still drew the
@@ -391,7 +391,7 @@ function ScopedReadout({
 function ProjectHoldings({ data }: { data: ProjectContextPayloadV1 }) {
   // The route's own discriminant, honoured before its arrays are read. A
   // non-`ok` body sends `project: null` with empty `aliases`, which
-  // rendered as a project that simply holds nothing, the same picture a real
+  // rendered as a project that holds nothing, the same picture a real
   // empty project draws, for a response that measured nothing at all.
   if (data.status !== 'ok') {
     return (
@@ -535,7 +535,7 @@ function SymbolsByKind({
   );
 }
 
-/** What agents have actually been doing in this project, by tool family. Real
+/** What agents have been doing in this project, by tool family. Real
  * counts from the project's own analytics store; ranked against the busiest
  * family so the column reads as a distribution. */
 function ActivityByCategory({

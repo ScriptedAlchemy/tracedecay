@@ -766,7 +766,7 @@ interface TimelineMark {
   title: string;
   state: EvidenceState;
   observedAtMicros: number;
-  /** 0–1 along the rail. */
+  /** 0 to 1 along the rail. */
   position: number;
 }
 
@@ -775,7 +775,7 @@ interface TimelineMark {
  * summarises their states into one. */
 export interface TimelineCluster {
   key: string;
-  /** 0–1 along the rail: the position of the cluster's newest member. */
+  /** 0 to 1 along the rail: the position of the cluster's newest member. */
   position: number;
   marks: readonly TimelineMark[];
   oldestMicros: number;

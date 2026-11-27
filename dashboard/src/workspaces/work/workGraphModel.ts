@@ -189,7 +189,7 @@ export function terminalWorkAttempt(state: WorkAttemptStateV1): boolean {
  * Distinct from `channelGap` for the same reason `attemptChannelGap` is: the
  * contract carries these measurements, so reporting them as
  * `unsupported_schema` would tell a reader the build cannot do something it
- * can. Each case is the state the read actually returned, in that state's own
+ * can. Each case is the state the read returned, in that state's own
  * words, including the one that is not a failure at all.
  */
 export function graphChannelGap(
@@ -274,7 +274,7 @@ interface WorkEffortSplitReading {
   readonly blocked: number;
 }
 
-/** What was asked for against what is actually running. Gated on complete
+/** What was asked for against what is running. Gated on complete
  * runtime coverage by the same authority rule as the effort split. */
 export interface WorkConcurrencyReading {
   readonly requested: number;

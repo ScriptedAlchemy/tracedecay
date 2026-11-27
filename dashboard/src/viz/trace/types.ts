@@ -73,7 +73,7 @@ export interface TraceChannel {
 /**
  * A type enclosure derived from `contains` edges in the neighbors payload.
  *
- * Only emitted when the payload actually carried `contains` edges whose
+ * Only emitted when the payload carried `contains` edges whose
  * container encloses at least two drawn members; otherwise the surface counts
  * none and says so, rather than inventing an enclosure from
  * shared file paths (wire-honesty: do not invent an enclosure).
@@ -91,7 +91,7 @@ export interface TraceMembrane {
  * is counted from rows the endpoint returned; nothing is estimated.
  */
 export interface TraceCoverage {
-  /** Hops actually fetched. 2 when hop-2 expansion ran, 1 when it did not. */
+  /** Hops fetched. 2 when hop-2 expansion ran, 1 when it did not. */
   readonly hopsFetched: number;
   /** Symbols drawn on the field, focus included. */
   readonly drawn: number;

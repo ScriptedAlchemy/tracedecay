@@ -4,7 +4,7 @@ import { MeterRow } from './instrument.tsx';
 
 /**
  * The distribution row five workspace plates had each rebuilt. Two of its
- * properties are load-bearing rather than cosmetic: a row whose share of the
+ * properties affect what the row says, not only how it looks: a row whose share of the
  * whole is unknown draws no length, and the rail carries exactly one height
  * class, so its size does not depend on which utility the stylesheet happens to
  * emit last.

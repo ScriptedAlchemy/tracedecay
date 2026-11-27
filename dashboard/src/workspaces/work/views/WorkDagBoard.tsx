@@ -71,7 +71,7 @@ type FocusPath = 'none' | 'root' | 'outcome';
 
 /** The gating edges that join consecutive tasks of the authority's chain. The
  * chain is over the whole graph version, so a consecutive pair with no drawn
- * edge between them is simply not emphasised, never invented. */
+ * edge between them is not emphasised, never invented. */
 function criticalEmphasis(layout: WorkDagLayout, chain: readonly string[]): Emphasis {
   const tasks = new Set(chain);
   const edges = new Set<string>();

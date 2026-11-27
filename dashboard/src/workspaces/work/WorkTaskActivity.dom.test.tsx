@@ -17,7 +17,7 @@ import {
  * a live subscription that has received work, a live subscription that has
  * received none, and a subscription that cannot receive anything because the
  * link is down. Only the middle one is a quiet system; reporting the third as
- * the second would be this page claiming there is no work when it simply cannot
+ * the second would be this page claiming there is no work when it cannot
  * see.
  */
 
@@ -99,7 +99,7 @@ describe('the Work task-activity reading', () => {
  * behind it is shared, so every project's task frames sit in the same 64 entries
  * regardless of which project is selected. Counting the family alone therefore
  * reported project A's work under project B, a false "N in live window" that
- * looks exactly like real work in the scope a reader is actually looking at.
+ * looks exactly like real work in the scope a reader is looking at.
  * There is no per-project event route to switch to, and inventing one is not the
  * fix; the scoping belongs on what the buffer already holds.
  */

@@ -215,7 +215,7 @@ export function reflowFailures(report: ReflowReport, tag: string): string[] {
  *
  * Only collapsed scrollers are gated. `OverflowOffender.kind === 'clipped'`
  * stays a diagnostic because deciding whether an element that reaches past the
- * viewport inside a hidden ancestor has actually lost anything takes judgement;
+ * viewport inside a hidden ancestor has lost anything takes judgement;
  * a scroller with content and zero height has lost all of it, measurably.
  */
 export function clippedContentFailures(report: ReflowReport, tag: string): string[] {
@@ -278,7 +278,7 @@ export interface TouchTargetReport {
  *   - the visually-hidden idiom. A 1px box that is also clipped, which is how
  *     `sr-only` parks the skip link off-screen until it takes focus. It is not
  *     a pointer target at 1x1; it is a keyboard affordance that becomes
- *     full-size on focus. Both halves are required, so a genuinely tiny
+ *     full-size on focus. Both halves are required, so a tiny
  *     unclipped control is still reported.
  *   - WCAG 2.5.5's inline exception: a link inside a sentence is sized by the
  *     line box around it and cannot be enlarged without breaking the text.

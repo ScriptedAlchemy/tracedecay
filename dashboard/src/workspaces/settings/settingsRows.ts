@@ -132,7 +132,7 @@ export function boundKeys(): readonly string[] {
 /**
  * What a row's write column states. Three answers, none of which is a
  * boolean: a key may be writable (and to what), locked by a gate (and by
- * which, with the authority's reason), or simply cannot be edited here.
+ * which, with the authority's reason), or cannot be edited here.
  *
  * `locked` carries a fourth gate beside the three scope gates: the read itself
  * named no revision to hold a write against, so the editor is unavailable for
@@ -222,7 +222,7 @@ export function scopeNoun(scope: SettingsScope): string {
  * The worker selection is the one resource whose adoption the daemon documents
  * ahead of time: it is read at startup, so a saved change waits for a restart.
  * Project and user writes report `resync_recommended` / `restart_recommended`
- * in the PATCH response, so before apply their requirement is genuinely not
+ * in the PATCH response, so before apply their requirement is not
  * yet known, and is labelled as such rather than guessed.
  */
 export type ApplyRequirement =

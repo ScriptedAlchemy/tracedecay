@@ -2,7 +2,7 @@
  * The readout strip must not become a second source of truth.
  *
  * Two failure modes are worth a test each. The first is DRIFT: a cell prints a
- * count the drawn rows do not actually carry, because someone typed it once
+ * count the drawn rows do not carry, because someone typed it once
  * and the payload moved. The second is SILENT ABSENCE: a measurement the wire never sent gets
  * rendered as a blank cell or a plausible zero, which reads as "none" when the
  * truth is "not asked, not answered".
@@ -107,7 +107,7 @@ describe('the header readout strip', () => {
     expect(cell.value.kind).toBe('absent');
     expect(text(cell.value)).toContain('no contains edges');
     // Absence of the edge kind is not absence of types, and the cell has to
-    // carry that distinction or it is simply wrong.
+    // carry that distinction or it is wrong.
     expect(cell.qualifier).toContain('not a claim about whether these symbols have types');
   });
 

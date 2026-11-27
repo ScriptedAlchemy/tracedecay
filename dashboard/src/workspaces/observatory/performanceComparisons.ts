@@ -33,7 +33,7 @@ interface DispositionPresentation {
  * `insufficient_evidence` maps to `unknown`, never to `denied`. The two are
  * different chips with different icons and different `data-state` values, so a
  * comparison that could not be judged is distinguishable from one that was
- * judged and refused by markup alone, not only by prose.
+ * judged and refused by markup alone, without relying on prose.
  */
 export function dispositionPresentation(
   disposition: ComparisonDispositionV1,

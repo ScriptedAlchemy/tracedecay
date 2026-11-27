@@ -65,7 +65,7 @@ export function CommandPalette({
     rowId: string | null;
   }>({ query: '', index: 0, rowId: null });
   // Entities: registered projects become scope-setting results. Fetched only
-  // while the palette is open; a failed registry read simply yields no
+  // while the palette is open; a failed registry read yields no
   // project rows (workspace navigation never depends on it).
   // The shared registry read, so opening the palette on a surface that already
   // listed the registry costs nothing, and so a registry change invalidates this

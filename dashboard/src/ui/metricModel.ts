@@ -85,7 +85,7 @@ export function metricPresentation(metric: MetricValueV1): MetricPresentation {
   };
 }
 
-/** `feedback_latency_p95` → `feedback latency p95`. Words only; the exact wire
+/** `feedback_latency_p95` becomes `feedback latency p95`. Words only; the exact wire
  * identifier is never replaced, only spaced. */
 export function humanizeMetric(identifier: string): string {
   return identifier.replaceAll('_', ' ');

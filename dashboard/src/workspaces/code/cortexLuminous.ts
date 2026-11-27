@@ -87,7 +87,7 @@ async function luminousLayout(
   return { positions, bounds: boundsOf(positions.values()) };
 }
 
-/** Degree → point radius and luminance, on the slice's one shared scale. */
+/** Degree to point radius and luminance, on the slice's one shared scale. */
 export function luminance(degree: number | null, maxDegree: number): number {
   if (degree == null || degree <= 0) return 0.28;
   return 0.28 + 0.72 * Math.sqrt(Math.min(1, degree / maxDegree));

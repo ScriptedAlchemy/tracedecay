@@ -14,10 +14,10 @@
  * equivalent to a read that found nothing: the dashboard envelope distinguishes
  * them, and this harness surfaces that distinction rather than flattening it.
  *
- *   `domain_state: "ready"`                  -> payload present, counts below
- *   `domain_state: "complete_zero_findings"` -> genuinely empty, and says so
- *   `domain_state: "unknown"` + null payload -> the read FAILED; the reason is
- *                                               in `coverage.omission_reasons`
+ *   `domain_state: "ready"`                  means payload present, counts below
+ *   `domain_state: "complete_zero_findings"` means empty, and says so
+ *   `domain_state: "unknown"` with a null payload means the read FAILED; the
+ *                                               reason is in `coverage.omission_reasons`
  *
  * That last case is the one worth reading carefully. `DashboardEnvelopeV1::
  * unavailable` sets `Unknown` and pushes the reason onto
@@ -29,7 +29,7 @@
  *   SWEEP_BASE_URL=http://127.0.0.1:8397 npx tsx stories/live-multiproject.ts
  *
  * Exit code is non-zero if any enrolled project fails to serve a graph
- * overview, so this is usable as a gate and not only as a report.
+ * overview, so this works as a gate as well as a report.
  */
 
 // This file has no imports, and top-level `await` needs it to be a module.
@@ -38,7 +38,7 @@ export {};
 const BASE = process.env['SWEEP_BASE_URL'] ?? 'http://127.0.0.1:8397';
 
 /** Envelope fields this harness reads. Deliberately loose: the point is to
- *  report whatever a live daemon actually sent, including shapes a stricter
+ *  report whatever a live daemon sent, including shapes a stricter
  *  schema would reject outright. */
 interface Envelope {
   domain_state?: string;

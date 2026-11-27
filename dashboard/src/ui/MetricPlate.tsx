@@ -120,7 +120,7 @@ export function MetricPlate({
 /**
  * Every measurement in a read model, grouped by its producing source.
  *
- * Each group header states how many of its plates actually carry a value, so a
+ * Each group header states how many of its plates carry a value, so a
  * source whose store was unreachable cannot read as a section of zeroes. The
  * grouping itself is the wire's own `provenance.source` attribution rather than
  * a taxonomy invented here.

@@ -18,8 +18,8 @@ import { AutomationsPage } from "./AutomationsPage.tsx";
  * managed skills", "no fact application outcomes are recorded", "no automation
  * runs are recorded". Those sentences are the exact fabrication this project
  * forbids: a queue nobody could read must never present as a queue that was
- * read and found empty. Every case below asserts they are absent, not merely
- * that some error appeared. The scheduler bay has no empty state; its
+ * read and found empty. Every case below asserts they are absent, which is
+ * stronger than asserting that some error appeared. The scheduler bay has no empty state; its
  * fabrication would be a configuration reading surviving a failed read.
  */
 const server = fixtureServer();
@@ -107,7 +107,7 @@ describe("AutomationsPage under HTTP transport faults", () => {
       expect(within(jobs).queryByText("Memory curator")).toBeNull();
 
       // The neighbours are untouched and still render their real rows, so the
-      // failure is scoped to the read that actually failed.
+      // failure is scoped to the read that failed.
       const skills = screen.getByRole("region", { name: "Managed skills" });
       expect(within(skills).getByText("Code Slop Cleanup")).toBeTruthy();
       expect(within(skills).queryByText(/no managed skills/i)).toBeNull();

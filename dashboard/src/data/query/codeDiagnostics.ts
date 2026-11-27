@@ -14,7 +14,7 @@
  * So there is deliberately no optimistic update below. A refresh in particular
  * must never be optimistic: the whole quantity a reader takes from this surface
  * is whether the diagnostics on screen were produced by an analyzer that has
- * actually run, and a client-side "refreshing…" that outlived a request the
+ * run, and a client-side "refreshing…" that outlived a request the
  * daemon dropped would be precisely a state asserted rather than measured.
  *
  * The settings write is compare-and-set. `expected_revision` is required by the

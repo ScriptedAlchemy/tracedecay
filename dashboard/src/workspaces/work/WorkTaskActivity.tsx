@@ -6,7 +6,7 @@ import type { LiveActivityPulse, SseConnectionState } from '../../data/sse/conne
 import { useScope, type DashboardScope } from '../../data/scope/store.ts';
 
 /**
- * The one Work row this build actually reads.
+ * The one Work row this build reads.
  *
  * The daemon enumerates a `task_activity` family and emits it under that stream
  * name, and the dashboard subscribes to it, so unlike every other row on this

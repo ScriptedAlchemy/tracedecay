@@ -1,5 +1,5 @@
 /**
- * The chain of a selected session: prompt → turns → tools, reduced from the
+ * The chain of a selected session: prompt, turns, then tools, reduced from the
  * loaded LCM transcript page.
  *
  * Pure, no DOM, no clock. Ordering is the store's `ordinal` where present,
@@ -27,7 +27,7 @@ interface ChainSummary {
   /** Turns per role, ordered by count. */
   roles: Array<{ role: string; count: number }>;
   /** Tool invocations per tool, ordered by count, the measured "tools" leg
-   * of prompt → tools → edits → commits. */
+   * of prompt, tools, edits, then commits. */
   tools: Array<{ tool: string; count: number }>;
   /** Total turns the store reports for the session, which may exceed the page
    * of steps returned. */
@@ -44,7 +44,7 @@ interface ChainSummary {
  * Every field is drawn from the generated `LcmMessageV1` wire contract, so a
  * contract change reaches this module through the type system instead of
  * drifting past a hand-written mirror. All but the id stay optional because
- * the chain reads what a row actually has, absent quantities stay absent.
+ * the chain reads what a row has, absent quantities stay absent.
  */
 type ChainMessageInput = Pick<LcmMessageV1, 'message_id'> &
   Partial<

@@ -20,7 +20,7 @@ import type { WorkResult } from './workApi.ts';
  * Three readings come out of it, and they are exactly the three the timeline
  * previously drew as named absences:
  *
- *   executors   who actually ran the attempt (`actual_route`), against who was
+ *   executors   who ran the attempt (`actual_route`), against who was
  *               asked (`requested_route`), a fallback that took over is a
  *               divergence between the two and is counted as one
  *   lineages    the retry chain, followed through `recovery.source_attempt_id`
@@ -66,7 +66,7 @@ export interface WorkAttemptPage {
 /**
  * One provider route, and how the attempts on it got there.
  *
- * Rows are keyed by the route that actually ran, `actual_route` when the
+ * Rows are keyed by the route that ran, `actual_route` when the
  * daemon observed one, and the requested route when it has not. Those two cases
  * are counted apart (`diverted`, `unobserved`) so an attributed row can never
  * hide how much of its attribution is observation and how much is the request.
@@ -75,7 +75,7 @@ export interface WorkExecutorReading {
   readonly providerId: string;
   readonly routeId: string;
   readonly attempts: number;
-  /** Attempts requested on another route that actually ran here, the fallback
+  /** Attempts requested on another route that ran here, the fallback
    * topology took over. */
   readonly diverted: number;
   /** Attempts requested here whose actual route this read has not observed. */

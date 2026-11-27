@@ -110,7 +110,7 @@ _HOP_BY_HOP_HEADERS = frozenset(
     }
 )
 # After the spawned server prints its URL, wait until /api/capabilities
-# actually answers before proxying anything: the listener can be bound while
+# answers before proxying anything: the listener can be bound while
 # the engine is still warming up (DB opens, graph load), and proxying into
 # that window surfaced as a cold-start 502 "connection reset by peer" on the
 # first request.

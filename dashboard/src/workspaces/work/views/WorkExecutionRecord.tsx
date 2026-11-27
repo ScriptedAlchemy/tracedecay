@@ -21,7 +21,7 @@ import { ChannelAbsence, EmptyReading, ViewCaption } from './WorkViewChannel.tsx
  * These three readings used to be the timeline's absences. They are drawn here
  * rather than folded into the weave itself because they answer a different
  * question about the same page, the weave says which runs touched which tasks,
- * and this says what actually executed, and because their coverage is its own:
+ * and this says what executed, and because their coverage is its own:
  * the weave is drawn over the snapshot's page and this over the attempt list's,
  * two reads with two independent caps. Merging them would produce one caption
  * that could not honestly describe either.
@@ -130,7 +130,7 @@ export function WorkExecutionRecord({
 /**
  * Who ran the attempts.
  *
- * Rows are keyed by the route that actually ran. `diverted` and `unobserved`
+ * Rows are keyed by the route that ran. `diverted` and `unobserved`
  * are printed rather than folded into the total, because a row that quietly
  * mixed observed execution with the request that asked for it would be exactly
  * the invented attribution the timeline spent its first version refusing to

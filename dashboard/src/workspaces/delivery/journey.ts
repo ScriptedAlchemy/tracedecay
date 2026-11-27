@@ -104,7 +104,7 @@ export interface JourneyModel {
   readonly episodes: readonly JourneyEpisode[];
   readonly span: { readonly start: number; readonly end: number } | null;
   readonly undated: number;
-  /** Typed gaps that are not a lane's own state: e.g. the selected PR missing
+  /** Typed gaps that are not a lane's own state: for example the selected PR missing
    * from the head-bound provider page. */
   readonly gaps: readonly string[];
 }

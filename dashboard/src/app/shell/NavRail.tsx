@@ -86,7 +86,7 @@ const DOCTOR_HEALTH: Record<
 /**
  * How one storage-finding producer reads for the global dot.
  *
- * A producer only counts as health when it actually looked (`real`) and found
+ * A producer only counts as health when it looked (`real`) and found
  * nothing. Anything it did observe is a finding. Everything else, a source the
  * canonical report only partially observed, or a producer unsupported on this
  * store established nothing either way, and reporting "no evidence" as a clean

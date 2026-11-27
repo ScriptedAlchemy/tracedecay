@@ -107,7 +107,7 @@ function FreshnessReading({ result }: { result: EnvelopeResult<CodeIndexFreshnes
   const { worktrees, note, mount_failure: mountFailure } = envelope.payload;
   // Authorization is an independent axis from the read's own state: a mount can
   // be `ready` and separately `redacted` for the identity asking. Folding them
-  // together loses which one the reader is actually blocked by.
+  // together loses which one the reader is blocked by.
   const authorization = authorizationState(envelope.authorization);
   return (
     <div className="flex flex-col gap-2" data-index-freshness={envelope.domain_state}>

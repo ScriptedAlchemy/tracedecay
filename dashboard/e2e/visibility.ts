@@ -4,7 +4,7 @@
  *
  * A pass on a blank page is the worst kind of evidence: a check that reads
  * `textContent` still sees text that `opacity: 0` has hidden. So every capture
- * is gated on the page having actually rendered.
+ * is gated on the page having rendered.
  */
 
 /** What the in-page probe measures. Plain data, so the policy is pure. */
@@ -14,7 +14,7 @@ export interface VisibilityReport {
   readonly mainH: number;
   /** Trimmed text length of the main region. */
   readonly textLen: number;
-  /** Content-bearing elements the opacity sweep actually looked at. */
+  /** Content-bearing elements the opacity sweep looked at. */
   readonly sampled: number;
   /** How many of those rendered at effectively zero opacity. */
   readonly faded: number;

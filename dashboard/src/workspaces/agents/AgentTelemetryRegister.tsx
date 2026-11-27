@@ -583,7 +583,7 @@ function ShareRows({
  * It used to print four snake_case identifiers with no counts, no meaning and
  * no verdict, a list of words. Each row now says what the family covers, what
  * would count as reaching for a substitute instead, and where this window
- * actually landed. Two of the four have no substitute detector at all, which
+ * landed. Two of the four have no substitute detector at all, which
  * means they are pinned at "not under-used" by construction; that is stated
  * rather than allowed to read as a clean bill of health.
  */

@@ -275,7 +275,7 @@ const COMPLETE_SELECTION: WorkGraphSelectionCoverageV1 = {
 };
 
 /** A `current` graph read: one version, no timeline, the mode the dashboard
- * actually asks in. `selection_coverage` says how much of the owner's journal
+ * asks in. `selection_coverage` says how much of the owner's journal
  * the selection covered; a `partial` one is a truthful reading of a slice, not
  * a broken graph. */
 export function workGraphRead(

@@ -101,7 +101,7 @@ describe('scopeWritable', () => {
     expect(writability.state).toBe('read_only');
     if (writability.state !== 'read_only') throw new Error('unreachable');
     expect(writability.reason).toContain('not the active project');
-    // Actionable, not merely negative: the reason has to say what to do.
+    // The reason has to say what to do, not only that the write is refused.
     expect(writability.reason).toContain('Switch scope');
   });
 
