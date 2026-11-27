@@ -70,6 +70,7 @@ rust_test(
 
 rust_binary(
     name = "tracedecay-full",
+    tags = ["manual"],
     binary_name = "full/tracedecay",
     crate_name = "tracedecay_full",
     srcs = glob(["src/**/*.rs"]) + glob(["build-support/**/*.rs"]),
@@ -86,6 +87,7 @@ rust_binary(
 
 rust_binary(
     name = "tracedecay-full__test",
+    tags = ["manual"],
     testonly = True,
     binary_name = "test/full/tracedecay",
     crate_name = "tracedecay_full",
