@@ -1,6 +1,5 @@
 import type {
   WorkAttemptStateV1,
-  WorkGraphSelectionCoverageV1,
   WorkGraphTimelineCoverageV1,
   WorkRuntimeProjectionCoverageV1,
   WorkRelationReplanDecisionV1,
@@ -266,26 +265,13 @@ const SCOPE = {
   selection: { selection: 'profile_owned_no_git' },
 };
 
-/** The default disclosure: this selection covered the whole journal, so nothing
- * was left out of the reading. A test that wants the partial case passes its
- * own. */
-const COMPLETE_SELECTION: WorkGraphSelectionCoverageV1 = {
-  coverage: 'complete',
-  covered_events: 1,
-};
-
 /** A `current` graph read: one version, no timeline, the mode the dashboard
- * asks in. `selection_coverage` says how much of the owner's journal
- * the selection covered; a `partial` one is a truthful reading of a slice, not
- * a broken graph. */
-export function workGraphRead(
-  spec: WorkGraphVersionSpec,
-  selection_coverage: WorkGraphSelectionCoverageV1 = COMPLETE_SELECTION,
-) {
+ * actually asks in. The selection is the whole aggregate, so there is no
+ * coverage axis to disclose. */
+export function workGraphRead(spec: WorkGraphVersionSpec) {
   return {
     authorized_scope: SCOPE,
     mode: 'current',
-    selection_coverage,
     snapshot: workGraphVersion(spec),
   };
 }
@@ -303,7 +289,6 @@ export function workGraphTimeline(
   return {
     authorized_scope: SCOPE,
     mode: 'evolution',
-    selection_coverage: COMPLETE_SELECTION,
     timeline: { coverage, entries: versions.map(workGraphVersion) },
   };
 }

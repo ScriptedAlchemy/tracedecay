@@ -140,13 +140,6 @@ where
         .map_err(|error| product_problem(WorkProductApplicationErrorV1::from(error)))?;
     crate::work_product::validate_result(&request, product_context.authorized_scope(), &read)
         .map_err(product_problem)?;
-    // Admission appends to the journal, so it needs the journal's head, not
-    // the head of whatever slice this selection covers.
-    if read.selection_coverage().is_partial() {
-        return Err(product_problem(
-            WorkProductApplicationErrorV1::SelectionCoverageIncomplete,
-        ));
-    }
     let snapshot = read.into_current_snapshot().map_err(|error| match error {
         WorkProductApplicationErrorV1::NotFoundOrNotAuthorized => product_problem(error),
         _ => ApplicationProblem::unavailable(crate::SafeDiagnostic {
@@ -166,10 +159,21 @@ pub(crate) fn accepted_attempt_draft(
     revisions: &WorkProductRevisionPinsV1,
     command_id: WorkCommandId,
     canonical_input_digest: ManifestDigest,
-    expected_graph_version: tracedecay_domain::WorkGraphVersionV1,
+    bound_head: &tracedecay_domain::WorkAttemptProjectionBindingV1,
     identity: &WorkAttemptIdentityV1,
     occurred_at: UtcMicros,
 ) -> Result<WorkProductEventDraftV1, ApplicationProblem> {
+    // The attempt was admitted against this exact verified head, so the link
+    // is written against it, never against whatever head shares its version
+    // number on another line.
+    let expected_head = crate::VerifiedWorkGraphVersionV1::new(
+        bound_head.graph_version(),
+        bound_head.event_sequence(),
+        bound_head.source_watermark().clone(),
+        bound_head.recovered_graph_digest().clone(),
+    )
+    .map_err(|_| invalid_start_problem())?;
+    let expected_graph_version = expected_head.graph_version();
     let result_graph_version = expected_graph_version
         .next()
         .map_err(|_| invalid_start_problem())?;
@@ -190,7 +194,7 @@ pub(crate) fn accepted_attempt_draft(
                 .clone(),
         },
         authorized_relation_scopes,
-        expected_graph_version: Some(expected_graph_version),
+        expected_head: Some(expected_head),
         result_graph_version,
         command_id,
         canonical_input_digest,
@@ -401,7 +405,7 @@ where
             revisions,
             command_id,
             digest,
-            admission_binding_graph_version(&attempt),
+            attempt.projection_binding(),
             &identity,
             product.context.observed_at(),
         )?;
@@ -421,12 +425,6 @@ where
             | WorkProductAttemptAdmissionOutcomeV1::Replayed { attempt, .. } => Ok(attempt),
         }
     }
-}
-
-fn admission_binding_graph_version(
-    attempt: &WorkAttemptV1,
-) -> tracedecay_domain::WorkGraphVersionV1 {
-    attempt.projection_binding().graph_version()
 }
 
 fn command_requested_route(command: &StartWorkAttemptCommand) -> WorkProviderRouteV1 {
@@ -506,17 +504,6 @@ fn product_problem(error: WorkProductApplicationErrorV1) -> ApplicationProblem {
             "The canonical Work product admission identity conflicts.",
         ),
         WorkProductApplicationErrorV1::InvalidRequest => invalid_start_problem(),
-        // Named separately from a generic invalid command because the cause
-        // and the remedy are both specific: the selection covers a slice of
-        // the journal, and widening it is what makes admission possible.
-        WorkProductApplicationErrorV1::SelectionCoverageIncomplete => {
-            ApplicationProblem::invalid_request(
-                "application.work-attempt.product-selection-coverage-incomplete",
-                "The Work selection covers only part of the owner's journal, so \
-                              no attempt can be admitted against it; widen the selection to \
-                              the relation scopes the excluded events were admitted under.",
-            )
-        }
         WorkProductApplicationErrorV1::Storage(failure) => failure.application_problem(),
         WorkProductApplicationErrorV1::EventAuthorityUnavailable
         | WorkProductApplicationErrorV1::GraphAuthorityUnavailable

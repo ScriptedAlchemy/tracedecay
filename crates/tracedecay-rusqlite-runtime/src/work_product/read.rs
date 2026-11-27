@@ -21,21 +21,15 @@
 //! * an authority-bound read loads those exact attempts and reports complete or
 //!   partial coverage without crossing into any other Work authority.
 //!
-//! ## The selection-coverage rule
+//! ## The selection-aggregate rule
 //!
-//! A selection names a slice of the owner's work, not the whole journal. An
-//! event outside the selection falls outside the slice; it does not invalidate
-//! the events inside it. So a read is answered over the journal's covered
-//! prefix, see [`covered_prefix`](super::covered_prefix) for why the covered
-//! slice is always a prefix, and carries a
-//! [`WorkGraphSelectionCoverageV1`](tracedecay_contracts::WorkGraphSelectionCoverageV1)
-//! that says how much lies outside it. Answering the slice silently would be
-//! the real falsification; refusing the whole read because a later event was
-//! admitted under a scope this selection does not name would discard work the
-//! caller is plainly authorized for.
-//!
-//! Published versions are filtered by the same boundary: a version folded from
-//! an event outside the selection is not readable under it at all.
+//! A selection is its own aggregate: its journal, sequence, and version line
+//! belong to one `(owner, selection)` pair. Every read here is answered over
+//! that aggregate alone, so an event admitted under another selection is never
+//! folded into a graph this selection returns, and nothing is withheld from a
+//! graph it does return. There is no coverage to disclose, because there is no
+//! slice: the caller sees the whole of its own aggregate and none of anyone
+//! else's.
 //!
 //! ## The empty-journal rule
 //!
@@ -65,7 +59,7 @@ use tracedecay_domain::{
 
 use super::{
     FromStoreFault, JournalFoldV1, WorkProductJournalEntryV1, WorkProductPublishedVersionV1,
-    checkpoint, load_covered_journal, recovered_graph_digest, verified_version,
+    checkpoint, recovered_graph_digest, selection_chain, verified_version,
 };
 use crate::work::WorkSqliteStorage;
 
@@ -140,29 +134,22 @@ fn read_graph(
     request: &WorkGraphReadRequestV1,
 ) -> Result<WorkGraphReadV1, PortError> {
     let scope = context.authorized_scope();
-    // Events outside the selection fall outside it; they do not poison the
-    // ones inside. The read is answered over the covered prefix and carries
-    // the coverage that says what was left out, so a caller can never
-    // mistake a slice for the whole.
-    let covered = load_covered_journal(storage.handle(), scope).map_err(PortError::from_fault)?;
-    let selection_coverage = covered.coverage;
-    if covered.published.len() != covered.journal.len()
-        || covered
-            .published
-            .iter()
-            .zip(&covered.journal)
-            .any(|(version, entry)| version.event_sequence != entry.sequence)
-    {
-        return Err(PortError::Unavailable);
-    }
+    // The journal is the owner's, but this selection's aggregate is the chain
+    // its own line ends at: its own events, and beneath them the head its
+    // first event was rooted on. Each event is paired with the publication on
+    // its own line that verified it, so a sibling line's events and
+    // publications are never part of this aggregate.
+    let chain = selection_chain(storage.handle(), scope, request.observed_at, None)
+        .map_err(PortError::from_fault)?
+        .ok_or(PortError::Unavailable)?;
+    let (folded, published) = (chain.entries, chain.published);
 
     // A read cannot include a version this authority had not observed at the
     // caller's observation instant. Besides preserving forensic truth, this
     // lets a prepared mutation read its former head and reach the event
     // journal's authoritative compare-and-swap conflict when a later version
     // has already committed.
-    let visible = covered
-        .published
+    let visible = published
         .iter()
         .filter(|version| version.observed_at <= request.observed_at)
         .collect::<Vec<_>>();
@@ -176,16 +163,15 @@ fn read_graph(
         build_entries(
             storage,
             authority,
-            &covered.journal,
+            &folded,
             &visible,
             invalidated_from,
             selected,
             request.observed_at,
         )
     };
-    let absent = |selection_coverage| WorkGraphReadV1::Absent {
+    let absent = || WorkGraphReadV1::Absent {
         authorized_scope: scope.clone(),
-        selection_coverage,
     };
     match &request.mode {
         WorkGraphReadModeV1::Current => {
@@ -193,10 +179,9 @@ fn read_graph(
             Ok(match entries(&|index, _| Some(index) == head)?.pop() {
                 Some(snapshot) => WorkGraphReadV1::Current {
                     authorized_scope: scope.clone(),
-                    selection_coverage,
                     snapshot,
                 },
-                None => absent(selection_coverage),
+                None => absent(),
             })
         }
         WorkGraphReadModeV1::AsOf { valid_at } => {
@@ -206,10 +191,9 @@ fn read_graph(
             Ok(match entries(&|index, _| Some(index) == as_of)?.pop() {
                 Some(snapshot) => WorkGraphReadV1::AsOf {
                     authorized_scope: scope.clone(),
-                    selection_coverage,
                     snapshot,
                 },
-                None => absent(selection_coverage),
+                None => absent(),
             })
         }
         WorkGraphReadModeV1::Evolution {
@@ -221,7 +205,6 @@ fn read_graph(
             })?;
             Ok(WorkGraphReadV1::Evolution {
                 authorized_scope: scope.clone(),
-                selection_coverage,
                 timeline: WorkGraphTimelineV1::page(request, selected)?,
             })
         }
@@ -235,7 +218,6 @@ fn read_graph(
             })?;
             Ok(WorkGraphReadV1::Forensic {
                 authorized_scope: scope.clone(),
-                selection_coverage,
                 timeline: WorkGraphTimelineV1::page(request, selected)?,
             })
         }
@@ -246,7 +228,7 @@ fn read_graph(
 /// carrying the graph folded to that version and every projection derived
 /// from that same graph.
 ///
-/// The journal is folded once, forward. Every visible verified row is checked
+/// The aggregate is folded once, forward. Every visible verified row is checked
 /// against its event and folded graph version, so a damaged history fails the
 /// read closed, but only selected versions are cloned, hydrated, and
 /// projected: a point read costs one fold however long the history is.

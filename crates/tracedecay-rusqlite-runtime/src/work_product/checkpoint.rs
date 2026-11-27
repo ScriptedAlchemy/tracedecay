@@ -3,7 +3,9 @@
 use tracedecay_contracts::AuthorizedWorkProductScopeV1;
 use tracedecay_domain::{ManifestDigest, WorkProductEventSequenceV1, WorkProductGraphV1};
 
-use super::{StoreFault, cursor_value, owner_params, recovered_graph_digest};
+use super::{
+    StoreFault, VersionLineV1, cursor_value, line_params, owner_params, recovered_graph_digest,
+};
 use crate::exact_sql::ExactSqlValue;
 use crate::work::{
     RegisteredWorkQuery, RegisteredWorkWrite, exact_sql_integer, exact_sql_statement,
@@ -15,9 +17,12 @@ use crate::work::{
 const CHUNK_BYTES: usize = 1024 * 1024;
 const PAGE_CHUNKS: u64 = 32;
 
-pub(super) struct GraphCheckpoint {
+/// A verified graph one line's chain reached at one of its own events.
+pub(crate) struct GraphCheckpoint {
     pub(super) sequence: u64,
     pub(super) graph: WorkProductGraphV1,
+    /// The digest the line's publication at `sequence` recorded.
+    pub(super) digest: String,
 }
 
 /// Historical writes record the earliest affected version even when no
@@ -69,9 +74,15 @@ pub(super) fn clear_invalidation(
     Ok(())
 }
 
+/// The newest checkpoint `line` holds at or before `through`.
+///
+/// A checkpoint is written only at one of its line's own events and caches
+/// the chain that line ends at there, so it is keyed, and joined to the
+/// publication that verified it, by that exact line.
 pub(super) fn load(
     source: &impl RegisteredWorkQuery,
     scope: &AuthorizedWorkProductScopeV1,
+    line: &VersionLineV1,
     through: u64,
 ) -> Result<Option<GraphCheckpoint>, StoreFault> {
     let rows = registered_work_query(
@@ -83,11 +94,12 @@ pub(super) fn load(
          LEFT JOIN work_product_graph_versions_v1 AS published
            ON published.owner_brain_id = checkpoint.owner_brain_id
           AND published.owner_profile_id = checkpoint.owner_profile_id
+          AND published.selection_key = checkpoint.selection_key
           AND published.event_sequence = checkpoint.event_sequence
          WHERE checkpoint.owner_brain_id = ?1 AND checkpoint.owner_profile_id = ?2
-           AND checkpoint.event_sequence <= ?3
+           AND checkpoint.selection_key = ?3 AND checkpoint.event_sequence <= ?4
          ORDER BY checkpoint.event_sequence DESC LIMIT 1",
-        owner_params(scope)
+        line_params(scope, line)
             .into_iter()
             .chain([cursor_value(through, "checkpoint bound")?])
             .collect(),
@@ -120,10 +132,10 @@ pub(super) fn load(
         let rows = registered_work_query(
             source,
             "SELECT chunk_index, chunk_payload FROM work_product_graph_checkpoint_chunks_v1
-             WHERE owner_brain_id = ?1 AND owner_profile_id = ?2
-               AND event_sequence = ?3 AND chunk_index >= ?4
-             ORDER BY chunk_index LIMIT ?5",
-            owner_params(scope)
+             WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND selection_key = ?3
+               AND event_sequence = ?4 AND chunk_index >= ?5
+             ORDER BY chunk_index LIMIT ?6",
+            line_params(scope, line)
                 .into_iter()
                 .chain([
                     cursor_value(sequence, "checkpoint sequence")?,
@@ -165,12 +177,17 @@ pub(super) fn load(
     {
         return Err(corrupt());
     }
-    Ok(Some(GraphCheckpoint { sequence, graph }))
+    Ok(Some(GraphCheckpoint {
+        sequence,
+        graph,
+        digest: digest.to_owned(),
+    }))
 }
 
 pub(super) fn write(
     transaction: &impl RegisteredWorkWrite,
     scope: &AuthorizedWorkProductScopeV1,
+    line: &VersionLineV1,
     sequence: WorkProductEventSequenceV1,
     graph: &WorkProductGraphV1,
     digest: &ManifestDigest,
@@ -180,9 +197,10 @@ pub(super) fn write(
     for (index, chunk) in payload.chunks(CHUNK_BYTES).enumerate() {
         transaction.work_execute(exact_sql_statement(
             "INSERT INTO work_product_graph_checkpoint_chunks_v1 (
-                owner_brain_id, owner_profile_id, event_sequence, chunk_index, chunk_payload
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            owner_params(scope)
+                owner_brain_id, owner_profile_id, selection_key, event_sequence, chunk_index,
+                chunk_payload
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            line_params(scope, line)
                 .into_iter()
                 .chain([
                     cursor_value(sequence.get(), "checkpoint sequence")?,
@@ -196,10 +214,10 @@ pub(super) fn write(
     // commit. Any refusal rolls all of them back together.
     transaction.work_execute(exact_sql_statement(
         "INSERT INTO work_product_graph_checkpoints_v1 (
-            owner_brain_id, owner_profile_id, event_sequence, graph_version,
+            owner_brain_id, owner_profile_id, selection_key, event_sequence, graph_version,
             recovered_graph_digest, payload_bytes, chunk_count
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        owner_params(scope)
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        line_params(scope, line)
             .into_iter()
             .chain([
                 cursor_value(sequence.get(), "checkpoint sequence")?,

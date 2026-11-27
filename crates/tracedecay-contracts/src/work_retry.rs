@@ -413,7 +413,7 @@ where
                 revisions,
                 command.command_id.clone(),
                 product_digest,
-                attempt.projection_binding().graph_version(),
+                attempt.projection_binding(),
                 attempt.identity(),
                 product.context.observed_at(),
             )?;
@@ -486,7 +486,7 @@ where
             revisions,
             command.command_id.clone(),
             product_digest,
-            attempt.projection_binding().graph_version(),
+            attempt.projection_binding(),
             attempt.identity(),
             product.context.observed_at(),
         )?;

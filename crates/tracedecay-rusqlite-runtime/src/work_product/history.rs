@@ -8,18 +8,14 @@
 //!
 //! Three bounds shape what a page contains.
 //!
-//! 1. **The selection bounds the journal to its covered prefix.** An event
-//!    records the relation scopes it was admitted under, and an event outside
-//!    the selection falls outside the slice the read was authorized over, it
-//!    does not poison the events inside it. So the page is served over the
-//!    covered prefix (see [`covered_prefix`](super::covered_prefix) for why the
-//!    covered slice is always a prefix) and carries a
-//!    [`WorkGraphSelectionCoverageV1`](tracedecay_contracts::WorkGraphSelectionCoverageV1)
-//!    naming what lies beyond it. Filtering silently would falsify the
-//!    authorized slice; disclosing the boundary is what makes serving it
-//!    honest. Within that prefix the admitted scopes must still match the
-//!    selection exactly, so an event a narrower selection would have to
-//!    reinterpret is refused rather than reshaped.
+//! 1. **History re-presents events under exactly the selection's scopes.** A
+//!    graph read folds the events a selection covers, which includes the
+//!    scope-free ones. History is different: it hands back the stored event
+//!    unchanged, and an event admitted under fewer scopes than the read claims
+//!    is not one this authority may re-present under them. So the page carries
+//!    exactly the events whose admitted scopes equal the selection's own, and
+//!    nothing else: no event admitted under a scope the selection does not name
+//!    is ever returned, and no event is re-attributed to scopes it never had.
 //! 2. **Nothing later than the read instant is history yet.** Events whose
 //!    `occurred_at` is after the request's `observed_at` are outside the read's
 //!    own temporal bound and are not returned. `Complete` therefore means
@@ -35,7 +31,7 @@ use tracedecay_contracts::{
     WorkProductPortContextV1, WorkProductSelectionScopeV1,
 };
 
-use super::{FromStoreFault, covered_prefix, load_journal};
+use super::{FromStoreFault, load_journal};
 use crate::work::WorkSqliteStorage;
 
 type HistoryError = WorkProductApplicationErrorV1;
@@ -49,30 +45,20 @@ impl WorkHistoryReadPortV1 for WorkSqliteStorage {
         request: &WorkHistoryRequestV1,
     ) -> Result<WorkHistoryV1, HistoryError> {
         let scope = context.authorized_scope();
-        let journal = load_journal(self.handle(), scope).map_err(HistoryError::from_fault)?;
-        // Events outside the selection fall outside it; they do not poison the
-        // ones inside. The page is served over the covered prefix and carries
-        // the disclosure that says what was left out, so a caller can never
-        // mistake a slice of the journal for the whole of it.
-        let (journal, selection_coverage) = covered_prefix(scope.selection(), journal)
-            .ok_or(HistoryError::EventAuthorityUnavailable)?;
-        // Inside the prefix the admitted scopes must still be exactly this
-        // selection's. `covered_prefix` admits an event whose scopes the
-        // selection merely contains, but history returns the stored event
-        // unchanged, and an event admitted under fewer scopes than the read
-        // claims is not one this authority may re-present under them.
+        // The owner's journal holds every selection's events. History returns
+        // the stored event unchanged, so it carries exactly the events whose
+        // admitted scopes equal this selection's own: an event admitted under
+        // another scope is not this caller's to read, and a scope-free event
+        // is not re-presented under relation scopes it never named.
         let authorized = selected_relation_scopes(scope.selection());
-        if journal
-            .iter()
-            .any(|entry| entry.event.authorized_relation_scopes() != authorized.as_slice())
-        {
-            return Err(HistoryError::NotFoundOrNotAuthorized);
-        }
+        let journal = load_journal(self.handle(), scope).map_err(HistoryError::from_fault)?;
         let after = resume_from(request.continuation.as_ref())?;
         let mut events = journal
             .into_iter()
             .filter(|entry| {
-                entry.sequence.get() > after && entry.event.occurred_at() <= request.observed_at
+                entry.sequence.get() > after
+                    && entry.event.occurred_at() <= request.observed_at
+                    && entry.event.authorized_relation_scopes() == authorized.as_slice()
             })
             .map(|entry| entry.event)
             .collect::<Vec<_>>();
@@ -98,7 +84,6 @@ impl WorkHistoryReadPortV1 for WorkSqliteStorage {
             authorized_scope: scope.clone(),
             events,
             coverage,
-            selection_coverage,
         })
     }
 }

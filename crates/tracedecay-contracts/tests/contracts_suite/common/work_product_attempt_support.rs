@@ -159,7 +159,13 @@ pub(super) fn product_commit_for(
         .graph
         .as_ref()
         .ok_or(WorkProductAttemptAdmissionErrorV1::NotFoundOrNotAuthorized)?;
-    if draft.expected_graph_version != Some(current.version()) {
+    let head_sequence = rows
+        .events
+        .last()
+        .map(|stored| stored.commit.event().sequence());
+    if draft.expected_head.as_ref().is_none_or(|head| {
+        head.graph_version() != current.version() || Some(head.event_sequence()) != head_sequence
+    }) {
         return Err(WorkProductAttemptAdmissionErrorV1::VersionConflict);
     }
     let WorkProductEventPayloadV1::Changed { change } = &draft.payload else {
@@ -184,7 +190,10 @@ pub(super) fn product_commit_for(
         actor_id: draft.actor_id.clone(),
         owner_scope: draft.owner_scope.clone(),
         authorized_relation_scopes: draft.authorized_relation_scopes.clone(),
-        expected_graph_version: draft.expected_graph_version,
+        expected_graph_version: draft
+            .expected_head
+            .as_ref()
+            .map(VerifiedWorkGraphVersionV1::graph_version),
         result_graph_version: draft.result_graph_version,
         command_id: draft.command_id.clone(),
         canonical_input_digest: draft.canonical_input_digest.clone(),

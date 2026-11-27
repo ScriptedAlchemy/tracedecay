@@ -67,7 +67,6 @@ describe('AgentHandoffs', () => {
               owner_profile_id: 'profile.agents',
               selection: { selection: 'profile_owned_no_git' },
             },
-            selection_coverage: { coverage: 'complete', covered_events: 0 },
           }),
         )}
       />,

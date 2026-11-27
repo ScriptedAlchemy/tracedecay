@@ -51,7 +51,12 @@ pub struct WorkProductEventDraftV1 {
     pub actor_id: ActorId,
     pub owner_scope: WorkProductProfileScopeV1,
     pub authorized_relation_scopes: Vec<tracedecay_domain::WorkProductAuthorizedRelationScopeV1>,
-    pub expected_graph_version: Option<WorkGraphVersionV1>,
+    /// The exact verified head this draft was written against, `None` only
+    /// for the creation of a selection that has no graph. A graph version is
+    /// a per-line counter, so two lines can both publish version 2; the
+    /// writer fences on this head's journal sequence and digest, never on the
+    /// version number alone.
+    pub expected_head: Option<VerifiedWorkGraphVersionV1>,
     pub result_graph_version: WorkGraphVersionV1,
     pub command_id: WorkCommandId,
     pub canonical_input_digest: ManifestDigest,

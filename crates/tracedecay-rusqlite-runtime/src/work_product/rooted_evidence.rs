@@ -6,7 +6,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{TaskId, WorkProductGraphV1};
 
-use super::{FromStoreFault, fold_graph, load_covered_journal, verified_version};
+use super::{FromStoreFault, fold_graph, selection_chain, verified_version};
 use crate::work::WorkSqliteStorage;
 
 impl WorkEvidenceRootReadPortV1 for WorkSqliteStorage {
@@ -65,12 +65,18 @@ fn verified_graph(
     requested: &VerifiedWorkGraphVersionV1,
 ) -> Result<(VerifiedWorkGraphVersionV1, WorkProductGraphV1), WorkEvidenceRootReadErrorV1> {
     let scope = context.authorized_scope();
-    // Bounded to the slice the selection covers, exactly as the graph read is:
-    // a version folded across an event outside the selection never existed
-    // under it, while a version inside the covered prefix stays readable.
-    let covered = load_covered_journal(storage.handle(), scope)
-        .map_err(WorkEvidenceRootReadErrorV1::from_fault)?;
-    let (journal, published) = (covered.journal, covered.published);
+    // Resolve the selection's chain through the requested event. Later writes
+    // cannot change that exact version's ancestry, even at the same timestamp.
+    // Scope containment and the complete verified identity still fence the read.
+    let chain = selection_chain(
+        storage.handle(),
+        scope,
+        context.observed_at(),
+        Some(requested.event_sequence()),
+    )
+    .map_err(WorkEvidenceRootReadErrorV1::from_fault)?
+    .ok_or(WorkEvidenceRootReadErrorV1::NotFoundOrNotAuthorized)?;
+    let (folded, published) = (chain.entries, chain.published);
     let Some(version) = published
         .iter()
         .find(|version| version.graph_version == requested.graph_version())
@@ -86,11 +92,11 @@ fn verified_graph(
             },
         );
     };
-    let entry = journal
+    let entry = folded
         .iter()
         .find(|entry| entry.sequence == version.event_sequence)
         .ok_or(WorkEvidenceRootReadErrorV1::Unavailable)?;
-    let graph = fold_graph(&journal, version.event_sequence)
+    let graph = fold_graph(&folded, version.event_sequence)
         .ok_or(WorkEvidenceRootReadErrorV1::Unavailable)?;
     if graph.version() != version.graph_version {
         return Err(WorkEvidenceRootReadErrorV1::Unavailable);

@@ -11,9 +11,9 @@ use tracedecay_contracts::{
     VerifiedWorkEvidenceExpansionV1, VerifiedWorkGraphVersionV1, WorkAttemptTopologyStateV1,
     WorkEvidenceExpandRequestV1, WorkEvidenceReadPortErrorV1, WorkEvidenceReadPortV1,
     WorkEvidenceSelectRequestV1, WorkGraphReadModeV1, WorkGraphReadPortErrorV1,
-    WorkGraphReadPortV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkGraphSelectionCoverageV1,
-    WorkGraphTimelineV1, WorkGraphVersionEntryV1, WorkHistoryCoverageV1, WorkHistoryReadPortV1,
-    WorkHistoryRequestV1, WorkHistoryServiceV1, WorkHistoryV1, WorkProductApplicationErrorV1,
+    WorkGraphReadPortV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkGraphTimelineV1,
+    WorkGraphVersionEntryV1, WorkHistoryCoverageV1, WorkHistoryReadPortV1, WorkHistoryRequestV1,
+    WorkHistoryServiceV1, WorkHistoryV1, WorkProductApplicationErrorV1,
     WorkProductAuthorizedRelationScopeV1, WorkProductBindingV1, WorkProductEventCommitOutcomeV1,
     WorkProductEventCommitV1, WorkProductEventDraftV1, WorkProductEventPortErrorV1,
     WorkProductEventPortV1, WorkProductEvidenceServiceV1, WorkProductExpectedAuthorityV1,
@@ -303,7 +303,10 @@ fn event_from_draft(draft: &WorkProductEventDraftV1) -> WorkProductEventV1 {
         actor_id: draft.actor_id.clone(),
         owner_scope: draft.owner_scope.clone(),
         authorized_relation_scopes: draft.authorized_relation_scopes.clone(),
-        expected_graph_version: draft.expected_graph_version,
+        expected_graph_version: draft
+            .expected_head
+            .as_ref()
+            .map(VerifiedWorkGraphVersionV1::graph_version),
         result_graph_version: draft.result_graph_version,
         command_id: draft.command_id.clone(),
         canonical_input_digest: draft.canonical_input_digest.clone(),
@@ -345,13 +348,13 @@ fn event_for_replay(
             WorkProductExpectedAuthorityV1::NoPriorGraph => panic!("change requires authority"),
         },
     };
-    let (expected_graph_version, source_watermark) = match &mutation.expected_authority {
+    let (expected_head, source_watermark) = match &mutation.expected_authority {
         WorkProductExpectedAuthorityV1::NoPriorGraph => (
             None,
             WorkProductSourceWatermarkV1::new(BTreeMap::new()).unwrap(),
         ),
         WorkProductExpectedAuthorityV1::Verified { verified_version } => (
-            Some(verified_version.graph_version()),
+            Some(verified_version.clone()),
             verified_version.source_watermark().clone(),
         ),
     };
@@ -366,7 +369,7 @@ fn event_for_replay(
             .selection()
             .relation_scopes()
             .map_or_else(Vec::new, |relations| relations.iter().cloned().collect()),
-        expected_graph_version,
+        expected_head,
         result_graph_version,
         command_id: mutation.command_id.clone(),
         canonical_input_digest,
@@ -453,63 +456,6 @@ impl WorkHistoryReadPortV1 for PagingHistoryPort {
             authorized_scope: context.authorized_scope().clone(),
             events: Vec::new(),
             coverage,
-            selection_coverage: WorkGraphSelectionCoverageV1::Complete { covered_events: 0 },
-        })
-    }
-}
-
-/// A history port that discloses a `Partial` selection coverage excluding
-/// nothing, a disclosure that contradicts itself.
-struct SelfContradictingCoverageHistoryPort;
-
-impl WorkHistoryReadPortV1 for SelfContradictingCoverageHistoryPort {
-    fn read_history(
-        &self,
-        context: &tracedecay_contracts::WorkProductPortContextV1,
-        _request: &WorkHistoryRequestV1,
-    ) -> Result<WorkHistoryV1, WorkProductApplicationErrorV1> {
-        Ok(WorkHistoryV1 {
-            authorized_scope: context.authorized_scope().clone(),
-            events: Vec::new(),
-            coverage: WorkHistoryCoverageV1::Complete { returned: 0 },
-            selection_coverage: WorkGraphSelectionCoverageV1::Partial {
-                covered_events: 0,
-                excluded_events: 0,
-                first_excluded_sequence: WorkProductEventSequenceV1::new(1).unwrap(),
-            },
-        })
-    }
-}
-
-/// A history port that hands back an event at the very sequence its own
-/// disclosure calls excluded.
-struct BoundaryCrossingHistoryPort;
-
-impl WorkHistoryReadPortV1 for BoundaryCrossingHistoryPort {
-    fn read_history(
-        &self,
-        context: &tracedecay_contracts::WorkProductPortContextV1,
-        _request: &WorkHistoryRequestV1,
-    ) -> Result<WorkHistoryV1, WorkProductApplicationErrorV1> {
-        // `event_from_draft` mints sequence 1, so this event sits exactly on
-        // the boundary the disclosure below claims to exclude.
-        let event = event_for_replay(
-            context,
-            &mutation_identity(WorkProductExpectedAuthorityV1::NoPriorGraph),
-            WorkProductEventPayloadV1::Created { graph: graph(1) },
-            digest('a'),
-        )
-        .event()
-        .clone();
-        Ok(WorkHistoryV1 {
-            authorized_scope: context.authorized_scope().clone(),
-            events: vec![event],
-            coverage: WorkHistoryCoverageV1::Complete { returned: 1 },
-            selection_coverage: WorkGraphSelectionCoverageV1::Partial {
-                covered_events: 0,
-                excluded_events: 1,
-                first_excluded_sequence: WorkProductEventSequenceV1::new(1).unwrap(),
-            },
         })
     }
 }
@@ -556,7 +502,6 @@ impl WorkGraphReadPortV1 for RecordingGraphPort {
         if self.absent.load(Ordering::Relaxed) {
             return Ok(WorkGraphReadV1::Absent {
                 authorized_scope: context.authorized_scope().clone(),
-                selection_coverage: WorkGraphSelectionCoverageV1::Complete { covered_events: 0 },
             });
         }
         let scope = if self.return_wrong_owner.load(Ordering::Relaxed) {
@@ -572,7 +517,6 @@ impl WorkGraphReadPortV1 for RecordingGraphPort {
         Ok(match request.mode {
             WorkGraphReadModeV1::Current => WorkGraphReadV1::Current {
                 authorized_scope: scope,
-                selection_coverage: WorkGraphSelectionCoverageV1::Complete { covered_events: 1 },
                 snapshot: if self.nonempty.load(Ordering::Relaxed) {
                     entry_with_task(request.observed_at)
                 } else {
@@ -581,7 +525,6 @@ impl WorkGraphReadPortV1 for RecordingGraphPort {
             },
             WorkGraphReadModeV1::AsOf { valid_at } => WorkGraphReadV1::AsOf {
                 authorized_scope: scope,
-                selection_coverage: WorkGraphSelectionCoverageV1::Complete { covered_events: 1 },
                 snapshot: entry(1, UtcMicros(valid_at.0 - 1), valid_at, request.observed_at),
             },
             WorkGraphReadModeV1::Evolution {
@@ -589,7 +532,6 @@ impl WorkGraphReadPortV1 for RecordingGraphPort {
                 through_valid_at,
             } => WorkGraphReadV1::Evolution {
                 authorized_scope: scope,
-                selection_coverage: WorkGraphSelectionCoverageV1::Complete { covered_events: 2 },
                 timeline: if self.paginate.load(Ordering::Relaxed) {
                     WorkGraphTimelineV1::page(
                         request,
@@ -608,7 +550,6 @@ impl WorkGraphReadPortV1 for RecordingGraphPort {
                 through_observed_at,
             } => WorkGraphReadV1::Forensic {
                 authorized_scope: scope,
-                selection_coverage: WorkGraphSelectionCoverageV1::Complete { covered_events: 2 },
                 timeline: if self.paginate.load(Ordering::Relaxed) {
                     WorkGraphTimelineV1::page(
                         request,
@@ -1247,60 +1188,6 @@ fn evidence_port_must_return_the_exact_verified_generation() {
             )
             .unwrap_err(),
         WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable
-    );
-}
-
-/// A partial history is only honest if its disclosure can be falsified. A
-/// `Partial` that excludes nothing asserts a boundary that is not there, so the
-/// service rejects it rather than passing it through to a caller who would read
-/// it as a real one.
-#[test]
-fn a_history_coverage_that_contradicts_itself_is_refused() {
-    let owner = RegisteredOwner::default();
-    let service = WorkHistoryServiceV1::new(&SelfContradictingCoverageHistoryPort, &owner);
-
-    let refused = service
-        .read(
-            &context(true),
-            &binding(),
-            WorkHistoryRequestV1 {
-                selection: repository_selection(),
-                limit: 10,
-                continuation: None,
-                observed_at: UtcMicros(100),
-            },
-        )
-        .expect_err("a self-contradicting coverage disclosure must not be served");
-    assert_eq!(
-        refused,
-        WorkProductApplicationErrorV1::EventAuthorityUnavailable
-    );
-}
-
-/// The disclosure names where the selection stops covering the journal, so the
-/// events beside it are checked against it. An event returned at or past that
-/// boundary is an event this selection never authorized, handed back under a
-/// disclosure claiming it was left out.
-#[test]
-fn a_history_event_past_the_disclosed_exclusion_boundary_is_refused() {
-    let owner = RegisteredOwner::default();
-    let service = WorkHistoryServiceV1::new(&BoundaryCrossingHistoryPort, &owner);
-
-    let refused = service
-        .read(
-            &context(true),
-            &binding(),
-            WorkHistoryRequestV1 {
-                selection: repository_selection(),
-                limit: 10,
-                continuation: None,
-                observed_at: UtcMicros(100),
-            },
-        )
-        .expect_err("an event past the disclosed boundary must not be served");
-    assert_eq!(
-        refused,
-        WorkProductApplicationErrorV1::EventAuthorityUnavailable
     );
 }
 

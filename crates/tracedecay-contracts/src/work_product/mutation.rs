@@ -139,16 +139,6 @@ where
         let read_request = WorkGraphReadRequestV1::current(request.selection.clone(), occurred_at);
         let read = self.graph.read_graph(&port_context, &read_request)?;
         super::read::validate_result(&read_request, port_context.authorized_scope(), &read)?;
-        // Reads answer over the covered slice and disclose the rest. A mutation
-        // cannot: the head it would pin is the slice's head, not the journal's,
-        // so the change would be formed against a graph that is not current.
-        // Under partial coverage an absent slice is not an empty journal
-        // either: creating a root there would append a second `Created` event.
-        // Refused by name, with the selection remedy, rather than left to
-        // surface later as a version conflict that blames the wrong thing.
-        if read.selection_coverage().is_partial() {
-            return Err(WorkProductApplicationErrorV1::SelectionCoverageIncomplete);
-        }
         let expected_authority = match read {
             WorkGraphReadV1::Absent { .. }
                 if matches!(&request.change, WorkProductChangeDraftV1::CreateTask { .. }) =>
@@ -596,12 +586,6 @@ where
         let read_request = WorkGraphReadRequestV1::current(selection.clone(), mutation.occurred_at);
         let read = self.graph.read_graph(&port_context, &read_request)?;
         super::read::validate_result(&read_request, port_context.authorized_scope(), &read)?;
-        // The same rule the prepare enforces: a covered slice has a head, but
-        // not the journal's head, so a submit against it is refused by name
-        // instead of failing its compare-and-swap for the wrong reason.
-        if read.selection_coverage().is_partial() {
-            return Err(WorkProductApplicationErrorV1::SelectionCoverageIncomplete);
-        }
         let snapshot = read.into_current_snapshot()?;
         if snapshot.verified_version() != expected_verified_version {
             return Err(WorkProductApplicationErrorV1::VersionConflict);
@@ -832,7 +816,12 @@ fn event_draft(
             profile_id: authorized_scope.owner_profile_id().clone(),
         },
         authorized_relation_scopes: selected_relations(selection),
-        expected_graph_version: mutation_expected_graph_version(&mutation.expected_authority),
+        expected_head: match &mutation.expected_authority {
+            WorkProductExpectedAuthorityV1::NoPriorGraph => None,
+            WorkProductExpectedAuthorityV1::Verified { verified_version } => {
+                Some(verified_version.clone())
+            }
+        },
         result_graph_version,
         command_id: mutation.command_id.clone(),
         canonical_input_digest,
@@ -952,7 +941,11 @@ fn validate_appended_event(
     if event.actor_id() != &draft.actor_id
         || event.owner_scope() != &draft.owner_scope
         || event.authorized_relation_scopes() != draft.authorized_relation_scopes
-        || event.expected_graph_version() != draft.expected_graph_version
+        || event.expected_graph_version()
+            != draft
+                .expected_head
+                .as_ref()
+                .map(VerifiedWorkGraphVersionV1::graph_version)
         || event.result_graph_version() != draft.result_graph_version
         || event.command_id() != &draft.command_id
         || event.canonical_input_digest() != &draft.canonical_input_digest
