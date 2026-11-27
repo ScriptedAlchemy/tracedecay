@@ -1948,7 +1948,7 @@ export const AutomationRunArtifactsPayloadV1Schema: z.ZodObject<{
   run_id: z.string(),
 });
 
-/** `known` only when the ledger page holds every row and none was malformed. */
+/** `known` only when the page holds every published run. */
 export const AutomationRunLedgerCompletenessV1Schema: z.ZodEnum<{ "known": "known"; "partial": "partial" }> = z.enum(["known", "partial"]);
 
 export const AutomationRunLedgerRecordSchema: z.ZodObject<{

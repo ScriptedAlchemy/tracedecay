@@ -2589,7 +2589,7 @@
       "type": "object"
     },
     "AutomationRunLedgerCompletenessV1": {
-      "description": "`known` only when the ledger page holds every row and none was malformed.",
+      "description": "`known` only when the page holds every published run.",
       "enum": [
         "known",
         "partial"
