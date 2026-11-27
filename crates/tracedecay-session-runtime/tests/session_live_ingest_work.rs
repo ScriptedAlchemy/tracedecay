@@ -9,7 +9,7 @@ pub mod support;
 use std::sync::Arc;
 use support::{
     DrainFixture, PROMPT_TITLE_WORDS, SEED_TIMESTAMP, capture, drain, ingest_live_messages,
-    message_requests, refresh_until_idle, session_cursor,
+    ingest_live_messages_after_wal_restart, message_requests, refresh_until_idle, session_cursor,
 };
 use tracedecay_session_runtime::session_sync::test_harness::SessionTemporalRefreshWakeState;
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -26,6 +26,7 @@ async fn streamed_message_ingest_work_does_not_grow_with_the_live_session() {
         .unwrap();
     let refresh = Arc::new(SessionTemporalRefreshWakeState::default());
     let mut live = session_cursor(0);
+    let mut padding = session_cursor(1);
 
     ingest_live_messages(
         &facade,
@@ -36,12 +37,13 @@ async fn streamed_message_ingest_work_does_not_grow_with_the_live_session() {
         BASE_LENGTH - PROBE_MESSAGES,
     )
     .await;
-    let (base_read, base_steps) = ingest_live_messages(
+    let base_work = ingest_live_messages_after_wal_restart(
         &facade,
         &fixture,
         &database,
         &refresh,
         &mut live,
+        &mut padding,
         PROBE_MESSAGES,
     )
     .await;
@@ -71,12 +73,13 @@ async fn streamed_message_ingest_work_does_not_grow_with_the_live_session() {
         BASE_LENGTH - PROBE_MESSAGES,
     )
     .await;
-    let (grown_read, grown_steps) = ingest_live_messages(
+    let grown_work = ingest_live_messages_after_wal_restart(
         &facade,
         &fixture,
         &database,
         &refresh,
         &mut live,
+        &mut padding,
         PROBE_MESSAGES,
     )
     .await;
@@ -87,21 +90,28 @@ async fn streamed_message_ingest_work_does_not_grow_with_the_live_session() {
             .project_session_message_count_for_test()
             .await
             .unwrap(),
-        i64::try_from(8 * BASE_LENGTH).unwrap(),
+        i64::try_from(8 * BASE_LENGTH + padding.next_ordinal).unwrap(),
     );
 
+    let base_read = base_work.read_bytes_per_message();
+    let base_steps = base_work.writer_vm_steps_per_message();
+    let grown_read = grown_work.read_bytes_per_message();
+    let grown_steps = grown_work.writer_vm_steps_per_message();
     eprintln!(
         "live-session streamed message ingest: read bytes base={base_read} \
-         grown={grown_read}; writer VM steps base={base_steps} grown={grown_steps}"
+         grown={grown_read}; writer VM steps base={base_steps} grown={grown_steps}; \
+         base work={base_work:?}; grown work={grown_work:?}"
     );
     assert!(
         grown_read * 5 <= base_read * 6,
         "an 8x longer live session must keep each streamed message's ingest reads \
-         within 1.2x: base={base_read} grown={grown_read}"
+         within 1.2x: base={base_read} grown={grown_read}; \
+         base work={base_work:?}; grown work={grown_work:?}"
     );
     assert!(
         grown_steps * 5 <= base_steps * 6,
         "an 8x longer live session must keep each streamed message's ingest writer \
-         work within 1.2x: base={base_steps} grown={grown_steps}"
+         work within 1.2x: base={base_steps} grown={grown_steps}; \
+         base work={base_work:?}; grown work={grown_work:?}"
     );
 }

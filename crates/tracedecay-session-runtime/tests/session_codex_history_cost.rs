@@ -9,6 +9,7 @@
 #[path = "support/session_store_read_cost.rs"]
 pub mod support;
 
+use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 use serde_json::json;
 use support::DrainFixture;
 use tracedecay_contracts::ProfileIdentityReadPort;
-use tracedecay_domain::{BrainId, UserProfileId};
+use tracedecay_domain::{BrainId, ObservationScopeV1, ObservationSourceCursorV1, UserProfileId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::tests::harness::writer_telemetry;
 use tracedecay_private_fs::RewriteWitness;
@@ -383,10 +384,82 @@ async fn a_restart_mid_import_resumes_without_rewriting_committed_rollouts() {
     );
 }
 
-/// Committed transactions the import pays per settled rollout it admits.
-/// The product with the corpus size proves every rollout was admitted once:
-/// a skipped rollout falls short and a re-admitted one overshoots.
-const IMPORT_TRANSACTIONS_PER_ROLLOUT: u64 = 5;
+/// An unbatched replay paid five transactions per rollout. This ceiling
+/// protects batching; durable observations and cursors separately prove
+/// that the measured import covered the whole corpus.
+const IMPORT_TRANSACTIONS_PER_ROLLOUT_CEILING: u64 = 4;
+
+fn assert_corpus_is_admitted(fixture: &DrainFixture, home: &Path, rollouts: usize, appended: bool) {
+    let connection = rusqlite::Connection::open_with_flags(
+        support::session_store_path(fixture),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let expected: BTreeMap<String, i64> = (0..rollouts)
+        .map(|index| {
+            let day = index % DAYS;
+            (
+                format!("019a0000-0000-7000-8000-{day:04}{index:08}"),
+                3 + i64::from(appended && index == 0),
+            )
+        })
+        .collect();
+    let actual: BTreeMap<String, i64> = connection
+        .prepare(
+            "SELECT json_extract(observation_json, '$.identity.source.session_id'), COUNT(*)
+             FROM observations
+             GROUP BY json_extract(observation_json, '$.identity.source.session_id')",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        actual, expected,
+        "every rollout must retain each generated frame exactly once"
+    );
+
+    let cursors: Vec<ObservationSourceCursorV1> = connection
+        .prepare("SELECT cursor_json FROM source_cursors")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
+        .collect();
+    assert_eq!(cursors.len(), rollouts);
+    let mut positions = BTreeMap::new();
+    for cursor in cursors {
+        assert_eq!(cursor.source().provider().as_str(), "codex");
+        assert_eq!(
+            cursor.scope(),
+            &ObservationScopeV1::Project {
+                project_id: fixture.project_id.clone()
+            }
+        );
+        assert!(
+            positions
+                .insert(
+                    cursor.source().session_id().as_str().to_owned(),
+                    cursor.position()
+                )
+                .is_none()
+        );
+    }
+    for index in 0..rollouts {
+        let day = index % DAYS;
+        let session = format!("019a0000-0000-7000-8000-{day:04}{index:08}");
+        assert_eq!(
+            positions.get(&session).copied(),
+            Some(
+                std::fs::metadata(rollout_path(home, day, index))
+                    .unwrap()
+                    .len()
+            ),
+            "the durable cursor must cover all bytes of {session}"
+        );
+    }
+}
 
 /// Writer work of each transition the re-offer acceptance compares, all over
 /// one settled single-project corpus and one ingestor.
@@ -407,8 +480,11 @@ async fn sweep_transitions(rollouts: usize) -> SweepTransitions {
     write_single_project_corpus(&fixture, &home, rollouts);
     let ingestor = ingestor(&fixture, &database, &home, &mounted_hub(&cpu), &cpu);
     let import = run_to_completion_bounded(&ingestor, &database, MAX_MEASURED_PASSES).await;
+    assert_corpus_is_admitted(&fixture, &home, rollouts, false);
     let first_idle = run_to_completion_bounded(&ingestor, &database, MAX_MEASURED_PASSES).await;
+    assert_corpus_is_admitted(&fixture, &home, rollouts, false);
     let later_idle = run_to_completion_bounded(&ingestor, &database, MAX_MEASURED_PASSES).await;
+    assert_corpus_is_admitted(&fixture, &home, rollouts, false);
 
     let appended = rollout_path(&home, 0, 0);
     assert!(appended.is_file(), "the appended rollout must exist");
@@ -426,6 +502,7 @@ async fn sweep_transitions(rollouts: usize) -> SweepTransitions {
     drop(file);
     settle_codex_tree(&home);
     let appended = run_to_completion_bounded(&ingestor, &database, MAX_MEASURED_PASSES).await;
+    assert_corpus_is_admitted(&fixture, &home, rollouts, true);
     ingestor.cancel();
 
     let transitions = SweepTransitions {
@@ -452,13 +529,14 @@ async fn a_second_sweep_over_the_measured_corpus_commits_nothing() {
     let measured = sweep_transitions(MEASURED_ROLLOUTS).await;
     let control = sweep_transitions(CONTROL_ROLLOUTS).await;
 
-    // Every rollout was discovered and admitted once: the import's durable
-    // writes are exactly the per-rollout cost times the corpus.
+    // Exact observation and cursor coverage above makes this a cost check
+    // over the whole corpus at both sizes.
     for (transitions, rollouts) in [(&measured, MEASURED_ROLLOUTS), (&control, CONTROL_ROLLOUTS)] {
-        assert_eq!(
-            transitions.import.transactions,
-            IMPORT_TRANSACTIONS_PER_ROLLOUT * rollouts as u64,
-            "the import must admit each of {rollouts} rollouts exactly once"
+        assert!(
+            transitions.import.transactions
+                <= IMPORT_TRANSACTIONS_PER_ROLLOUT_CEILING * rollouts as u64,
+            "projection replay must stay batched: {} transactions for {rollouts} rollouts",
+            transitions.import.transactions
         );
     }
 
@@ -470,6 +548,12 @@ async fn a_second_sweep_over_the_measured_corpus_commits_nothing() {
             (large.transactions, small.transactions),
             (0, 0),
             "a {label} sweep over unchanged rollouts must commit nothing: \
+             large={large:?} small={small:?}"
+        );
+        assert_eq!(
+            (large.passes, small.passes),
+            (1, 1),
+            "a {label} sweep over settled unchanged rollouts needs one pass: \
              large={large:?} small={small:?}"
         );
         assert_eq!(
@@ -498,6 +582,11 @@ async fn a_second_sweep_over_the_measured_corpus_commits_nothing() {
     assert!(
         large.transactions > 0,
         "the appended frames must be committed: {large:?}"
+    );
+    assert!(
+        large.transactions < measured.import.transactions,
+        "only the appended rollout may be re-admitted: {large:?} vs {:?}",
+        measured.import
     );
     assert_eq!(
         (large.transactions, large.vm_steps),

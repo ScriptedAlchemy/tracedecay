@@ -54,6 +54,7 @@ pub use checkpoint::{
 };
 pub use operation::{
     ExactSqlOnlyStorageOperationV1, StorageOperationError, StorageOperationExecutor,
+    StorageOperationOutput,
 };
 pub use telemetry::{
     ReaderAdmissionSnapshot, SqliteVmSnapshot, WalCheckpointSample, WalCheckpointSnapshot,

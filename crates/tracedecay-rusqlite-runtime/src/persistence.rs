@@ -9,8 +9,14 @@ use tracedecay_store::{
 
 use crate::{
     ledger::{self, LedgerDisposition, LedgerError},
-    operation::{self, StorageOperationError, StorageOperationExecutor},
+    operation::{self, StorageOperationError, StorageOperationExecutor, StorageOperationOutput},
 };
+
+#[derive(Debug)]
+pub(crate) struct AppliedRecord {
+    pub(crate) receipt: StoreCommitReceiptV1,
+    pub(crate) output: StorageOperationOutput,
+}
 
 pub(crate) struct RuntimeWriterPersistence<E> {
     executor: E,
@@ -64,11 +70,12 @@ impl<E: StorageOperationExecutor> RuntimeWriterPersistence<E> {
         savepoint: &mut Savepoint<'_>,
         binding: &StoreRuntimeBindingV1,
         request: &RuntimeSubmitRequestV1,
-    ) -> Result<StoreCommitReceiptV1, ApplyRecordError> {
+    ) -> Result<AppliedRecord, ApplyRecordError> {
         if binding != request.binding() {
             return Err(infrastructure("apply-and-record binding mismatch").into());
         }
-        operation::execute(savepoint, request, &mut self.executor).map_err(map_operation_error)?;
+        let output = operation::execute(savepoint, request, &mut self.executor)
+            .map_err(map_operation_error)?;
         let disposition = match ledger::record_runtime_commit(
             savepoint,
             &request.envelope().metadata,
@@ -88,7 +95,7 @@ impl<E: StorageOperationExecutor> RuntimeWriterPersistence<E> {
             Err(error) => return Err(map_ledger_error(error).into()),
         };
         match disposition {
-            LedgerDisposition::Committed(receipt) => Ok(receipt),
+            LedgerDisposition::Committed(receipt) => Ok(AppliedRecord { receipt, output }),
             LedgerDisposition::Replay(receipt) | LedgerDisposition::Conflict(receipt) => {
                 drop(receipt);
                 Err(
@@ -247,7 +254,8 @@ mod tests {
         let mut savepoint = transaction.savepoint().unwrap();
         let receipt = first
             .apply_and_record(&mut savepoint, &binding, &request)
-            .unwrap();
+            .unwrap()
+            .receipt;
         assert_eq!(
             receipt.commit_sequence,
             tracedecay_store::CommitSequenceV1(1)

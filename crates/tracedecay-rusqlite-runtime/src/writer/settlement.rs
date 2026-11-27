@@ -12,6 +12,7 @@ use super::{
     WriterActorError,
     request::{AcceptedRequest, RequestResult},
 };
+use crate::{operation::StorageOperationOutput, persistence::AppliedRecord};
 
 const RETRY_AFTER_BUSY_MS: u64 = 1;
 
@@ -132,20 +133,27 @@ pub(super) fn idempotency_outcome(
     }
 }
 
-pub(super) fn committed_outcome(
-    item: &AcceptedRequest,
-    receipt: StoreCommitReceiptV1,
-) -> RequestResult {
-    let outcome = match item.probe.interruption() {
-        Some(RuntimeInterruptionV1::Cancelled) => {
-            RuntimeSubmitOutcomeV1::CommittedAfterCancellation {
+pub(super) fn committed_outcome(item: &AcceptedRequest, applied: AppliedRecord) -> RequestResult {
+    let AppliedRecord { receipt, output } = applied;
+    let cancellation = match item.probe.interruption() {
+        Some(RuntimeInterruptionV1::Cancelled) => Some(item.request.control().cancellation.clone()),
+        Some(RuntimeInterruptionV1::DeadlineExceeded) | None => None,
+    };
+    let outcome = match (output, cancellation) {
+        (StorageOperationOutput::ExternalSourceProjection { projected }, cancellation) => {
+            RuntimeSubmitOutcomeV1::ExternalSourceProjectionCommitted {
                 receipt,
-                cancellation: item.request.control().cancellation.clone(),
+                projected,
+                cancellation,
             }
         }
-        Some(RuntimeInterruptionV1::DeadlineExceeded) | None => {
-            RuntimeSubmitOutcomeV1::Committed { receipt }
+        (StorageOperationOutput::None, Some(cancellation)) => {
+            RuntimeSubmitOutcomeV1::CommittedAfterCancellation {
+                receipt,
+                cancellation,
+            }
         }
+        (StorageOperationOutput::None, None) => RuntimeSubmitOutcomeV1::Committed { receipt },
     };
     outcome
         .validate_for(&item.request)

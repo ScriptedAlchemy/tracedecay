@@ -55,7 +55,7 @@ impl SharedReply {
     pub(super) fn attach(&self, follower: oneshot::Sender<RequestResult>) {
         let mut state = self.lock();
         if let Some(settled) = &state.settled {
-            let result = settled.result.clone();
+            let result = follower_result(&settled.result);
             drop(state);
             let _ = follower.send(result);
             return;
@@ -100,12 +100,24 @@ impl SharedReply {
         let followers = std::mem::take(&mut state.followers);
         drop(state);
         for follower in followers {
-            let _ = follower.send(result.clone());
+            let _ = follower.send(follower_result(&result));
         }
         if let Some(leader) = leader {
             let _ = leader.send(result);
         }
     }
+}
+
+fn follower_result(result: &RequestResult) -> RequestResult {
+    let mut result = result.clone();
+    if let Ok(RuntimeSubmitOutcomeV1::ExternalSourceProjectionCommitted { projected, .. }) =
+        &mut result
+    {
+        // The leader owns the work that this request performed. Followers
+        // receive its commit receipt without counting those heads again.
+        *projected = 0;
+    }
+    result
 }
 
 pub(super) struct AcceptedRequest {
@@ -267,5 +279,56 @@ impl IncrementalVacuumCommand {
 
     pub(super) fn settle(self, result: Result<(), WriterActorError>) {
         let _ = self.reply.send(result);
+    }
+}
+
+#[cfg(test)]
+mod projection_reply_tests {
+    use super::*;
+    use crate::test_support::projection_batch_request;
+    use tracedecay_store::{CommitSequenceV1, StoreCommitReceiptV1};
+
+    #[test]
+    fn coalesced_projection_followers_do_not_count_the_leaders_heads() {
+        let request = Arc::new(projection_batch_request(6));
+        let metadata = &request.envelope().metadata;
+        let receipt = StoreCommitReceiptV1 {
+            operation_id: metadata.operation_id.clone(),
+            idempotency: metadata.idempotency.clone(),
+            shard_id: metadata.shard_id.clone(),
+            incarnation: metadata.incarnation,
+            authority_epoch: metadata.authority_epoch,
+            commit_sequence: CommitSequenceV1(1),
+            committed_at: metadata.admitted_at,
+        };
+        let (leader, mut leader_rx) = oneshot::channel();
+        let shared = SharedReply::new(Arc::clone(&request), leader);
+        let (queued, mut queued_rx) = oneshot::channel();
+        shared.attach(queued);
+        shared.settle(Ok(
+            RuntimeSubmitOutcomeV1::ExternalSourceProjectionCommitted {
+                receipt: receipt.clone(),
+                projected: 6,
+                cancellation: None,
+            },
+        ));
+        let (settled, mut settled_rx) = oneshot::channel();
+        shared.attach(settled);
+
+        for (response, expected) in [
+            (leader_rx.try_recv().unwrap().unwrap(), 6),
+            (queued_rx.try_recv().unwrap().unwrap(), 0),
+            (settled_rx.try_recv().unwrap().unwrap(), 0),
+        ] {
+            response.validate_for(&request).unwrap();
+            assert_eq!(
+                response,
+                RuntimeSubmitOutcomeV1::ExternalSourceProjectionCommitted {
+                    receipt: receipt.clone(),
+                    projected: expected,
+                    cancellation: None,
+                }
+            );
+        }
     }
 }

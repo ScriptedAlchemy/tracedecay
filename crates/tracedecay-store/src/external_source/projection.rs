@@ -15,6 +15,87 @@ impl SourceProjectionEffectV1 {
     }
 }
 
+/// Projects up to `max` consecutive pending heads of one binding in a single
+/// writer transaction.
+///
+/// A projection's input is the head its predecessor just made durable, so a
+/// caller cannot name the chain's later members up front. The writer derives
+/// each one from the head it reads after the previous projection persisted,
+/// inside the same savepoint. `head_receipt_digest` pins where the window
+/// starts: the writer projects only when that head is still pending, so a
+/// chain that already moved past it (an exact replay) or has not reached it
+/// (a stale drainer) settles as a no-op and never projects under a peer's
+/// head.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceProjectionBatchV1 {
+    binding: SourceBindingIdentityV1,
+    projector: ComponentVersion,
+    head_receipt_digest: ManifestDigest,
+    max: u32,
+}
+
+/// A projection window that names no work or an inconsistent head.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum SourceProjectionBatchContractErrorV1 {
+    #[error("external-source projection window domain value is invalid")]
+    Domain,
+    #[error("external-source projection window is inconsistent")]
+    Inconsistent,
+}
+
+impl From<DomainError> for SourceProjectionBatchContractErrorV1 {
+    fn from(_error: DomainError) -> Self {
+        Self::Domain
+    }
+}
+
+pub type SourceProjectionBatchResultV1<T> = Result<T, SourceProjectionBatchContractErrorV1>;
+
+impl SourceProjectionBatchV1 {
+    pub fn new(
+        binding: SourceBindingIdentityV1,
+        projector: ComponentVersion,
+        head_receipt_digest: ManifestDigest,
+        max: u32,
+    ) -> SourceProjectionBatchResultV1<Self> {
+        let command = Self {
+            binding,
+            projector,
+            head_receipt_digest,
+            max,
+        };
+        command.validate()?;
+        Ok(command)
+    }
+
+    pub fn binding(&self) -> &SourceBindingIdentityV1 {
+        &self.binding
+    }
+
+    pub fn projector(&self) -> &ComponentVersion {
+        &self.projector
+    }
+
+    pub fn head_receipt_digest(&self) -> &ManifestDigest {
+        &self.head_receipt_digest
+    }
+
+    pub fn max(&self) -> u32 {
+        self.max
+    }
+
+    pub fn validate(&self) -> SourceProjectionBatchResultV1<()> {
+        self.binding.validate()?;
+        self.projector.validate()?;
+        self.head_receipt_digest.validate()?;
+        if self.max == 0 {
+            return Err(SourceProjectionBatchContractErrorV1::Inconsistent);
+        }
+        Ok(())
+    }
+}
+
 /// Pure, deterministic projection of one committed source page.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

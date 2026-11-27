@@ -9,9 +9,9 @@ use tracedecay_store::{
     SourceAcquisitionQueueStateV1, SourceAuthorityPublicationReceiptV1,
     SourceAuthorityPublicationV1, SourceCommitApplyOutcomeV1, SourceCommitReceiptSummaryV1,
     SourceCommitReceiptV1, SourceCommitV1, SourceObjectCoverageV1, SourceObjectMutationV1,
-    SourcePendingProjectionV1, SourceProjectionApplyOutcomeV1, SourceProjectionCommitV1,
-    SourceStoreStateV1, apply_source_authority_publication_owned, apply_source_commit_owned,
-    apply_source_projection_owned, build_source_projection,
+    SourcePendingProjectionV1, SourceProjectionApplyOutcomeV1, SourceProjectionBatchV1,
+    SourceProjectionCommitV1, SourceStoreStateV1, apply_source_authority_publication_owned,
+    apply_source_commit_owned, apply_source_projection_owned, build_source_projection,
 };
 
 use super::support::{CachedStatements, decode, encode, invalid, same_json};
@@ -291,13 +291,66 @@ impl ExternalSourceExecutor {
                 "external source projection does not match the oldest pending receipt",
             ));
         }
-        match apply_source_projection_owned(current, &pending, projection.clone())
-            .map_err(invalid)?
-        {
-            SourceProjectionApplyOutcomeV1::ExactDuplicate(_) => Ok(()),
-            SourceProjectionApplyOutcomeV1::Projected(state) => {
-                let state = *state;
-                persist_projection(savepoint, &state, pending.receipt(), projection)
+        apply_pending_projection(savepoint, current, &pending, expected)
+    }
+
+    /// Projects up to `batch.max()` consecutive pending heads of one binding
+    /// inside this savepoint, starting at the head whose source receipt is
+    /// `batch.head_receipt_digest()`. Each head exists only once its
+    /// predecessor is durable, so the chain is derived here rather than named
+    /// by the caller. Each head is loaded and hydrated once: its projection is
+    /// built from that exact pending row in this savepoint, so re-reading and
+    /// re-deriving it to compare against itself would only repeat every read.
+    ///
+    /// A chain that already moved past the named head is an exact replay of a
+    /// window this drainer lost, and settles as a no-op; so does a binding with
+    /// nothing pending, since there is then no head this window may project.
+    /// A chain still waiting on a different head is a stale drainer: the
+    /// window settles as a no-op too, so the caller re-reads the head a peer
+    /// left instead of projecting under a window that no longer describes the
+    /// queue. Both leave source projection state unchanged; the writer may
+    /// still commit its runtime checkpoint for the completed request.
+    #[tracing::instrument(
+        name = "rusqlite.external_source.execute_projection_batch",
+        level = "trace",
+        skip_all
+    )]
+    pub fn execute_projection_batch(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        batch: &SourceProjectionBatchV1,
+    ) -> rusqlite::Result<u32> {
+        batch.validate().map_err(invalid)?;
+        let binding = batch.binding();
+        let projector = batch.projector();
+        let Some(mut pending) = load_next_pending_projection(savepoint, binding)? else {
+            // Nothing is pending: the window already drained, or the binding
+            // never had a head to project. Either way there is no work left.
+            return Ok(0);
+        };
+        if pending.receipt().receipt_digest() != batch.head_receipt_digest() {
+            // The chain moved on, or has not reached this head: a stale or
+            // replayed window projects nothing under a peer's head.
+            return Ok(0);
+        }
+        let mut projected = 0;
+        loop {
+            let projection =
+                build_source_projection(&pending, projector.clone()).map_err(invalid)?;
+            let current = load_state(savepoint, binding, &pending.object_coverage(&projection))?
+                .ok_or_else(|| {
+                    invalid("external source projection has no committed source state")
+                })?;
+            apply_pending_projection(savepoint, current, &pending, projection)?;
+            projected += 1;
+            if projected == batch.max() {
+                return Ok(projected);
+            }
+            // The successor head exists only now that this projection
+            // persisted, so it is read after the write, never named up front.
+            match load_next_pending_projection(savepoint, binding)? {
+                Some(next) => pending = next,
+                None => return Ok(projected),
             }
         }
     }
@@ -723,30 +776,7 @@ fn persist_source_commit(
             None => slim::slim_mutation(mutation, &binding)?,
         };
         let native_object = mutation.observation().native_object();
-        let changed = savepoint.execute_cached(
-            "INSERT OR IGNORE INTO external_source_mutations_v1 (
-                binding_id, mutation_digest, native_object_digest,
-                revision_digest, mutation_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                binding.binding_id.as_str(),
-                mutation.mutation_digest().as_str(),
-                native_object.digest().as_str(),
-                mutation.observation().revision().digest().as_str(),
-                mutation_json,
-            ],
-        )?;
-        if changed == 0 {
-            verify_encoded_row(
-                savepoint,
-                "SELECT mutation_json FROM external_source_mutations_v1
-                 WHERE binding_id = ?1 AND mutation_digest = ?2",
-                binding.binding_id.as_str(),
-                mutation.mutation_digest().as_str(),
-                &mutation_json,
-                "external source mutation collision",
-            )?;
-        }
+        persist_mutation(savepoint, &binding, mutation, &mutation_json)?;
         savepoint.execute_cached(
             "INSERT INTO external_source_objects_v2 (
                 binding_id, native_object_digest, partition_digest, mutation_digest
@@ -983,27 +1013,48 @@ fn persist_projection(
         .zip(projection.effects())
         .enumerate()
     {
+        // The executor verified this entire projection against the canonical
+        // expansion of the exact pending receipt. That expansion keeps the
+        // receipt's explicit mutations as a prefix and appends only absence
+        // tombstones derived from its complete snapshot and prior projection.
+        if index < source_receipt.mutations().len() {
+            // Explicit source mutations must already be durable. Do not repair
+            // missing source history while publishing its projection.
+            let mutation_recorded = savepoint
+                .prepare_cached(
+                    "SELECT 1 FROM external_source_mutations_v1
+                     WHERE binding_id = ?1 AND mutation_digest = ?2",
+                )?
+                .exists(params![
+                    binding.binding_id.as_str(),
+                    mutation.mutation_digest().as_str()
+                ])?;
+            if !mutation_recorded {
+                return Err(invalid(
+                    "external source projection names a mutation absent from history",
+                ));
+            }
+        } else {
+            let completion = source_receipt.snapshot_completion().ok_or_else(|| {
+                invalid("external source derived mutation has no complete snapshot")
+            })?;
+            if mutation.evidence().snapshot_completion_digest()
+                != Some(completion.completion_digest())
+            {
+                return Err(invalid(
+                    "external source derived mutation has mismatched snapshot evidence",
+                ));
+            }
+            // Absence tombstones first become known at projection time. Keep
+            // them in the same collision-checked mutation history, atomically
+            // with their effects, projected objects and projection frontier.
+            let mutation_json = slim::slim_mutation(mutation, binding)?;
+            persist_mutation(savepoint, binding, mutation, &mutation_json)?;
+        }
         let index = i64::try_from(index).map_err(|_| {
             invalid("external source projection effect index exceeds SQLite INTEGER")
         })?;
         let effect_json = encode(effect)?;
-        // The projection applies the commit's own mutations, so each one is
-        // already in the history table under this binding; a digest with no
-        // history row is a corrupt projection, refused before any row lands.
-        let mutation_recorded = savepoint
-            .prepare_cached(
-                "SELECT 1 FROM external_source_mutations_v1
-                 WHERE binding_id = ?1 AND mutation_digest = ?2",
-            )?
-            .exists(params![
-                binding.binding_id.as_str(),
-                mutation.mutation_digest().as_str()
-            ])?;
-        if !mutation_recorded {
-            return Err(invalid(
-                "external source projection names a mutation absent from history",
-            ));
-        }
         savepoint.execute_cached(
             "INSERT INTO external_source_projection_effects_v2 (
                 binding_id, projection_digest, effect_index,
@@ -1094,6 +1145,55 @@ fn persist_projection(
         &[source_receipt.receipt_digest().as_str()],
         displaced_projection.as_deref().as_slice(),
     )
+}
+
+/// Applies `projection`, derived from `pending` in this savepoint, to the
+/// binding's committed state and persists it.
+fn apply_pending_projection(
+    savepoint: &Savepoint<'_>,
+    current: SourceStoreStateV1,
+    pending: &SourcePendingProjectionV1,
+    projection: SourceProjectionCommitV1,
+) -> rusqlite::Result<()> {
+    match apply_source_projection_owned(current, pending, projection.clone()).map_err(invalid)? {
+        SourceProjectionApplyOutcomeV1::ExactDuplicate(_) => Ok(()),
+        SourceProjectionApplyOutcomeV1::Projected(state) => {
+            persist_projection(savepoint, &state, pending.receipt(), &projection)
+        }
+    }
+}
+
+fn persist_mutation(
+    savepoint: &Savepoint<'_>,
+    binding: &SourceBindingIdentityV1,
+    mutation: &SourceObjectMutationV1,
+    mutation_json: &str,
+) -> rusqlite::Result<()> {
+    let changed = savepoint.execute_cached(
+        "INSERT OR IGNORE INTO external_source_mutations_v1 (
+            binding_id, mutation_digest, native_object_digest,
+            revision_digest, mutation_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            binding.binding_id.as_str(),
+            mutation.mutation_digest().as_str(),
+            mutation.observation().native_object().digest().as_str(),
+            mutation.observation().revision().digest().as_str(),
+            mutation_json,
+        ],
+    )?;
+    if changed == 0 {
+        verify_encoded_row(
+            savepoint,
+            "SELECT mutation_json FROM external_source_mutations_v1
+             WHERE binding_id = ?1 AND mutation_digest = ?2",
+            binding.binding_id.as_str(),
+            mutation.mutation_digest().as_str(),
+            mutation_json,
+            "external source mutation collision",
+        )?;
+    }
+    Ok(())
 }
 
 #[tracing::instrument(

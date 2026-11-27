@@ -8,7 +8,7 @@ use super::{
 };
 use super::{
     RepositoryOperationEnvelopeV1, RepositoryReadOperationV1, RepositoryReadResultV1,
-    StoreAuthorityEpochV1, StoreShardIdV1,
+    RepositoryWritePayloadV1, StoreAuthorityEpochV1, StoreShardIdV1,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -105,6 +105,13 @@ pub enum RuntimeSubmitOutcomeV1 {
     Committed {
         receipt: StoreCommitReceiptV1,
     },
+    /// The count belongs to this execution, after its outer transaction
+    /// committed. A stale window or a coalesced follower projects zero heads.
+    ExternalSourceProjectionCommitted {
+        receipt: StoreCommitReceiptV1,
+        projected: u32,
+        cancellation: Option<RuntimeCancellationIdentityV1>,
+    },
     ExactReplay {
         receipt: StoreCommitReceiptV1,
     },
@@ -145,6 +152,33 @@ impl RuntimeSubmitOutcomeV1 {
         let metadata = &request.envelope().metadata;
         match self {
             Self::Committed { receipt } => receipt.validate_for(metadata),
+            Self::ExternalSourceProjectionCommitted {
+                receipt,
+                projected,
+                cancellation,
+            } => {
+                let RepositoryWritePayloadV1::ExternalSourceProjectionBatch(batch) =
+                    &request.envelope().payload
+                else {
+                    return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
+                        field: "external source projection outcome payload",
+                    });
+                };
+                if *projected > batch.max() {
+                    return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
+                        field: "external source projection outcome count",
+                    });
+                }
+                if cancellation
+                    .as_ref()
+                    .is_some_and(|identity| identity != &request.control().cancellation)
+                {
+                    return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
+                        field: "post-commit cancellation identity",
+                    });
+                }
+                receipt.validate_for(metadata)
+            }
             Self::ExactReplay { receipt } => receipt.validate_replay_for(metadata),
             Self::IdempotencyConflict { existing_receipt } => {
                 existing_receipt.validate()?;

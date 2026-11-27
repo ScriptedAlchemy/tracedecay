@@ -37,7 +37,9 @@
 //! and the same contract is re-asserted against the new process over the same
 //! on-disk state.
 
+use std::fmt::Debug;
 use std::io::Write;
+use std::panic::resume_unwind;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -448,7 +450,7 @@ fn await_sdk_reset_problem(
 fn park_at_commit_barrier<T, F>(barrier_dir: &Path, content: &str, request: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
+    T: Debug + Send + 'static,
 {
     // The barrier is one-shot per directory: clear a previous park's markers
     // so the same daemon process can serve more than one parked request.
@@ -464,13 +466,17 @@ where
 
     let arrived = barrier_dir.join("arrived");
     while !matches!(arrived.try_exists(), Ok(true)) {
-        assert!(
-            !handle.is_finished(),
-            "the request settled without ever reaching the durable commit boundary"
-        );
+        if handle.is_finished() {
+            let result = handle
+                .join()
+                .unwrap_or_else(|payload| resume_unwind(payload));
+            panic!(
+                "the request for {content:?} settled without ever reaching the durable commit boundary: {result:?}"
+            );
+        }
         assert!(
             started.elapsed() < super::BARRIER_ARRIVAL_TIMEOUT,
-            "the request never reached the durable commit boundary within {:?}",
+            "the request for {content:?} never reached the durable commit boundary within {:?}",
             super::BARRIER_ARRIVAL_TIMEOUT
         );
         std::thread::sleep(Duration::from_millis(20));
@@ -483,7 +489,9 @@ where
     std::fs::write(barrier_dir.join("release"), b"release\n")
         .expect("release the fact commit barrier");
 
-    handle.join().expect("join the parked request")
+    handle
+        .join()
+        .unwrap_or_else(|payload| resume_unwind(payload))
 }
 
 fn fact_add_body(content: &str) -> Value {

@@ -84,6 +84,59 @@ pub fn process_read_bytes() -> u64 {
         .unwrap()
 }
 
+/// Work counters at the same public operation boundaries as the read probe.
+/// Checkpoint frames distinguish periodic WAL copy-back from query reads
+/// without subtracting either kind of work from the asserted cost.
+#[derive(Debug, Default)]
+pub struct StoreReadWork {
+    pub read_bytes: u64,
+    pub writer_vm_steps: u64,
+    pub checkpointed_frames: u64,
+    pub snapshot_admissions: u64,
+}
+
+impl StoreReadWork {
+    fn sample(database: &RegisteredGlobalDb) -> Self {
+        let snapshot = database
+            .runtime_client()
+            .writer_telemetry_snapshot()
+            .expect("registered database must expose physical telemetry");
+        let writer = snapshot.writer.expect("registered writer must be mounted");
+        Self {
+            read_bytes: process_read_bytes(),
+            writer_vm_steps: writer.sqlite_vm.vm_steps,
+            checkpointed_frames: writer.wal.checkpointed_frames,
+            snapshot_admissions: snapshot.snapshot_admissions,
+        }
+    }
+
+    fn add_interval(&mut self, before: &Self, after: &Self) {
+        self.read_bytes += after.read_bytes - before.read_bytes;
+        self.writer_vm_steps += after.writer_vm_steps - before.writer_vm_steps;
+        self.checkpointed_frames += after.checkpointed_frames - before.checkpointed_frames;
+        self.snapshot_admissions += after.snapshot_admissions - before.snapshot_admissions;
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct MessageIngestWork {
+    pub messages: u64,
+    pub capture: StoreReadWork,
+    pub drain: StoreReadWork,
+    pub refresh: StoreReadWork,
+}
+
+impl MessageIngestWork {
+    pub fn read_bytes_per_message(&self) -> u64 {
+        (self.capture.read_bytes + self.drain.read_bytes + self.refresh.read_bytes) / self.messages
+    }
+
+    pub fn writer_vm_steps_per_message(&self) -> u64 {
+        (self.capture.writer_vm_steps + self.drain.writer_vm_steps + self.refresh.writer_vm_steps)
+            / self.messages
+    }
+}
+
 pub struct SessionCursor {
     pub session_id: SessionId,
     pub next_ordinal: u64,
@@ -302,7 +355,12 @@ pub fn run_git(project: &Path, args: &[&str]) {
         .current_dir(project)
         .output()
         .unwrap();
-    assert!(output.status.success(), "git {args:?} failed");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 pub struct DrainFixture {
@@ -451,13 +509,19 @@ pub async fn probe_drain_after_wal_restart(
 /// Captures `messages_per_session` new messages on each of `sessions` without
 /// draining, then drains that whole backlog, returning the bytes read per
 /// projected message.
+///
+/// The drain starts from emptied connection caches. Capture leaves the
+/// backlog it just wrote resident, and a cache that holds the whole base
+/// backlog but only part of the grown one would read as growth; the drain
+/// must pay for the pages each projected message touches either way.
 pub async fn backlog_drain_read_per_message(
     facade: &HostAdmissionFacade<'_>,
+    database: &RegisteredGlobalDb,
     project: &Path,
     scope: &ObservationScopeV1,
     sessions: std::ops::Range<u64>,
     messages_per_session: u64,
-) -> u64 {
+) -> (u64, StoreReadWork) {
     let backlog = (sessions.end - sessions.start) * messages_per_session;
     for index in sessions {
         let mut cursor = session_cursor(index);
@@ -475,14 +539,20 @@ pub async fn backlog_drain_read_per_message(
         )
         .await;
     }
-    let before = process_read_bytes();
+    database.release_connection_memory().await.unwrap();
+    let before = StoreReadWork::sample(database);
     let projected = drain(facade, scope).await;
-    let read = process_read_bytes() - before;
+    // Commit replies precede scheduled checkpoints. Join the normal writer
+    // checkpoint lane so the final sample includes that maintenance too.
+    database.checkpoint_result().await.unwrap();
+    let after = StoreReadWork::sample(database);
+    let mut work = StoreReadWork::default();
+    work.add_interval(&before, &after);
     assert_eq!(
         projected, backlog,
         "the drain must project the whole backlog"
     );
-    read / backlog
+    (work.read_bytes / backlog, work)
 }
 
 /// Runs temporal refresh passes until one finds nothing to begin, project, or
@@ -524,9 +594,8 @@ pub async fn refresh_until_idle(
 }
 
 /// Streams `count` messages into the live session one at a time, capturing,
-/// draining, and refreshing each, and returns the bytes the process read and
-/// the VM steps the store's writer executed per message across that whole
-/// ingest.
+/// draining, and refreshing each. Retains each phase's measured work so a
+/// failed cost bound identifies where the additional reads occurred.
 pub async fn ingest_live_messages(
     facade: &HostAdmissionFacade<'_>,
     fixture: &DrainFixture,
@@ -534,24 +603,62 @@ pub async fn ingest_live_messages(
     refresh: &Arc<SessionTemporalRefreshWakeState>,
     cursor: &mut SessionCursor,
     count: u64,
-) -> (u64, u64) {
+) -> MessageIngestWork {
     let (project, scope) = (fixture.project.as_path(), fixture.scope());
-    let (mut read, mut steps) = (0, 0);
+    let mut work = MessageIngestWork {
+        messages: count,
+        ..MessageIngestWork::default()
+    };
     for _ in 0..count {
         let timestamp = SEED_TIMESTAMP + i64::try_from(cursor.next_ordinal).unwrap();
-        let steps_before = writer_work(database).0;
-        let before = process_read_bytes();
+        let before = StoreReadWork::sample(database);
         capture(
             facade,
             message_requests(project, &scope, cursor, 1, timestamp, PROMPT_TITLE_WORDS),
         )
         .await;
+        let captured = StoreReadWork::sample(database);
         assert_eq!(drain(facade, &scope).await, 1);
+        let drained = StoreReadWork::sample(database);
         assert_eq!(refresh_until_idle(database, refresh).await, 1);
-        read += process_read_bytes() - before;
-        steps += writer_work(database).0 - steps_before;
+        let refreshed = StoreReadWork::sample(database);
+        work.capture.add_interval(&before, &captured);
+        work.drain.add_interval(&captured, &drained);
+        work.refresh.add_interval(&drained, &refreshed);
     }
-    (read / count, steps / count)
+    work
+}
+
+/// Streams `count` live messages from the start of a WAL generation, so the
+/// comparison counts what those messages read rather than which probe a
+/// threshold checkpoint of earlier writes happens to land in. Padding ingest
+/// on its own session restarts the log, and its refresh settles before the
+/// probe begins.
+pub async fn ingest_live_messages_after_wal_restart(
+    facade: &HostAdmissionFacade<'_>,
+    fixture: &DrainFixture,
+    database: &RegisteredGlobalDbLeaseV1,
+    refresh: &Arc<SessionTemporalRefreshWakeState>,
+    cursor: &mut SessionCursor,
+    padding: &mut SessionCursor,
+    count: u64,
+) -> MessageIngestWork {
+    let timestamp = SEED_TIMESTAMP + 10_000_000 + i64::try_from(padding.next_ordinal).unwrap();
+    advance_to_wal_restart(facade, fixture, padding, timestamp).await;
+    assert_eq!(refresh_until_idle(database, refresh).await, 1);
+    // Join setup maintenance before the interval, and the last writer's
+    // scheduled checkpoint before checking it. Per-phase samples alone can
+    // miss a checkpoint that completes after the final commit reply.
+    database.checkpoint_result().await.unwrap();
+    let checkpointed = writer_telemetry(database).wal.checkpointed_frames;
+    let work = ingest_live_messages(facade, fixture, database, refresh, cursor, count).await;
+    database.checkpoint_result().await.unwrap();
+    assert_eq!(
+        writer_telemetry(database).wal.checkpointed_frames,
+        checkpointed,
+        "the live ingest comparison must not include a periodic checkpoint: {work:?}"
+    );
+    work
 }
 
 pub fn session_store_path(fixture: &DrainFixture) -> PathBuf {
@@ -693,7 +800,7 @@ pub async fn median_streamed_message_reads(
 ) -> u64 {
     let mut reads = Vec::with_capacity(windows);
     for _ in 0..windows {
-        let (read, _) = ingest_live_messages(
+        let work = ingest_live_messages(
             facade,
             fixture,
             database,
@@ -702,7 +809,7 @@ pub async fn median_streamed_message_reads(
             MEDIAN_PROBE_MESSAGES,
         )
         .await;
-        reads.push(read);
+        reads.push(work.read_bytes_per_message());
     }
     reads.sort_unstable();
     eprintln!("streamed message read bytes per probe window: {reads:?}");

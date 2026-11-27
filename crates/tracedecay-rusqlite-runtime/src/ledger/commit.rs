@@ -41,7 +41,7 @@ impl ReplayAuthority {
         match payload {
             RepositoryWritePayloadV1::ExternalSource(_)
             | RepositoryWritePayloadV1::ExternalSourceBatch(_)
-            | RepositoryWritePayloadV1::ExternalSourceProjection(_)
+            | RepositoryWritePayloadV1::ExternalSourceProjectionBatch(_)
             | RepositoryWritePayloadV1::Observation(_)
             | RepositoryWritePayloadV1::ObservationBatch(_) => Self::Repository,
             _ => Self::Ledger,

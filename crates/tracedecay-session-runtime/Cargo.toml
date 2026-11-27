@@ -94,6 +94,10 @@ name = "session_idle_history_commits"
 required-features = ["test-helpers"]
 
 [[test]]
+name = "session_profile_history_write_cost"
+required-features = ["test-helpers"]
+
+[[test]]
 name = "session_ingest_index_read_cost"
 required-features = ["test-helpers"]
 
@@ -113,5 +117,6 @@ required-features = ["test-helpers"]
 # Codex re-offer probe imports 2,010 rollouts (about 140 s pinned).
 [package.metadata.bazel.test_sizes]
 session_ingest_index_read_cost = "large"
+session_profile_history_write_cost = "large"
 session_refresh_read_cost = "large"
 session_codex_history_cost = "large"

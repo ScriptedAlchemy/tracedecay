@@ -235,17 +235,20 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
     let publisher_scope = scope.clone();
     let publisher_access = access.clone();
     let publisher_configuration = Arc::clone(graph.configuration_runtime());
+    // Database initialization is fixture setup, outside the publication gate timeout.
+    let response_handles_3 =
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("types-tests-3")
+            .await;
+    let publisher_response_handles =
+        tracedecay_session_memory::response_handles::ResponseHandleStore::registered(
+            response_handles_3.registered.clone(),
+        );
     let publisher = tokio::spawn(async move {
-        let response_handles_3 =
-            tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("types-tests-3")
-                .await;
         registrar
             .open_and_register(
                 publisher_database,
                 publisher_root.clone(),
-                tracedecay_session_memory::response_handles::ResponseHandleStore::registered(
-                    response_handles_3.registered.clone(),
-                ),
+                publisher_response_handles,
                 publisher_scope.clone(),
                 publisher_access,
                 Arc::new(DaemonCallableCodeAuthorizationSource::production(
@@ -320,17 +323,19 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
     let publisher_scope = scope.clone();
     let publisher_access = access.clone();
     let publisher_configuration = Arc::clone(graph.configuration_runtime());
+    let response_handles_4 =
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("types-tests-4")
+            .await;
+    let publisher_response_handles =
+        tracedecay_session_memory::response_handles::ResponseHandleStore::registered(
+            response_handles_4.registered.clone(),
+        );
     let publisher = tokio::spawn(async move {
-        let response_handles_4 =
-            tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("types-tests-4")
-                .await;
         publisher_registrar
             .open_and_register(
                 publisher_database,
                 publisher_root.clone(),
-                tracedecay_session_memory::response_handles::ResponseHandleStore::registered(
-                    response_handles_4.registered.clone(),
-                ),
+                publisher_response_handles,
                 publisher_scope.clone(),
                 publisher_access,
                 Arc::new(DaemonCallableCodeAuthorizationSource::production(

@@ -8,7 +8,7 @@ use crate::{
     ObservationCursorAdvance, RemoteObservationReplayWriteV1, RemoteWriterFenceInstallV1,
     RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
     SanitizedCleanDiagnosticSnapshotV1, SourceAcquisitionQueueCasV1, SourceCommitV1,
-    SourceProjectionCommitV1,
+    SourceProjectionBatchV1,
 };
 
 use super::identity::{canonical_id, validate_canonical_id};
@@ -785,7 +785,7 @@ pub enum RepositoryWritePayloadV1 {
     Diagnostics(Box<SanitizedCleanDiagnosticSnapshotV1>),
     ExternalSource(Box<SourceCommitV1>),
     ExternalSourceBatch(Box<[SourceCommitV1]>),
-    ExternalSourceProjection(Box<SourceProjectionCommitV1>),
+    ExternalSourceProjectionBatch(Box<SourceProjectionBatchV1>),
     ExternalSourceAcquisition(Box<SourceAcquisitionQueueCasV1>),
     RetrievalAnchorDisposition(Box<RetrievalAnchorDispositionRecordV1>),
     RetrievalAnchorDerivative(Box<RetrievalAnchorDerivativeV1>),
@@ -805,7 +805,7 @@ impl RepositoryWritePayloadV1 {
             Self::Diagnostics(_) => "publish diagnostics",
             Self::ExternalSource(_) => "commit external source",
             Self::ExternalSourceBatch(_) => "commit external source batch",
-            Self::ExternalSourceProjection(_) => "project external source",
+            Self::ExternalSourceProjectionBatch(_) => "project external source batch",
             Self::ExternalSourceAcquisition(_) => "schedule external source acquisition",
             Self::RetrievalAnchorDisposition(_) => "append retrieval anchor disposition",
             Self::RetrievalAnchorDerivative(_) => "publish retrieval anchor derivative",
@@ -831,7 +831,7 @@ impl RepositoryWritePayloadV1 {
             | Self::RetrievalAnchorDerivative(_) => "project",
             Self::ExternalSource(_)
             | Self::ExternalSourceBatch(_)
-            | Self::ExternalSourceProjection(_)
+            | Self::ExternalSourceProjectionBatch(_)
             | Self::ExternalSourceAcquisition(_) => "external_source",
             Self::GitIndexTransaction(_) => "code",
         }
@@ -887,8 +887,8 @@ impl RepositoryWritePayloadV1 {
                     )
                 )
             }),
-            Self::ExternalSourceProjection(projection) => matches!(
-                (&projection.source_frontier().binding().owner, scope),
+            Self::ExternalSourceProjectionBatch(batch) => matches!(
+                (&batch.binding().owner, scope),
                 (
                     tracedecay_domain::SourceBindingOwnerV1::Project(_),
                     StoreShardScopeV1::Project { .. } | StoreShardScopeV1::ProjectSessions { .. },
@@ -966,13 +966,11 @@ impl RepositoryWritePayloadV1 {
                             Ok(())
                         }
                     }
-                    Self::ExternalSourceProjection(projection) => {
-                        projection.validate().map_err(|_| {
-                            StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
-                                payload: self.name(),
-                            }
-                        })
-                    }
+                    Self::ExternalSourceProjectionBatch(batch) => batch.validate().map_err(|_| {
+                        StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                            payload: self.name(),
+                        }
+                    }),
                     Self::ExternalSourceAcquisition(command) => command.validate().map_err(|_| {
                         StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
                             payload: self.name(),
@@ -1132,13 +1130,11 @@ impl RepositoryOperationEnvelopeV1 {
                         });
                     }
                 }
-                if let RepositoryWritePayloadV1::ExternalSourceProjection(projection) =
+                if let RepositoryWritePayloadV1::ExternalSourceProjectionBatch(batch) =
                     &self.payload
                 {
-                    let exact_owner = match (
-                        &projection.source_frontier().binding().owner,
-                        &self.metadata.shard_id.scope,
-                    ) {
+                    let exact_owner = match (&batch.binding().owner, &self.metadata.shard_id.scope)
+                    {
                         (
                             tracedecay_domain::SourceBindingOwnerV1::Project(project_id),
                             StoreShardScopeV1::Project {
