@@ -85,8 +85,9 @@ never a doubled `tracedecay`.
   refuse an explicit project selector. Pi's `session_start` and `agent_end`
   events reach `tracedecay hook-pi-event`. TraceDecay records analytics under
   the `pi` host and captures the session transcript through the Pi transcript
-  source. It reads from `~/.pi/agent/sessions` or the directory set by
-  `PI_CODING_AGENT_DIR`.
+  source. It reads from `~/.pi/agent/sessions`. When `PI_CODING_AGENT_DIR`
+  relocates the agent directory, transcripts are under that directory's
+  `sessions/` subdirectory.
 - `README-claude.md`, `README-codex.md`, `README-cursor.md`, `README-kimi.md`,
   `README-chatgpt.md`: host README files, deployed as `README.md`.
 - `README-opencode.md`: OpenCode host README. It is source documentation;
