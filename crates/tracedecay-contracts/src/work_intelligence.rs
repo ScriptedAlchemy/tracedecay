@@ -721,7 +721,9 @@ where
     where
         G: WorkEvidenceRootReadPortV1,
     {
-        if request.old_version.graph_version() >= request.new_version.graph_version() {
+        // Graph versions count changes within one selection. The owner journal
+        // sequence orders the exact versions even when they belong to siblings.
+        if request.old_version.event_sequence() >= request.new_version.event_sequence() {
             return Err(WorkProductApplicationErrorV1::InvalidRequest);
         }
         let (_, port_context) = self.authorize(context, &request.selection, request.observed_at)?;

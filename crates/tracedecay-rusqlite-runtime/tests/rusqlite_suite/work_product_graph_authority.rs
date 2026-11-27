@@ -30,7 +30,7 @@ use tracedecay_domain::{
     AcceptanceCriterionId, CursorBindingMismatchV1, MAX_WORK_PRODUCT_TEXT_BYTES, ProjectId,
     ProposalId, TaskId, UtcMicros, WorkAcceptanceCriterionV1, WorkGraphVersionV1, WorkItemInputV1,
     WorkItemV1, WorkProductEventPayloadV1, WorkProductEventV1, WorkProductGraphV1,
-    WorkProposalDispositionV1, WorkProposalV1, WorkRouteDecisionV1,
+    WorkProductRelationV1, WorkProposalDispositionV1, WorkProposalV1, WorkRouteDecisionV1,
     WorkRuntimeProjectionCoverageV1, WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1,
     canonical_sha256,
 };
@@ -2305,6 +2305,117 @@ fn exact_evidence_survives_sibling_writes_at_the_same_observation() {
             )
             .expect_err("an exact version does not authorize a sibling's scope"),
         WorkProductApplicationErrorV1::NotFoundOrNotAuthorized
+    );
+}
+
+#[test]
+fn proposal_comparisons_follow_journal_order_across_selection_lines() {
+    let store = RegisteredWorkStore::start("work-product-comparison-order");
+    let created = mutations(&store)
+        .create(
+            &context(),
+            &binding(),
+            CreateWorkProductRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                initial_graph: graph(vec![item("task.no-git", &[], 2)]),
+                mutation: mutation("command.work-product.comparison.create", UtcMicros(100)),
+            },
+        )
+        .unwrap();
+    let project_first = add_on(
+        &store,
+        project_selection(),
+        "task.project-first",
+        created.verified_graph_version(),
+        "command.work-product.comparison.project-first",
+        UtcMicros(110),
+    )
+    .unwrap();
+    let project_latest = add_on(
+        &store,
+        project_selection(),
+        "task.project-latest",
+        project_first.verified_graph_version(),
+        "command.work-product.comparison.project-latest",
+        UtcMicros(120),
+    )
+    .unwrap();
+    let repository = mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: repository_selection(),
+                item: item("task.repository", &["task.no-git"], 1),
+                mutation: WorkProductMutationIdentityV1 {
+                    expected_authority: WorkProductExpectedAuthorityV1::Verified {
+                        verified_version: created.verified_graph_version().clone(),
+                    },
+                    ..mutation("command.work-product.comparison.repository", UtcMicros(130))
+                },
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        project_latest
+            .verified_graph_version()
+            .graph_version()
+            .get(),
+        3
+    );
+    assert_eq!(repository.verified_graph_version().graph_version().get(), 2);
+    assert!(project_latest.event().sequence() < repository.event().sequence());
+
+    let intelligence =
+        WorkIntelligenceServiceV1::new(store.storage().clone(), store.storage().clone(), binding());
+    let compare = |old, new| {
+        intelligence.compare_proposal(
+            &context(),
+            WorkProposalComparisonRequestV1 {
+                selection: combined_selection(),
+                task_id: id("task.no-git"),
+                old_version: old,
+                new_version: new,
+                observed_at: PROJECTED_AT,
+            },
+        )
+    };
+    assert_eq!(
+        compare(
+            repository.verified_graph_version().clone(),
+            project_latest.verified_graph_version().clone(),
+        )
+        .expect_err("line-local version numbers cannot authorize a reversed comparison"),
+        WorkProductApplicationErrorV1::InvalidRequest
+    );
+
+    for earlier in [
+        project_first.verified_graph_version(),
+        project_latest.verified_graph_version(),
+    ] {
+        let comparison = compare(earlier.clone(), repository.verified_graph_version().clone())
+            .expect("journal order permits earlier versions with equal or larger local counters");
+        assert_eq!(&comparison.old.verified_version, earlier);
+        assert_eq!(
+            comparison.new.verified_version,
+            *repository.verified_graph_version()
+        );
+        assert_eq!(
+            comparison.added_relations,
+            vec![WorkProductRelationV1::Gates {
+                dependency: id("task.no-git"),
+                dependent: id("task.repository"),
+            }]
+        );
+        assert!(comparison.removed_relations.is_empty());
+    }
+    assert_eq!(
+        compare(
+            repository.verified_graph_version().clone(),
+            repository.verified_graph_version().clone(),
+        )
+        .expect_err("a comparison still requires a later event"),
+        WorkProductApplicationErrorV1::InvalidRequest
     );
 }
 
