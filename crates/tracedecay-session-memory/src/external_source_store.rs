@@ -562,6 +562,8 @@ impl RuntimeExternalSourceStore {
         let mut projected = 0_usize;
         let mut exhausted = false;
         let mut remaining = max;
+        // A window that filled its budget left its binding's chain pending.
+        let mut continuing = None;
         // Each window is one write transaction over up to
         // `HOST_PROJECTION_REPLAY_TXN_WINDOW` heads of the head's binding. A
         // head lost to another drainer still spends budget, so a drainer that
@@ -570,7 +572,19 @@ impl RuntimeExternalSourceStore {
             if cancellation.is_cancelled() {
                 break;
             }
-            let Some(pending) = self.read_pending_projection(binding.clone()).await? else {
+            // Stay on that binding until its chain drains. Its heads share a
+            // key prefix in every external-source tree, so the writer keeps
+            // one binding's pages resident instead of cycling every pending
+            // binding's working set through its cache window by window.
+            let next = match continuing.take() {
+                Some(current) => self.read_pending_projection(Some(current)).await?,
+                None => None,
+            };
+            let next = match next {
+                Some(pending) => Some(pending),
+                None => self.read_pending_projection(binding.clone()).await?,
+            };
+            let Some(pending) = next else {
                 exhausted = true;
                 break;
             };
@@ -579,7 +593,7 @@ impl RuntimeExternalSourceStore {
             let window_u32 = u32::try_from(window)
                 .map_err(|_| invalid("external source projection window exceeds u32"))?;
             let batch = SourceProjectionBatchV1::new(
-                head,
+                head.clone(),
                 projector.clone(),
                 pending.receipt().receipt_digest().clone(),
                 window_u32,
@@ -596,6 +610,9 @@ impl RuntimeExternalSourceStore {
                 .map_err(|_| invalid("external source pending count exceeds usize"))?;
             projected = projected.saturating_add(consumed);
             remaining = remaining.saturating_sub(consumed.max(1));
+            if consumed == window {
+                continuing = Some(head);
+            }
         }
         let deferred = !exhausted
             && !cancellation.is_cancelled()

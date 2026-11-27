@@ -291,23 +291,16 @@ impl ExternalSourceExecutor {
                 "external source projection does not match the oldest pending receipt",
             ));
         }
-        match apply_source_projection_owned(current, &pending, projection.clone())
-            .map_err(invalid)?
-        {
-            SourceProjectionApplyOutcomeV1::ExactDuplicate(_) => Ok(()),
-            SourceProjectionApplyOutcomeV1::Projected(state) => {
-                let state = *state;
-                persist_projection(savepoint, &state, pending.receipt(), projection)
-            }
-        }
+        apply_pending_projection(savepoint, current, &pending, expected)
     }
 
     /// Projects up to `batch.max()` consecutive pending heads of one binding
     /// inside this savepoint, starting at the head whose source receipt is
     /// `batch.head_receipt_digest()`. Each head exists only once its
     /// predecessor is durable, so the chain is derived here rather than named
-    /// by the caller, and every head settles through the same
-    /// `execute_projection_write` authority as an unbatched one.
+    /// by the caller. Each head is loaded and hydrated once: its projection is
+    /// built from that exact pending row in this savepoint, so re-reading and
+    /// re-deriving it to compare against itself would only repeat every read.
     ///
     /// A chain that already moved past the named head is an exact replay of a
     /// window this drainer lost, and settles as a no-op; so does a binding with
@@ -330,7 +323,7 @@ impl ExternalSourceExecutor {
         batch.validate().map_err(invalid)?;
         let binding = batch.binding();
         let projector = batch.projector();
-        let Some(pending) = load_next_pending_projection(savepoint, binding)? else {
+        let Some(mut pending) = load_next_pending_projection(savepoint, binding)? else {
             // Nothing is pending: the window already drained, or the binding
             // never had a head to project. Either way there is no work left.
             return Ok(0);
@@ -340,19 +333,26 @@ impl ExternalSourceExecutor {
             // replayed window projects nothing under a peer's head.
             return Ok(0);
         }
-        let first = build_source_projection(&pending, projector.clone()).map_err(invalid)?;
-        self.execute_projection_write(savepoint, &first)?;
-        let mut projected = 1;
-        for _ in 1..batch.max() {
-            let Some(pending) = load_next_pending_projection(savepoint, binding)? else {
-                break;
-            };
+        let mut projected = 0;
+        loop {
             let projection =
                 build_source_projection(&pending, projector.clone()).map_err(invalid)?;
-            self.execute_projection_write(savepoint, &projection)?;
+            let current = load_state(savepoint, binding, &pending.object_coverage(&projection))?
+                .ok_or_else(|| {
+                    invalid("external source projection has no committed source state")
+                })?;
+            apply_pending_projection(savepoint, current, &pending, projection)?;
             projected += 1;
+            if projected == batch.max() {
+                return Ok(projected);
+            }
+            // The successor head exists only now that this projection
+            // persisted, so it is read after the write, never named up front.
+            match load_next_pending_projection(savepoint, binding)? {
+                Some(next) => pending = next,
+                None => return Ok(projected),
+            }
         }
-        Ok(projected)
     }
 
     #[tracing::instrument(
@@ -1145,6 +1145,22 @@ fn persist_projection(
         &[source_receipt.receipt_digest().as_str()],
         displaced_projection.as_deref().as_slice(),
     )
+}
+
+/// Applies `projection`, derived from `pending` in this savepoint, to the
+/// binding's committed state and persists it.
+fn apply_pending_projection(
+    savepoint: &Savepoint<'_>,
+    current: SourceStoreStateV1,
+    pending: &SourcePendingProjectionV1,
+    projection: SourceProjectionCommitV1,
+) -> rusqlite::Result<()> {
+    match apply_source_projection_owned(current, pending, projection.clone()).map_err(invalid)? {
+        SourceProjectionApplyOutcomeV1::ExactDuplicate(_) => Ok(()),
+        SourceProjectionApplyOutcomeV1::Projected(state) => {
+            persist_projection(savepoint, &state, pending.receipt(), &projection)
+        }
+    }
 }
 
 fn persist_mutation(
