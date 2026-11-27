@@ -7,10 +7,10 @@ import { fileURLToPath } from "node:url";
 import { createRsbuild, loadConfig } from "@rsbuild/core";
 import { createRslib } from "@rslib/core";
 
-// Builds the committed `embedded/` artifacts the plugin bundle launches
-// (`plugin/mcp.json` → `node ./chatgpt-extension/embedded/server.mjs`) so an
-// installed plugin needs no workspace install. Output is deterministic: no
-// hashes, no source maps, every dependency bundled. `--check` only compares.
+// Build the committed `embedded/` files so the plugin needs no workspace
+// install. `plugin/mcp.json` runs `node ./chatgpt-extension/embedded/server.mjs`.
+// The build bundles every dependency and omits hashes and source maps so the
+// output is deterministic. `--check` only compares the output with the files.
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const embeddedDir = path.join(packageRoot, "embedded");
 const check = process.argv.slice(2).includes("--check");

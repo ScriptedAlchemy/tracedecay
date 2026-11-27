@@ -38,11 +38,9 @@ def validate_status(value: dict[str, Any], *, strict: bool = False) -> None:
     if not strict:
         return
 
-    # Report every unmet condition, not just the first. Readiness has five
-    # independent gates across two subsystems (text artifact, code graph), and
-    # a first-failure-only message names whichever gate happens to be checked
-    # first -- so a run blocked in graph activation still reported "requires
-    # current code-index freshness" and hid the phase that actually stalled.
+    # Check all five independent readiness conditions for the text artifact
+    # and code graph. Reporting only the first failure can show stale
+    # code-index freshness without showing that graph activation has stalled.
     unmet: list[str] = []
 
     freshness = value.get("code_index_freshness")
@@ -109,12 +107,12 @@ def validate_context(value: dict[str, Any], *, strict: bool = False) -> None:
 
     lexical = coverage.get("lexical")
     if lexical != "complete":
-        # The strict contract is index readiness, not unbounded recall (#917):
-        # a lexical lane bounded by the retriever's document-frequency budget
-        # (`candidate_sources_pruned`, #1161) is acceptable only when served
-        # from the current generation. The lane carries `generation` exactly
-        # when it was served stale, and `freshness.state` is `fresh` only when
-        # the served generation is the one the scheduler reports current.
+        # Strict validation checks index readiness, not unbounded recall (#917).
+        # Lexical retrieval can prune candidates within its document frequency
+        # budget (`candidate_sources_pruned`, #1161), but it must serve the
+        # current generation. Lexical coverage includes `generation` for stale
+        # results and omits it for current results. `freshness.state` is `fresh`
+        # only when the scheduler reports that the served generation is current.
         if not isinstance(lexical, dict) or lexical.get("status") != "partial":
             raise ValueError("strict context requires complete lexical coverage")
         reason = lexical.get("reason")

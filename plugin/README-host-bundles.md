@@ -3,8 +3,8 @@
 TraceDecay host packaging has two independent layers:
 
 - The MCP-free **core** contains host metadata, skills, hooks, and CLI/daemon
-  bindings. A native feedback projection is included only when the host has a
-  checked-in registration API and adapter.
+  bindings. It includes native feedback only for hosts with a checked-in
+  registration API and adapter.
 - Optional **Context MCP** and **Operator MCP** companions register the same
   TraceDecay binary and daemon authority. Removing a companion does not remove
   core hooks, skills, receipts, or another companion.
@@ -14,9 +14,9 @@ catalog. A dry run verifies schema, compatibility, and content identity and
 reports owned paths and competing-extension claims without opening a writer.
 Apply, update, repair, and uninstall use atomic single-file publication and
 ownership receipts. A failure leaves completed changes in place. The next
-install or repair observes that state and converges forward. No previous file
-contents or undo records are retained. Unrelated host configuration is parsed
-with the host adapter's JSON/TOML library and preserved.
+install or repair reads the existing state and applies the remaining changes.
+TraceDecay keeps no previous file contents or undo records. The host adapter
+uses its JSON or TOML library to preserve unrelated host configuration.
 
 ## Host routes
 
@@ -39,10 +39,10 @@ with the host adapter's JSON/TOML library and preserved.
   `tracedecay-explorer` stdio server and app UI from
   `chatgpt-extension/embedded/`, the icon, and `README-chatgpt.md` into the
   staged plugin source under
-  `~/.tracedecay/host-bundle-stage/chatgpt/tracedecay`. ChatGPT registers
-  plugins only through its own interactive surfaces, so install and
-  `update-plugin` commit the staged bytes and report host registration as
-  unverifiable (informational, exit 0), with activation guidance in the README.
+  `~/.tracedecay/host-bundle-stage/chatgpt/tracedecay`. ChatGPT requires
+  interactive plugin registration. Install and `update-plugin` commit the
+  staged bytes and report host registration as unverifiable (informational,
+  exit 0). The README explains how to activate the plugin.
   `uninstall` removes the receipt-owned staged tree. The explorer is a read-only
   MCP App over the same daemon authority:
   MCP-transport operations go through a spawned `tracedecay serve`, HTTP
@@ -77,19 +77,18 @@ with the host adapter's JSON/TOML library and preserved.
 - **OpenCode (2.x):** a typed `@opencode/plugin` V2 definition under
   `~/.config/opencode/plugins/` (or `.opencode/plugins/` locally) registers
   an `execute.after` tool hook and subscribes to the server event stream for
-  the `session.execution.{succeeded,failed,interrupted}` boundaries, schedules
-  a bounded daemon admission child in the plugin's location, and returns
-  without waiting for it. Daemon guidance is injected as system context at the
-  owning session's next model request (V2 server plugins have no client UI
-  channel). The MCP entry is merged into the native `mcp.servers` map of the
-  existing JSON config; OpenCode 2 runs no LSP, so none is registered.
+  the `session.execution.{succeeded,failed,interrupted}` events. The plugin
+  starts a child process in its own location to submit a bounded admission
+  request to the daemon, then returns without waiting. V2 server plugins have
+  no client UI channel. TraceDecay adds the daemon's guidance as system
+  context on the same session's next model request. The installer merges the
+  MCP entry into `mcp.servers` in the existing JSON config. It registers no
+  LSP because OpenCode 2 does not run one.
 
-OpenCode command files are prompt-template command artifacts owned and
-receipted by the optional **Agent** component. An agent-referenced prompt file
-is owned by that same component. `AGENTS.md` remains Core instruction/rules
-content managed by the existing prompt-rule reconciler; it is not a separate
-prompt lifecycle product, and the registry never installs it through a second
-prompt authority.
+The optional **Agent** component owns OpenCode command templates and the
+prompt files agents reference. It records receipts for the command templates.
+`AGENTS.md` remains Core instruction and rules content. The prompt-rule
+reconciler manages it. The registry does not install it separately.
 
 ## Capability matrix
 

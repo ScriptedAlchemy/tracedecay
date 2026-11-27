@@ -3,8 +3,9 @@
 This Cursor desktop extension starts `tracedecay lsp bridge --stdio` through
 `vscode-languageclient` and forwards bounded, workspace-scoped native
 diagnostics to its `tracedecay/nativeDiagnostics` notification.
-Untrusted or non-single-root workspaces resolve through a typed unavailable
-state; multi-root workspaces do not start the bridge.
+The extension reports a typed unavailable state if the workspace is untrusted
+or does not have exactly one root. Multi-root workspaces do not start the
+bridge.
 
 TraceDecay packages the built, unpacked extension into Cursor's host-component
 lifecycle under `.cursor/extensions/tracedecay.cursor-native-0.0.0/`. The

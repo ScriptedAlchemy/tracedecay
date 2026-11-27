@@ -820,8 +820,8 @@ def _check_lcm_handler_configuration(plugin, host_home: Path, runtime_project: P
 
 
 def _check_expand_query_degradation(plugin):
-    # Expand-query synthesis must degrade (retrieval intact) on ANY
-    # auxiliary failure, not just TimeoutError.
+    # Any auxiliary failure must leave the retrieval results intact even when
+    # expand-query synthesis cannot complete.
     class _BoomClient:
         def call_llm(self, **kwargs):
             raise RuntimeError("provider exploded")

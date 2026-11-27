@@ -157,15 +157,15 @@ export class DaemonBridge {
     this.#assertOpen();
     let pending = this.#pending.get(projectId);
     if (pending === undefined) {
-      // One acquisition at a time per project: two concurrent callers must not
-      // each spawn a serve child and orphan the loser's process. The shared
-      // work takes no caller's signal — one cancelled request must not abort
-      // an acquisition its other waiters still need.
+      // Share one acquisition per project so concurrent callers cannot start
+      // two serve children and leave one running without a handle. Do not pass
+      // a caller's signal to the acquisition. Other callers may still need it
+      // after that caller cancels.
       const acquire = this.#acquire(project).finally(() => {
         if (this.#pending.get(projectId) === acquire) this.#pending.delete(projectId);
       });
-      // Every waiter races its own signal, so the stored promise can settle
-      // with no one left awaiting it.
+      // Each caller can stop waiting on its own signal, so the stored promise
+      // may settle after all callers have stopped waiting.
       void acquire.catch(() => undefined);
       this.#pending.set(projectId, acquire);
       pending = acquire;

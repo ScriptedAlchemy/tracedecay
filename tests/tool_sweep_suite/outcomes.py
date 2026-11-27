@@ -71,7 +71,7 @@ def response_problem_code(response: dict[str, Any]) -> tuple[str | None, str | N
         state = value.get("status", value.get("state"))
         code = value.get("reason_code", value.get("problem_code"))
         if isinstance(state, str) and not isinstance(code, str):
-            # Branch surfaces render their typed problem as status + reason.
+            # Branch operations return typed problems as `status` and `reason`.
             reason = value.get("reason")
             if isinstance(reason, str):
                 code = reason

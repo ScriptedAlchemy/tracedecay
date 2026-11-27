@@ -1,27 +1,24 @@
 # MCP probe matrix
 
-Drive a fresh `tracedecay serve` MCP server over stdio and exercise every
-read-only tool against a set of real repos. Produces a per-tool / per-repo
-status matrix that flags tools needing investigation (errors, timeouts,
-empty results, performance regressions).
+The probe starts a fresh `tracedecay serve` MCP server over stdio and runs
+every read-only tool against a set of real repos. The results table records
+errors, timeouts, empty results, and slow calls for each tool and repo.
 
-Used as both:
-- **Bug probe.** New language support, new tool, or refactor, re-run the
-  matrix and any regression shows up as a flagged cell.
-- **Benchmark.** Timings per call are logged; the same repos serve as a
-  fixed corpus for cross-version perf comparison.
+Rerun the probe after adding language support, adding a tool, or refactoring.
+Check the flagged cells for regressions. The probe logs the duration of each
+call, so you can compare versions using the same repos.
 
 ## Layout
 
 ```
 scripts/mcp_probe/
-├── README.md              ← this file
-├── repos.toml             ← repo paths + which probe sets apply
-├── probe.py               ← main driver (spawn MCP, run tools, log)
-├── isolated.py            ← per-tool fresh-server retry (escapes cascades)
-├── build_matrix.py        ← read logs → markdown table
+├── README.md
+├── repos.toml             Lists repo paths and their probe sets.
+├── probe.py               Starts MCP, calls tools, and logs the results.
+├── isolated.py            Retries each tool with a fresh server.
+├── build_matrix.py        Reads the log and writes a Markdown table.
 └── tools/
-    └── rust.py            ← Rust-flavored probe inputs (5 queries per tool)
+    └── rust.py            Defines five Rust queries per tool.
 ```
 
 `tools/` is the place to add language-specific probe inputs (Python, Go, …).
@@ -39,18 +36,17 @@ python3 scripts/mcp_probe/probe.py
 python3 scripts/mcp_probe/build_matrix.py > /tmp/matrix.md
 ```
 
-The driver writes per-call status to `/tmp/tracedecay_matrix.log` in TSV:
-`repo  tool  query_json  status  detail`, where status ∈
-`OK | EMPTY | ERROR | TIMEOUT | BAD | SLOW`.
+The driver writes one tab-separated row per call to `/tmp/tracedecay_matrix.log`.
+The columns are `repo`, `tool`, `query_json`, `status`, and `detail`. The
+status is one of `OK`, `EMPTY`, `ERROR`, `TIMEOUT`, `BAD`, or `SLOW`.
 
 ## Cascade caveat
 
-The MCP server is single-threaded over stdio. If one tool times out, its
-response arrives late and poisons every subsequent call's id-match (clients
-that don't strictly match by id will read the late response as the new one
-and appear to time out). `probe.py` matches by id when possible; for tools
-that already showed a real timeout, re-run them via `isolated.py` which
-spawns a fresh server per tool.
+The MCP server is single-threaded over stdio. If a tool times out, its late
+response can put clients that don't match response IDs out of sync. They may
+mistake the late response for the next call's response and report more
+timeouts. `probe.py` matches IDs when possible. If a tool shows a real
+timeout, retry it with `isolated.py`, which starts a fresh server for each tool.
 
 ## Adding a new repo
 
@@ -68,5 +64,5 @@ query set for that repo.
 
 ## Adding a new language
 
-Drop `tools/<lang>.py` exposing `probes_for(discovered)`. Then list
+Add `tools/<lang>.py` with a `probes_for(discovered)` function. Then list
 `<lang>` in any repo's `languages` array.

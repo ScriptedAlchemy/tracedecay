@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# End-to-end proof that `tracedecay install --agent hermes` works against
-# STOCK (upstream NousResearch/hermes-agent) Hermes, not just customized
-# forks. Used by the `hermes-integration` CI job and runnable locally:
+# This end-to-end test runs `tracedecay install --agent hermes` against
+# upstream NousResearch/hermes-agent. The `hermes-integration` CI job uses
+# it. To run it locally:
 #
 #   git clone https://github.com/NousResearch/hermes-agent.git /tmp/hermes-upstream
 #   git -C /tmp/hermes-upstream checkout <pinned ref>
@@ -12,10 +12,9 @@
 #   TRACEDECAY_BIN        tracedecay binary to install/test (default: bazel-bin/crates/tracedecay-cli/tracedecay)
 #   HERMES_UPSTREAM_DIR  stock hermes-agent checkout (default: /tmp/hermes-upstream)
 #
-# Everything is offline and deterministic: a throwaway user HOME (and its
-# normal Hermes install) plus a throwaway initialized project, no model calls,
-# no network beyond whatever
-# `uv sync` needs the first time the upstream venv is created.
+# The test uses a temporary HOME with a normal Hermes install and a temporary
+# initialized project. It makes no model calls and uses the network only if
+# `uv sync` needs it to create the upstream virtual environment.
 
 set -euo pipefail
 
