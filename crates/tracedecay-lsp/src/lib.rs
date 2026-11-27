@@ -63,7 +63,7 @@ pub use compile_diagnostics::tsconfig::{
 };
 pub use compile_diagnostics::typescript::{
     TYPESCRIPT_INSTALL_COMMAND, TypeScriptBuildInfoGuard, TypeScriptCompilerAdmission,
-    TypeScriptConfiguration,
+    TypeScriptConfiguration, list_program_files as list_typescript_program_files,
     referenced_projects_out_of_date as typescript_referenced_projects_out_of_date,
     resolve_configuration as resolve_typescript_configuration,
     run_compiler as run_typescript_compiler,

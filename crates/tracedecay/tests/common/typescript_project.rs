@@ -138,8 +138,11 @@ fn install_compiler(project: &Path, compiler: TypeScriptFixtureCompiler) {
     .canonicalize()
     .expect("installed pinned tsc");
     let hold = if compiler == TypeScriptFixtureCompiler::Held {
+        // Hold the check, not the file-listing query that also carries
+        // `--noEmit`: a held listing would keep the producer from reaching
+        // the check the test waits for.
         format!(
-            "case \" $* \" in *\" --noEmit \"*)\n  while [ ! -e \"{}\" ]; do sleep 0.1; done ;;\nesac\n",
+            "case \" $* \" in *\" --noEmit \"*) case \" $* \" in *\" --listFilesOnly \"*) ;; *)\n  while [ ! -e \"{}\" ]; do sleep 0.1; done ;; esac ;;\nesac\n",
             project.join(TYPESCRIPT_FIXTURE_TSC_RELEASE).display()
         )
     } else {
@@ -184,4 +187,12 @@ pub fn is_typescript_fixture_configuration_query(
 ) -> bool {
     let root = root.display();
     invocation == format!("{root} -p {root}/{tsconfig} --showConfig")
+}
+
+/// Whether a logged run is the producer asking the compiler, from `root`,
+/// which files `tsconfig`'s program holds. Like a configuration query, it is
+/// preparation evidence, not a check.
+pub fn is_typescript_fixture_listing_query(invocation: &str, root: &Path, tsconfig: &str) -> bool {
+    let root = root.display();
+    invocation == format!("{root} -p {root}/{tsconfig} --listFilesOnly --noEmit")
 }

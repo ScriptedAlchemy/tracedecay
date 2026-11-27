@@ -17,8 +17,9 @@ use std::time::{Duration, Instant};
 use crate::common::typescript_project::{
     TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TYPESCRIPT_FIXTURE_TSC_RELEASE,
     TYPESCRIPT_MONOREPO_APP_FILE, TypeScriptFixtureCompiler,
-    is_typescript_fixture_configuration_query, typescript_fixture_build_info,
-    write_typescript_diagnostics_fixture, write_typescript_monorepo_diagnostics_fixture,
+    is_typescript_fixture_configuration_query, is_typescript_fixture_listing_query,
+    typescript_fixture_build_info, write_typescript_diagnostics_fixture,
+    write_typescript_monorepo_diagnostics_fixture,
 };
 use crate::common::{
     canonical_existing_path, git_program, spawn_tracedecay_daemon, tracedecay_command_with_home,
@@ -519,7 +520,9 @@ fn tool_diagnostics_reads_the_typescript_producer_publication() {
     let mut queried = false;
     let mut checked = false;
     for invocation in invocations.lines() {
-        if is_typescript_fixture_configuration_query(invocation, &project_path, "tsconfig.json") {
+        if is_typescript_fixture_configuration_query(invocation, &project_path, "tsconfig.json")
+            || is_typescript_fixture_listing_query(invocation, &project_path, "tsconfig.json")
+        {
             queried = true;
             continue;
         }

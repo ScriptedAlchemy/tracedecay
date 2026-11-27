@@ -563,3 +563,64 @@ async fn unreadable_configuration(release: PinnedTypeScript) {
         "{release:?}: the repaired configuration is checked"
     );
 }
+
+/// Preparation cost and incremental reuse, matched across both compiler
+/// lines. Preparation is the generation that lists the program and checks
+/// it; reuse is the generation after it that changed nothing and so lists the
+/// program again without checking. The listing is the compiler's own answer
+/// to what the program holds, paid once per project per generation in place
+/// of the sealed-digest guess it replaces.
+#[tokio::test]
+async fn preparation_and_reuse_cost() {
+    const SOURCES: usize = 200;
+    let mut files: Vec<(String, String)> = vec![(
+        "tsconfig.json".to_owned(),
+        r#"{"include":["src/**/*.ts"]}"#.to_owned(),
+    )];
+    for index in 0..SOURCES {
+        files.push((
+            format!("src/mod{index}.ts"),
+            format!("export const value{index}: number = {index};\n"),
+        ));
+    }
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, contents)| (path.as_str(), contents.as_str()))
+        .collect();
+    for release in RELEASES {
+        let project = InstalledCompilerProject::installing(release, &files);
+        let status = TypeScriptProducerStatusHandleV1::default();
+        let mut state = producer(&status);
+        let started = Instant::now();
+        let prepared = project.run("generation.cost.1", &mut state).await;
+        let preparation = started.elapsed();
+        let started = Instant::now();
+        let reused = project.run("generation.cost.2", &mut state).await;
+        let reuse = started.elapsed();
+        assert!(
+            matches!(
+                prepared,
+                CompilerProducerRunV1::Published {
+                    checked: 1,
+                    reused: 0,
+                    ..
+                }
+            ),
+            "{release:?}: {prepared:?}"
+        );
+        assert!(
+            matches!(
+                reused,
+                CompilerProducerRunV1::Published {
+                    checked: 0,
+                    reused: 1,
+                    ..
+                }
+            ),
+            "{release:?}: {reused:?}"
+        );
+        println!(
+            "{release:?}: {SOURCES} sources, preparation {preparation:?}, unchanged reuse {reuse:?}"
+        );
+    }
+}
