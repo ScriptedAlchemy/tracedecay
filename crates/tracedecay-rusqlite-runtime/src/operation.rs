@@ -11,6 +11,38 @@ use tracedecay_store::{
     StorageRuntimeContractErrorV1,
 };
 
+/// Effects produced by one request savepoint. They travel with that
+/// request's receipt and are reported only after the outer commit succeeds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StorageOperationOutput {
+    #[default]
+    None,
+    ExternalSourceProjection {
+        projected: u32,
+    },
+}
+
+impl StorageOperationOutput {
+    pub(crate) fn validate_for(
+        self,
+        payload: &RepositoryWritePayloadV1,
+    ) -> Result<(), StorageRuntimeContractErrorV1> {
+        match (self, payload) {
+            (
+                Self::ExternalSourceProjection { projected },
+                RepositoryWritePayloadV1::ExternalSourceProjectionBatch(batch),
+            ) if projected <= batch.max() => Ok(()),
+            (Self::ExternalSourceProjection { .. }, _)
+            | (Self::None, RepositoryWritePayloadV1::ExternalSourceProjectionBatch(_)) => {
+                Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
+                    field: "native operation output",
+                })
+            }
+            (Self::None, _) => Ok(()),
+        }
+    }
+}
+
 /// Executes one store-owned payload through the writer's request savepoint.
 ///
 /// The closed payload enum is the dispatch authority. Implementors do not echo
@@ -27,8 +59,9 @@ pub trait StorageOperationExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         payload: &RepositoryWritePayloadV1,
-    ) -> Result<(), StorageOperationError> {
+    ) -> Result<StorageOperationOutput, StorageOperationError> {
         self.execute(savepoint, payload)
+            .map(|()| StorageOperationOutput::None)
             .map_err(StorageOperationError::Native)
     }
 }
@@ -110,7 +143,7 @@ impl StorageOperationExecutor for Box<dyn StorageOperationExecutor + Send> {
         &mut self,
         savepoint: &Savepoint<'_>,
         payload: &RepositoryWritePayloadV1,
-    ) -> Result<(), StorageOperationError> {
+    ) -> Result<StorageOperationOutput, StorageOperationError> {
         (**self).execute_closed(savepoint, payload)
     }
 }
@@ -119,9 +152,13 @@ pub(crate) fn execute<E: StorageOperationExecutor>(
     savepoint: &Savepoint<'_>,
     request: &RuntimeSubmitRequestV1,
     executor: &mut E,
-) -> Result<(), StorageOperationError> {
+) -> Result<StorageOperationOutput, StorageOperationError> {
     validation::validate(request).map_err(StorageOperationError::Contract)?;
-    executor.execute_closed(savepoint, &request.envelope().payload)
+    let output = executor.execute_closed(savepoint, &request.envelope().payload)?;
+    output
+        .validate_for(&request.envelope().payload)
+        .map_err(StorageOperationError::Contract)?;
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -143,5 +180,32 @@ mod tests {
             ExactSqlOnlyStorageOperationV1.execute(&savepoint, &request.envelope().payload);
 
         assert!(matches!(result, Err(rusqlite::Error::InvalidQuery)));
+    }
+
+    #[test]
+    fn projection_output_must_match_its_request() {
+        let request = crate::test_support::projection_batch_request(6);
+        let batch = &request.envelope().payload;
+        for projected in [0, 6] {
+            StorageOperationOutput::ExternalSourceProjection { projected }
+                .validate_for(batch)
+                .unwrap();
+        }
+        assert!(StorageOperationOutput::None.validate_for(batch).is_err());
+        assert!(
+            StorageOperationOutput::ExternalSourceProjection { projected: 7 }
+                .validate_for(batch)
+                .is_err()
+        );
+        let other = crate::test_support::request(crate::test_support::metadata(
+            "operation.other",
+            "key.other",
+            'o',
+        ));
+        assert!(
+            StorageOperationOutput::ExternalSourceProjection { projected: 0 }
+                .validate_for(&other.envelope().payload)
+                .is_err()
+        );
     }
 }

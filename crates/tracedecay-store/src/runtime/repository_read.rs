@@ -144,7 +144,6 @@ fn external_source_read_matches_shard(
     let binding = match operation {
         ExternalSourceReadOperationV1::State { binding, .. }
         | ExternalSourceReadOperationV1::CommitReceipt { binding, .. }
-        | ExternalSourceReadOperationV1::PendingProjectionCount { binding }
         | ExternalSourceReadOperationV1::AcquisitionState { binding } => binding,
         ExternalSourceReadOperationV1::NextPendingProjection {
             binding: Some(binding),
@@ -287,10 +286,6 @@ pub enum ExternalSourceReadOperationV1 {
     NextPendingProjection {
         binding: Option<SourceBindingIdentityV1>,
     },
-    /// How many heads wait on one binding's projection chain.
-    PendingProjectionCount {
-        binding: SourceBindingIdentityV1,
-    },
     AcquisitionState {
         binding: SourceBindingIdentityV1,
     },
@@ -306,7 +301,6 @@ pub enum ExternalSourceReadResultV1 {
     State(Option<Box<SourceStoreStateV1>>),
     CommitReceipt(Option<Box<SourceCommitReceiptSummaryV1>>),
     PendingProjection(Option<Box<SourcePendingProjectionV1>>),
-    PendingProjectionCount(u64),
     AcquisitionState(Option<Box<SourceAcquisitionQueueStateV1>>),
     AcquisitionPendingCount(u64),
 }

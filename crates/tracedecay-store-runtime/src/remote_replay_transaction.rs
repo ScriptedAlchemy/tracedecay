@@ -155,6 +155,7 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
                 Err(RemoteRecoveryPhysicalEffectErrorV1::TimedOut)
             }
             outcome @ (RuntimeSubmitOutcomeV1::IdempotencyConflict { .. }
+            | RuntimeSubmitOutcomeV1::ExternalSourceProjectionCommitted { .. }
             | RuntimeSubmitOutcomeV1::Fenced { .. }
             | RuntimeSubmitOutcomeV1::Saturated { .. }
             | RuntimeSubmitOutcomeV1::Unavailable { .. }) => {
@@ -625,7 +626,8 @@ fn map_submit_outcome(
         RuntimeSubmitOutcomeV1::Fenced { .. } => {
             return Err(RemoteReplayTransactionErrorV1::FenceMismatch);
         }
-        RuntimeSubmitOutcomeV1::Saturated { .. }
+        RuntimeSubmitOutcomeV1::ExternalSourceProjectionCommitted { .. }
+        | RuntimeSubmitOutcomeV1::Saturated { .. }
         | RuntimeSubmitOutcomeV1::DeadlineExceededBeforeCommit { .. }
         | RuntimeSubmitOutcomeV1::CancelledBeforeCommit { .. }
         | RuntimeSubmitOutcomeV1::Unavailable { .. } => {

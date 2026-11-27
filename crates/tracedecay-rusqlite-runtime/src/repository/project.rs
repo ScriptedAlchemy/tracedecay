@@ -124,7 +124,7 @@ impl ProjectExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         batch: &SourceProjectionBatchV1,
-    ) -> rusqlite::Result<()> {
+    ) -> rusqlite::Result<u32> {
         self.external_source
             .execute_projection_batch(savepoint, batch)
     }

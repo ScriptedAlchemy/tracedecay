@@ -725,6 +725,7 @@ fn queued_compatible_writes_commit_in_one_transaction() {
 mod authority;
 mod checkpoint;
 mod interruption;
+mod projection_output;
 
 struct RejectingFirstWrite {
     attempts: i64,

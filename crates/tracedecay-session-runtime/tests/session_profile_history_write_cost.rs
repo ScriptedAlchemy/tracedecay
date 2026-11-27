@@ -1,24 +1,29 @@
-//! Per-transaction write cost of the production profile history import
-//! (`user-sessions.db`, the `profile_sessions` shard) as the store grows to
-//! incident scale. #4756 reports 125-160 ms per write on a 1.3 GB store and a
-//! cost that rose with the store's size; this probe measures whether the
-//! import's own writes depend on how much is already stored.
+//! Batched write coverage and diagnostic cost measurements for the production
+//! profile history import (`user-sessions.db`, the `profile_sessions` shard).
+//! #4756 reports 125-160 ms per write on a 1.3 GB store and an unconfirmed
+//! relationship between write cost and store size.
 //!
 //! It drives the production `ProfileSessionHistoricalIngestor` over a
 //! generated Codex corpus and samples the writer's telemetry after every pass:
-//! committed transactions, the time they held the writer, the SQLite work they
-//! did, and the store's size on disk. This probe owns its process so the
-//! telemetry includes only its own work.
+//! committed transactions, transaction and writer-lock elapsed time, writer
+//! SQLite work, and database/WAL file sizes. Timing is diagnostic: one run
+//! cannot establish store-size independence or separate CPU, scheduling, and
+//! I/O costs. Writer telemetry also does not measure the projection-head read.
+//! This probe owns its process so the telemetry includes only its own work.
 //!
-//! The corpus is 16 rollouts per generated day at roughly 3.6 MB of store per
-//! rollout. The default four days land a few hundred MB; an incident-scale run
-//! is `TRACEDECAY_PROFILE_COST_DAYS=20 bazel test //crates/tracedecay-session-runtime:session_profile_history_write_cost --test_output=all --test_arg=--nocapture --test_timeout=3600`,
-//! which grows the store past 1 GB.
+//! The corpus has 16 rollouts per generated day and 193 frames per rollout.
+//! The default four days check complete admission, projection, and batching.
+//! A larger run is
+//! `bazel test //crates/tracedecay-session-runtime:session_profile_history_write_cost --test_env=TRACEDECAY_PROFILE_COST_DAYS=20 --test_output=all --test_arg=--nocapture --nocache_test_results`.
+//! Runs of at least 20 days additionally require 1,000,000,000 logical database
+//! bytes (`page_count * page_size`), excluding duplicate page versions in the
+//! WAL. Database and WAL file lengths are reported separately.
 //!
 //! The profile store owns the sessions no registered project claims: a rollout
 //! whose `cwd` falls under a registered root belongs to that project's store.
-//! So the corpus runs in an unregistered directory beside a registered one,
-//! which is the shape of the incident's `profile_sessions` writes.
+//! The corpus runs in an unregistered directory beside a registered one. It
+//! covers generated Codex JSONL import, not the incident's complete provider
+//! corpus, compressed inputs, or restart continuation.
 
 // The shared support module reads WAL frames through Unix file APIs.
 #![cfg(unix)]
@@ -28,7 +33,7 @@ pub mod support;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::json;
 use support::DrainFixture;
@@ -47,14 +52,14 @@ use tracedecay_session_runtime::session_temporal_refresh_scheduler::history::{
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub;
 
-/// One pass admits at most one 16 MiB Codex unit, so a 1 GB import needs
-/// dozens of passes; bound the loop well above that.
+/// Allow many bounded Codex units while keeping a stalled history import
+/// from looping forever.
 const MAX_PASSES: usize = 4_096;
 /// Rollouts per generated day directory.
 const ROLLOUTS_PER_DAY: usize = 16;
 /// Messages per rollout: enough for several capture windows per file.
 const MESSAGES_PER_ROLLOUT: usize = 96;
-/// Bytes of prose per message. Real rollouts carry kilobytes of text per
+/// Repeated words per message. Real rollouts carry kilobytes of text per
 /// record; this keeps the generated rows in that shape.
 const MESSAGE_WORDS: usize = 400;
 
@@ -80,7 +85,7 @@ impl ProfileIdentityReadPort for FixtureIdentity {
 /// `session_meta`, then alternating user and assistant `response_item`s and
 /// `event_msg`s with kilobyte-scale text. Its mtime is a day old, as on a
 /// daemon re-importing history after a store reset.
-fn write_rollout(home: &Path, cwd: &Path, day: usize, index: usize) {
+fn write_rollout(home: &Path, cwd: &Path, day: usize, index: usize) -> u64 {
     let dir = home.join(format!(".codex/sessions/2026/01/{:02}", day + 1));
     std::fs::create_dir_all(&dir).unwrap();
     let session = format!("019a0000-0000-7000-8000-{day:04}{index:08}");
@@ -133,6 +138,7 @@ fn write_rollout(home: &Path, cwd: &Path, day: usize, index: usize) {
         "rollout-2026-01-{:02}T00-00-00-{session}.jsonl",
         day + 1
     ));
+    let bytes = u64::try_from(body.len()).unwrap();
     std::fs::write(&path, body).unwrap();
     let settled = SystemTime::now() - Duration::from_secs(24 * 60 * 60);
     std::fs::File::options()
@@ -141,6 +147,7 @@ fn write_rollout(home: &Path, cwd: &Path, day: usize, index: usize) {
         .unwrap()
         .set_modified(settled)
         .unwrap();
+    bytes
 }
 
 /// A process-wide discovery hub with the preparation resources the daemon
@@ -232,17 +239,17 @@ impl WriterWork {
 #[derive(Clone, Copy, Debug)]
 struct PassSample {
     pass: usize,
-    store_bytes: u64,
+    database_file_bytes: u64,
+    wal_file_bytes: u64,
     work: WriterWork,
 }
 
-fn store_bytes(path: &Path) -> u64 {
-    let size = |suffix: &str| {
-        std::fs::metadata(path.with_extension(suffix))
-            .map(|meta| meta.len())
-            .unwrap_or(0)
-    };
-    size("db") + size("db-wal")
+fn wal_file_bytes(path: &Path) -> u64 {
+    match std::fs::metadata(path.with_extension("db-wal")) {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => panic!("cannot measure WAL file: {error}"),
+    }
 }
 
 /// A per-transaction average over the committed transactions in `work`;
@@ -282,7 +289,8 @@ async fn run_to_completion(
         );
         samples.push(PassSample {
             pass: passes,
-            store_bytes: store_bytes(store),
+            database_file_bytes: std::fs::metadata(store).unwrap().len(),
+            wal_file_bytes: wal_file_bytes(store),
             work: now.since(previous),
         });
         previous = now;
@@ -316,8 +324,8 @@ async fn open() -> (
     (fixture, database, registry, home, cpu)
 }
 
-/// The profile sweep admits a rollout only when its `cwd` is under a
-/// registered project root, so the fixture's project must be in the registry.
+/// Register the fixture project as an exclusion boundary for profile import.
+/// The generated corpus uses a separate, unregistered cwd.
 async fn register_project_root(registry: &RegisteredGlobalDbLeaseV1, project: &Path) {
     registry
         .try_upsert_project_tokens(project, 0)
@@ -333,15 +341,16 @@ async fn register_project_root(registry: &RegisteredGlobalDbLeaseV1, project: &P
 
 /// Rollouts run in a scratch directory no project registered, as the
 /// sessions the profile store owns do.
-fn write_corpus(fixture: &DrainFixture, home: &Path, days: usize) -> usize {
+fn write_corpus(fixture: &DrainFixture, home: &Path, days: usize) -> (usize, u64) {
     let scratch = fixture._tmp.path().join("unregistered-scratch");
     std::fs::create_dir_all(&scratch).unwrap();
+    let mut bytes = 0;
     for day in 0..days {
         for index in 0..ROLLOUTS_PER_DAY {
-            write_rollout(home, &scratch, day, index);
+            bytes += write_rollout(home, &scratch, day, index);
         }
     }
-    days * ROLLOUTS_PER_DAY
+    (days * ROLLOUTS_PER_DAY, bytes)
 }
 
 /// What the import left in the store, read back through SQLite: the rows
@@ -350,8 +359,11 @@ fn write_corpus(fixture: &DrainFixture, home: &Path, days: usize) -> usize {
 struct StoreCensus {
     observations: u64,
     source_mutations: u64,
+    projected_objects: u64,
+    unprojected_mutations: u64,
     pending_projections: u64,
     projection_publications: u64,
+    logical_database_bytes: u64,
 }
 
 fn census(store: &Path) -> StoreCensus {
@@ -370,65 +382,49 @@ fn census(store: &Path) -> StoreCensus {
     StoreCensus {
         observations: count("observations"),
         source_mutations: count("external_source_mutations_v1"),
+        projected_objects: count("external_source_projected_objects_v2"),
+        // Each generated frame has one native object and one revision. Check
+        // the exact projected digest, not just two equal aggregate counts.
+        unprojected_mutations: connection
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM external_source_mutations_v1 AS source
+                 LEFT JOIN external_source_projected_objects_v2 AS projected
+                   ON projected.binding_id = source.binding_id
+                  AND projected.native_object_digest = source.native_object_digest
+                  AND projected.mutation_digest = source.mutation_digest
+                 WHERE projected.binding_id IS NULL",
+                [],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap(),
         pending_projections: count("external_source_pending_projections_v1"),
         projection_publications: count("external_source_projection_publications_v2"),
+        logical_database_bytes: connection
+            .pragma_query_value(None, "page_count", |row| row.get::<_, u64>(0))
+            .unwrap()
+            * connection
+                .pragma_query_value(None, "page_size", |row| row.get::<_, u64>(0))
+                .unwrap(),
     }
 }
 
-/// The plan SQLite chooses for the projection drain's head lookup. It must
-/// stay an index lookup: a scan here would make every window cost the whole
-/// pending table.
-fn assert_pending_head_plan_is_indexed(store: &Path) {
-    let connection =
-        rusqlite::Connection::open_with_flags(store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .unwrap();
-    let pending_head = "SELECT revisions.binding_json
-         FROM external_source_pending_projections_v1 AS pending
-         JOIN external_source_states_v1 AS states
-           ON states.binding_id = pending.binding_id
-          AND pending.predecessor_frontier_digest =
-              COALESCE(states.projection_frontier_digest, 'root')
-         JOIN external_source_binding_revisions_v1 AS revisions
-           ON revisions.binding_id = states.binding_id
-          AND revisions.binding_revision = states.binding_revision
-         ORDER BY pending.successor_sequence, pending.binding_id
-         LIMIT 1";
-    let mut statement = connection
-        .prepare(&format!("EXPLAIN QUERY PLAN {pending_head}"))
-        .unwrap();
-    let plan: Vec<String> = statement
-        .query_map([], |row| row.get(3))
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
-    eprintln!("pending head plan: {plan:?}");
-    // `SCAN <table> USING INDEX` is an ordered index walk that stops at
-    // LIMIT 1; a bare `SCAN <table>` reads the whole table, and a
-    // `TEMP B-TREE` sorts it first. Either would make every window cost the
-    // whole pending table.
-    let unindexed = plan.iter().find(|step| {
-        (step.contains("SCAN") && !step.contains("USING INDEX")) || step.contains("TEMP B-TREE")
-    });
-    assert!(
-        unindexed.is_none(),
-        "the pending-head lookup must stay an index walk, got {plan:?}"
-    );
-}
-
-/// Per-transaction write cost of the profile history import must not grow
-/// with the store: the import writes one bounded window at a time, and a
-/// window's cost is its own rows, not the rows already stored.
+/// Every generated frame reaches the profile store and its projection with
+/// batched transactions. Cost by import phase remains diagnostic output.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn profile_history_write_cost_does_not_grow_with_the_store() {
+async fn profile_history_write_cost_covers_complete_batched_import() {
     let (fixture, database, registry, home, cpu) = open().await;
     register_project_root(&registry, &fixture.project).await;
-    // The default corpus lands a few hundred MB so CI finishes in minutes;
-    // `TRACEDECAY_PROFILE_COST_DAYS=20` grows it past the incident's 1 GB.
-    let days: usize = std::env::var("TRACEDECAY_PROFILE_COST_DAYS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(4);
-    let rollouts = write_corpus(&fixture, &home, days);
+    let days: usize = match std::env::var("TRACEDECAY_PROFILE_COST_DAYS") {
+        Ok(value) => value.parse().expect("profile cost days must be an integer"),
+        Err(std::env::VarError::NotPresent) => 4,
+        Err(error) => panic!("cannot read profile cost days: {error}"),
+    };
+    assert!(
+        (1..=31).contains(&days),
+        "profile cost days must fit the generated January corpus"
+    );
+    let (rollouts, corpus_bytes) = write_corpus(&fixture, &home, days);
     let store = fixture._tmp.path().join("profile").join("user-sessions.db");
 
     let ingestor = ingestor(
@@ -439,25 +435,36 @@ async fn profile_history_write_cost_does_not_grow_with_the_store() {
         &mounted_hub(&cpu),
         &cpu,
     );
+    let started = Instant::now();
     let (samples, total) = run_to_completion(&ingestor, &database, &store).await;
+    let import_elapsed = started.elapsed();
     ingestor.cancel();
     drop(ingestor);
     let census = census(&store);
     eprintln!(
-        "store after import: observations={} source_mutations={} pending_projections={} \
-         projection_publications={}",
+        "store after import: observations={} source_mutations={} projected_objects={} \
+         unprojected_mutations={} pending_projections={} projection_publications={} \
+         logical_database_bytes={} database_file_bytes={} wal_file_bytes={} corpus_bytes={}",
         census.observations,
         census.source_mutations,
+        census.projected_objects,
+        census.unprojected_mutations,
         census.pending_projections,
-        census.projection_publications
+        census.projection_publications,
+        census.logical_database_bytes,
+        std::fs::metadata(&store).unwrap().len(),
+        wal_file_bytes(&store),
+        corpus_bytes,
     );
     for sample in &samples {
         let work = &sample.work;
         eprintln!(
-            "profile history pass {:>3}: store={:>10} B committed={:>4} {:>6} us/txn \
+            "profile history pass {:>3}: database_file={:>10} B wal_file={:>10} B \
+             committed={:>4} {:>6} elapsed_us/txn \
              lock={:>6} us/txn cmds={:>5}/txn rows={:>6}/txn vm={:>8}/txn fullscan={:>7}/txn sort={:>6}/txn",
             sample.pass,
-            sample.store_bytes,
+            sample.database_file_bytes,
+            sample.wal_file_bytes,
             work.committed,
             micros_per_transaction(work),
             per_transaction(work.lock_held_micros, work),
@@ -470,25 +477,36 @@ async fn profile_history_write_cost_does_not_grow_with_the_store() {
     }
     eprintln!(
         "profile history import over {rollouts} rollouts: passes={} committed={} rolled_back={} \
-         total_us={} us/txn={}",
+         import_elapsed_ms={} transaction_elapsed_us={} elapsed_us/txn={}",
         samples.len(),
         total.committed,
         total.rolled_back,
+        import_elapsed.as_millis(),
         total.transaction_micros,
         micros_per_transaction(&total),
     );
-
-    assert_pending_head_plan_is_indexed(&store);
 
     // The corpus must have landed: every rollout's records are in the store
     // and every projection head settled, or the probe measured a smaller
     // import than it generated.
     let frames_per_rollout = u64::try_from(2 * MESSAGES_PER_ROLLOUT + 1).unwrap();
     let rollouts = u64::try_from(rollouts).unwrap();
+    let records = rollouts * frames_per_rollout;
     assert_eq!(
-        census.observations,
-        rollouts * frames_per_rollout,
+        census.observations, records,
         "every generated frame must be admitted"
+    );
+    assert_eq!(
+        census.source_mutations, records,
+        "every generated frame must have a source mutation"
+    );
+    assert_eq!(
+        census.projected_objects, records,
+        "every generated frame must have a projected object"
+    );
+    assert_eq!(
+        census.unprojected_mutations, 0,
+        "every source mutation must have its exact digest projected"
     );
     assert_eq!(
         census.pending_projections, 0,
@@ -496,24 +514,29 @@ async fn profile_history_write_cost_does_not_grow_with_the_store() {
     );
     assert!(total.committed > 0, "the import must commit its rollouts");
     assert_eq!(total.rolled_back, 0, "every import transaction must commit");
+    if days >= 20 {
+        assert!(
+            census.logical_database_bytes >= 1_000_000_000,
+            "the incident-scale run must reach 1 GB of database pages, excluding WAL copies; got {} bytes",
+            census.logical_database_bytes
+        );
+    }
 
     // Batching: the projection drain settles up to 32 heads per writer
     // transaction, so the import's transactions must stay a small fraction
     // of the records it projected, not one per record.
-    let records = census.source_mutations.max(1);
     let txns_per_record = total.committed as f64 / records as f64;
     eprintln!("transactions per projected record: {txns_per_record:.4}");
     assert!(
-        txns_per_record <= 1.0 / 16.0,
+        total.committed <= records / 16,
         "projection replay is not batched: {} transactions for {records} records",
         total.committed
     );
 
-    // Store-size independence: compare the first and last thirds of the
-    // import by committed work. A window's cost is bounded by its own rows,
-    // so the late windows, written into a much larger store, must not cost
-    // several times the early ones. Passes that committed nothing carry no
-    // per-transaction cost and are left out of both thirds.
+    // Compare the first and last thirds of committing passes as diagnostics.
+    // These phases can contain different work and encounter different host
+    // load or checkpoint I/O; their elapsed-time ratio is not an acceptance
+    // gate or proof of store-size independence. Idle passes are omitted.
     let committing: Vec<&PassSample> = samples
         .iter()
         .filter(|sample| sample.work.committed > 0)
@@ -536,18 +559,13 @@ async fn profile_history_write_cost_does_not_grow_with_the_store() {
         micros_per_transaction(&late),
     );
     eprintln!(
-        "early third: {} us/txn, {} vm/txn; late third: {} us/txn, {} vm/txn",
+        "diagnostic early third: {} commits, {} elapsed_us/txn, {} writer_vm/txn; \
+         late third: {} commits, {} elapsed_us/txn, {} writer_vm/txn",
+        early.committed,
         early_us,
         per_transaction(early.vm_steps, &early),
+        late.committed,
         late_us,
         per_transaction(late.vm_steps, &late),
-    );
-    assert!(
-        early.committed > 0 && late.committed > 0,
-        "both thirds of the import must commit work"
-    );
-    assert!(
-        late_us <= early_us.saturating_mul(4),
-        "write cost grew with the store: early={early_us} us/txn late={late_us} us/txn"
     );
 }

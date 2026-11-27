@@ -575,32 +575,27 @@ impl RuntimeExternalSourceStore {
                 break;
             };
             let head = pending.binding_identity().map_err(invalid)?;
-            let queued = self.read_pending_projection_count(head.clone()).await?;
             let window = HOST_PROJECTION_REPLAY_TXN_WINDOW.min(remaining);
             let window_u32 = u32::try_from(window)
                 .map_err(|_| invalid("external source projection window exceeds u32"))?;
             let batch = SourceProjectionBatchV1::new(
-                head.clone(),
+                head,
                 projector.clone(),
                 pending.receipt().receipt_digest().clone(),
                 window_u32,
             )
             .map_err(invalid)?;
-            self.submit_projection_batch(&batch, pending.receipt())
+            let consumed = self
+                .submit_projection_batch(&batch, pending.receipt())
                 .await?;
-            // The writer is the serial authority on the chain, so the heads a
-            // window consumed are exactly the pending rows it removed. A
-            // window that lost its head to another drainer consumed nothing
-            // and still spends one unit of budget, so a drainer that keeps
-            // losing ends deferred, never spinning.
-            let consumed = queued
-                .saturating_sub(self.read_pending_projection_count(head.clone()).await?)
-                .min(u64::from(window_u32));
+            // Only the committed writer result identifies this window's
+            // work. Independent queue reads can include another drainer's
+            // removals or concurrent captures. A losing attempt still spends
+            // one budget unit, but reports no projected heads.
             let consumed = usize::try_from(consumed)
                 .map_err(|_| invalid("external source pending count exceeds usize"))?;
-            let consumed = consumed.max(1);
             projected = projected.saturating_add(consumed);
-            remaining = remaining.saturating_sub(consumed);
+            remaining = remaining.saturating_sub(consumed.max(1));
         }
         let deferred = !exhausted
             && !cancellation.is_cancelled()
@@ -612,13 +607,13 @@ impl RuntimeExternalSourceStore {
     }
 
     /// Submits one projection window. The idempotency key is the head's
-    /// receipt digest, so a drainer that retries a window it already lost
-    /// settles as an exact replay instead of projecting twice.
+    /// receipt digest. A retried or coalesced window reports zero work when
+    /// another execution already projected its head.
     async fn submit_projection_batch(
         &self,
         batch: &SourceProjectionBatchV1,
         head: &tracedecay_store::SourceCommitReceiptV1,
-    ) -> Result<(), RuntimeExternalSourceErrorV1> {
+    ) -> Result<u32, RuntimeExternalSourceErrorV1> {
         let payload =
             RepositoryWritePayloadV1::ExternalSourceProjectionBatch(Box::new(batch.clone()));
         let request = runtime_submit_request(
@@ -635,9 +630,9 @@ impl RuntimeExternalSourceStore {
             .await
             .map_err(|failure| dispatch_error("projection batch", failure))?
         {
-            RuntimeSubmitOutcomeV1::Committed { .. }
-            | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
-            | RuntimeSubmitOutcomeV1::ExactReplay { .. } => Ok(()),
+            RuntimeSubmitOutcomeV1::ExternalSourceProjectionCommitted { projected, .. } => {
+                Ok(projected)
+            }
             RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
                 Err(RuntimeExternalSourceErrorV1::IdempotencyConflict)
             }
@@ -646,40 +641,6 @@ impl RuntimeExternalSourceStore {
                 admission_bytes: serialized_len(&batch)?,
                 commit_count: 1,
             }),
-        }
-    }
-
-    async fn read_pending_projection_count(
-        &self,
-        binding: tracedecay_domain::SourceBindingIdentityV1,
-    ) -> Result<u64, RuntimeExternalSourceErrorV1> {
-        let operation = ExternalSourceReadOperationV1::PendingProjectionCount { binding };
-        let request = runtime_read_request(self.runtime.binding(), operation)?;
-        let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
-        let outcome = self
-            .runtime
-            .dispatch_read(request, probe)
-            .await
-            .map_err(|failure| dispatch_error("pending projection count", failure))?;
-        if !matches!(
-            outcome.coverage(),
-            RuntimeReadCoverageV1::Latest { .. } | RuntimeReadCoverageV1::Complete { .. }
-        ) {
-            return Err(read_unavailable(
-                "pending projection count",
-                outcome.coverage(),
-            ));
-        }
-        match outcome.value() {
-            Some(RuntimeReadResultV1::Repository {
-                result:
-                    RepositoryReadResultV1::ExternalSource(
-                        ExternalSourceReadResultV1::PendingProjectionCount(count),
-                    ),
-            }) => Ok(*count),
-            _ => Err(invalid(
-                "pending projection count read returned a mismatched result",
-            )),
         }
     }
 

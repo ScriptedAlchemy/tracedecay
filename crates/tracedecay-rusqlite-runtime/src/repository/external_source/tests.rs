@@ -882,6 +882,160 @@ fn separate_projection_write_rolls_back_effect_and_checkpoint_together() {
 }
 
 #[test]
+fn projection_window_rolls_back_earlier_heads_when_a_successor_fails() {
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
+    let (first, binding) = fixture();
+    let mut writer = ExternalSourceExecutor;
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        writer.execute_write(&savepoint, &first).unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    let prior = load_state(&connection, &binding, &SourceObjectCoverageV1::Complete)
+        .unwrap()
+        .unwrap();
+    // The second snapshot removes the object that the first projection will
+    // publish, so its effect depends on reading the first head's new state.
+    let second =
+        empty_successor_with_coverage(&prior, 2, SourceCoverageV1::Complete, Some(BTreeSet::new()));
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        writer.execute_write(&savepoint, &second).unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    let before = load_state(&connection, &binding, &SourceObjectCoverageV1::Complete)
+        .unwrap()
+        .unwrap();
+    let pending = load_next_pending_projection(&connection, &binding)
+        .unwrap()
+        .unwrap();
+    let projector = ComponentVersion::new("external-source-projector-v1").unwrap();
+    let first_projection = build_source_projection(&pending, projector.clone()).unwrap();
+    let batch = SourceProjectionBatchV1::new(
+        binding.clone(),
+        projector,
+        pending.receipt().receipt_digest().clone(),
+        2,
+    )
+    .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_second_projection
+                 BEFORE UPDATE OF projection_frontier_digest ON external_source_states_v1
+                 WHEN OLD.projection_frontier_digest IS NOT NULL
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected second projection failure');
+                 END;",
+        )
+        .unwrap();
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let mut savepoint = transaction.savepoint().unwrap();
+        let error = writer
+            .execute_projection_batch(&savepoint, &batch)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("injected second projection failure")
+        );
+        let first_published: String = savepoint
+            .query_row(
+                "SELECT latest_projection_receipt_digest FROM external_source_states_v1
+                 WHERE binding_id = ?1",
+                [binding.binding_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(first_published, first_projection.receipt_digest().as_str());
+        savepoint.rollback().unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    assert_eq!(
+        load_state(&connection, &binding, &SourceObjectCoverageV1::Complete)
+            .unwrap()
+            .unwrap(),
+        before,
+        "rolling back the window must preserve its durable predecessor"
+    );
+    assert_eq!(
+        load_next_pending_projection(&connection, &binding)
+            .unwrap()
+            .unwrap(),
+        pending
+    );
+    for (table, expected) in [
+        ("external_source_pending_projections_v1", 2_i64),
+        ("external_source_projection_publications_v2", 0),
+        ("external_source_projection_effects_v2", 0),
+        ("external_source_projection_lineage_v1", 0),
+        ("external_source_projected_objects_v2", 0),
+    ] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, expected, "rolled-back projection rows in {table}");
+    }
+    connection
+        .execute("DROP TRIGGER fail_second_projection", [])
+        .unwrap();
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        assert_eq!(
+            writer.execute_projection_batch(&savepoint, &batch).unwrap(),
+            2
+        );
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    let projected = load_state(&connection, &binding, &SourceObjectCoverageV1::Complete)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        projected.projection().unwrap().source_frontier(),
+        before.source_frontier()
+    );
+    let object = fixture_object();
+    let observed = projected.observed_object(&object).unwrap().unwrap();
+    assert_eq!(
+        observed.content_state(),
+        SourceContentStateV1::AuthoritativeDeleted
+    );
+    assert_eq!(projected.projected_objects().get(&object), Some(observed));
+    assert!(
+        load_next_pending_projection(&connection, &binding)
+            .unwrap()
+            .is_none()
+    );
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        assert_eq!(
+            writer.execute_projection_batch(&savepoint, &batch).unwrap(),
+            0
+        );
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    assert_eq!(
+        load_state(&connection, &binding, &SourceObjectCoverageV1::Complete)
+            .unwrap()
+            .unwrap(),
+        projected,
+        "the same committed window must not project either head twice"
+    );
+}
+
+#[test]
 fn projected_history_shrinks_to_replay_summaries() {
     let mut connection = rusqlite::Connection::open_in_memory().unwrap();
     connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();

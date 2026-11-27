@@ -84,3 +84,32 @@ pub(crate) fn request(metadata: StoreOperationMetadataV1) -> RuntimeSubmitReques
     )
     .unwrap()
 }
+
+pub(crate) fn projection_batch_request(max: u32) -> RuntimeSubmitRequestV1 {
+    let metadata = metadata("operation.projection-batch", "key.projection-batch", 'p');
+    let template = request(metadata.clone());
+    let binding = serde_json::from_value(serde_json::json!({
+        "binding_id": "binding.runtime",
+        "source_id": "source.runtime",
+        "owner": { "kind": "project", "id": "project.runtime" },
+        "privacy_domain": "privacy.runtime",
+        "native_root": digest('r').as_str(),
+    }))
+    .unwrap();
+    let batch = tracedecay_store::SourceProjectionBatchV1::new(
+        binding,
+        tracedecay_domain::ComponentVersion::new("projector.runtime").unwrap(),
+        tracedecay_domain::ManifestDigest::new(digest('h').as_str()).unwrap(),
+        max,
+    )
+    .unwrap();
+    RuntimeSubmitRequestV1::new(
+        RepositoryOperationEnvelopeV1 {
+            metadata,
+            payload: RepositoryWritePayloadV1::ExternalSourceProjectionBatch(Box::new(batch)),
+        },
+        template.transaction_scope().clone(),
+        template.control().clone(),
+    )
+    .unwrap()
+}

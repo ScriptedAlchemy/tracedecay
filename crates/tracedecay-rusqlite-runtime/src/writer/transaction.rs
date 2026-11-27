@@ -9,14 +9,14 @@ use std::{
 use rusqlite::{Connection, Savepoint, Transaction, TransactionBehavior};
 use tracedecay_store::{
     RuntimeCancellationStageV1, RuntimeSubmitOutcomeV1, StorageRuntimeErrorV1,
-    StoreCommitReceiptV1, StoreRuntimeBindingV1, UnavailableReasonV1,
+    StoreRuntimeBindingV1, UnavailableReasonV1,
 };
 
 use crate::{
     RuntimeWriteAuthorityStage, StorageOperationExecutor,
     admission::QueueItem,
     connection,
-    persistence::{ApplyRecordError, RuntimeWriterPersistence},
+    persistence::{AppliedRecord, ApplyRecordError, RuntimeWriterPersistence},
     telemetry::{
         LockWorkScope, WriterBatchMetrics, WriterLockWorkSnapshot, WriterTelemetry,
         WriterTransactionMetrics, WriterTransactionOutcome, take_observed_vm,
@@ -37,7 +37,7 @@ enum PreparedResult {
     Final(RequestResult),
     /// The request savepoint was released, but the outer transaction is not yet
     /// durable. This is deliberately not named or reported as committed.
-    AwaitingTransactionCommit(StoreCommitReceiptV1),
+    AwaitingTransactionCommit(AppliedRecord),
 }
 
 struct PreparedRequest {
@@ -297,8 +297,8 @@ fn publish_results<'a>(
     publisher: &CommittedWatermarkPublisher,
 ) -> Result<(), CommitWatermarkPublicationError> {
     for result in results {
-        if let PreparedResult::AwaitingTransactionCommit(receipt) = result {
-            publisher.publish_committed(receipt)?;
+        if let PreparedResult::AwaitingTransactionCommit(applied) = result {
+            publisher.publish_committed(&applied.receipt)?;
         }
     }
     Ok(())
@@ -362,8 +362,8 @@ fn apply_new<E: StorageOperationExecutor>(
         }
     };
     // One operation-and-ledger boundary: the receipt is the one this savepoint recorded.
-    let receipt = match persistence.apply_and_record(&mut savepoint, binding, &item.request) {
-        Ok(receipt) => receipt,
+    let applied = match persistence.apply_and_record(&mut savepoint, binding, &item.request) {
+        Ok(applied) => applied,
         Err(ApplyRecordError::Fenced {
             requested,
             persisted,
@@ -404,7 +404,10 @@ fn apply_new<E: StorageOperationExecutor>(
             return processed(item, Err(error.clone()), corrupt || is_corrupt(&error));
         }
     };
-    if let Err(error) = receipt.validate_for(&item.request.envelope().metadata) {
+    if let Err(error) = applied
+        .receipt
+        .validate_for(&item.request.envelope().metadata)
+    {
         let error = rollback_or(
             savepoint,
             invalid_response(error),
@@ -444,7 +447,7 @@ fn apply_new<E: StorageOperationExecutor>(
         Ok(()) => Processed {
             prepared: PreparedRequest {
                 item,
-                result: PreparedResult::AwaitingTransactionCommit(receipt),
+                result: PreparedResult::AwaitingTransactionCommit(applied),
             },
             fatal: None,
         },
@@ -515,9 +518,9 @@ fn settle_prepared(
     for prepared in prepared {
         let result = match prepared.result {
             PreparedResult::Final(result) => result,
-            PreparedResult::AwaitingTransactionCommit(receipt) => match &commit_failure {
+            PreparedResult::AwaitingTransactionCommit(applied) => match &commit_failure {
                 Some(failure) => failure.result(&prepared.item.request),
-                None => committed_outcome(&prepared.item, receipt),
+                None => committed_outcome(&prepared.item, applied),
             },
         };
         telemetry.completed(&result);
@@ -607,7 +610,9 @@ fn record_commit(
     let durable = prepared
         .iter()
         .filter_map(|prepared| match &prepared.result {
-            PreparedResult::AwaitingTransactionCommit(receipt) => Some((prepared, receipt)),
+            PreparedResult::AwaitingTransactionCommit(applied) => {
+                Some((prepared, &applied.receipt))
+            }
             PreparedResult::Final(_) => None,
         })
         .collect::<Vec<_>>();
@@ -694,7 +699,10 @@ mod tests {
         let publisher = CommittedWatermarkPublisher::new(binding.clone());
 
         publish_results(
-            [&PreparedResult::AwaitingTransactionCommit(receipt.clone())],
+            [&PreparedResult::AwaitingTransactionCommit(AppliedRecord {
+                receipt: receipt.clone(),
+                output: crate::operation::StorageOperationOutput::None,
+            })],
             &publisher,
         )
         .unwrap();

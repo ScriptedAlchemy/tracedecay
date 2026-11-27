@@ -9,6 +9,7 @@
 #[path = "support/session_store_read_cost.rs"]
 pub mod support;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime};
 use serde_json::json;
 use support::DrainFixture;
 use tracedecay_contracts::ProfileIdentityReadPort;
-use tracedecay_domain::{BrainId, UserProfileId};
+use tracedecay_domain::{BrainId, ObservationScopeV1, ObservationSourceCursorV1, UserProfileId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::tests::harness::writer_telemetry;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
@@ -335,16 +336,82 @@ async fn a_restart_mid_import_resumes_without_rewriting_committed_rollouts() {
     );
 }
 
-/// Committed transactions the import pays per settled rollout it admits.
-/// Each rollout's own writes (observation commit, cursor, anchors) are a
-/// fixed cost of about three transactions; projection replay is batched 32
-/// heads per transaction and adds well under one per rollout on top. Before
-/// replay was batched the import paid five per rollout. The bounds prove
-/// every rollout was admitted once: a skipped rollout falls below the
-/// fixed cost, and a re-admitted rollout or an unbatched replay rises
-/// above the batched ceiling.
-const IMPORT_FIXED_TRANSACTIONS_PER_ROLLOUT: u64 = 2;
+/// An unbatched replay paid five transactions per rollout. This ceiling
+/// protects batching; durable observations and cursors separately prove
+/// that the measured import covered the whole corpus.
 const IMPORT_TRANSACTIONS_PER_ROLLOUT_CEILING: u64 = 4;
+
+fn assert_measured_corpus_is_admitted(fixture: &DrainFixture, home: &Path, appended: bool) {
+    let connection = rusqlite::Connection::open_with_flags(
+        support::session_store_path(fixture),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let expected: BTreeMap<String, u64> = (0..MEASURED_ROLLOUTS)
+        .map(|index| {
+            let day = index % DAYS;
+            (
+                format!("019a0000-0000-7000-8000-{day:04}{index:08}"),
+                3 + u64::from(appended && index == 0),
+            )
+        })
+        .collect();
+    let actual: BTreeMap<String, u64> = connection
+        .prepare(
+            "SELECT json_extract(observation_json, '$.identity.source.session_id'), COUNT(*)
+             FROM observations
+             GROUP BY json_extract(observation_json, '$.identity.source.session_id')",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        actual, expected,
+        "every rollout must retain each generated frame exactly once"
+    );
+
+    let cursors: Vec<ObservationSourceCursorV1> = connection
+        .prepare("SELECT cursor_json FROM source_cursors")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
+        .collect();
+    assert_eq!(cursors.len(), MEASURED_ROLLOUTS);
+    let mut positions = BTreeMap::new();
+    for cursor in cursors {
+        assert_eq!(cursor.source().provider().as_str(), "codex");
+        assert_eq!(
+            cursor.scope(),
+            &ObservationScopeV1::Project {
+                project_id: fixture.project_id.clone()
+            }
+        );
+        assert!(
+            positions
+                .insert(
+                    cursor.source().session_id().as_str().to_owned(),
+                    cursor.position()
+                )
+                .is_none()
+        );
+    }
+    for index in 0..MEASURED_ROLLOUTS {
+        let day = index % DAYS;
+        let session = format!("019a0000-0000-7000-8000-{day:04}{index:08}");
+        assert_eq!(
+            positions.get(&session).copied(),
+            Some(
+                std::fs::metadata(rollout_path(home, day, index))
+                    .unwrap()
+                    .len()
+            ),
+            "the durable cursor must cover all bytes of {session}"
+        );
+    }
+}
 
 /// The re-offer acceptance measurement for #4374: a full second sweep over
 /// 2,010 settled rollouts in one project commits nothing and does no
@@ -357,21 +424,16 @@ async fn a_second_sweep_over_the_measured_corpus_commits_nothing() {
 
     let first = ingestor(&fixture, &database, &home, &mounted_hub(&cpu), &cpu);
     let import = run_to_completion_bounded(&first, &database, MAX_MEASURED_PASSES).await;
+    assert_measured_corpus_is_admitted(&fixture, &home, false);
     let reoffer = run_to_completion_bounded(&first, &database, MAX_MEASURED_PASSES).await;
+    assert_measured_corpus_is_admitted(&fixture, &home, false);
 
     eprintln!(
         "codex re-offer cost over {rollouts} settled rollouts in one project: \
          import={import:?} reoffer={reoffer:?}"
     );
-    // Every rollout was discovered and admitted: the import's durable writes
-    // are the fixed per-rollout cost times the corpus, plus the batched
-    // projection replay, which stays under one transaction per rollout.
+    // Coverage above makes this a cost check over the whole corpus.
     let rollouts = rollouts as u64;
-    assert!(
-        import.transactions >= IMPORT_FIXED_TRANSACTIONS_PER_ROLLOUT * rollouts,
-        "the import must admit every rollout exactly once: {} transactions for {rollouts} rollouts",
-        import.transactions
-    );
     assert!(
         import.transactions <= IMPORT_TRANSACTIONS_PER_ROLLOUT_CEILING * rollouts,
         "projection replay must stay batched: {} transactions for {rollouts} rollouts",
@@ -418,6 +480,7 @@ async fn a_second_sweep_over_the_measured_corpus_commits_nothing() {
     .unwrap();
     drop(file);
     let live = run_to_completion_bounded(&first, &database, MAX_MEASURED_PASSES).await;
+    assert_measured_corpus_is_admitted(&fixture, &home, true);
     first.cancel();
     eprintln!("codex sweep after one appended rollout: live={live:?}");
     assert!(

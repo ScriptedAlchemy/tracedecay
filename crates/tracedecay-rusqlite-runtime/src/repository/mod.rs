@@ -43,7 +43,7 @@ use rusqlite::{Savepoint, Transaction};
 use tracedecay_store::RepositoryWritePayloadV1;
 
 use crate::StorageOperationExecutor;
-use crate::operation::StorageOperationError;
+use crate::operation::{StorageOperationError, StorageOperationOutput};
 
 pub use attachment::{
     InitializationFiles, RepositoryAttachmentStartError, RepositoryDispatchError,
@@ -103,7 +103,7 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
         payload: &RepositoryWritePayloadV1,
     ) -> rusqlite::Result<()> {
         match self.execute_closed(savepoint, payload) {
-            Ok(()) => Ok(()),
+            Ok(_) => Ok(()),
             Err(StorageOperationError::Native(error)) => Err(error),
             Err(error) => Err(rusqlite::Error::InvalidParameterName(error.to_string())),
         }
@@ -113,7 +113,7 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         payload: &RepositoryWritePayloadV1,
-    ) -> Result<(), StorageOperationError> {
+    ) -> Result<StorageOperationOutput, StorageOperationError> {
         match payload {
             RepositoryWritePayloadV1::Configuration(commit) => {
                 self.configuration.execute_write(savepoint, commit)?;
@@ -151,8 +151,10 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
                     .execute_external_source_batch(savepoint, commits)?;
             }
             RepositoryWritePayloadV1::ExternalSourceProjectionBatch(batch) => {
-                self.project
+                let projected = self
+                    .project
                     .execute_external_source_projection_batch(savepoint, batch)?;
+                return Ok(StorageOperationOutput::ExternalSourceProjection { projected });
             }
             RepositoryWritePayloadV1::ExternalSourceAcquisition(command) => {
                 self.project
@@ -174,7 +176,7 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
                 .into());
             }
         }
-        Ok(())
+        Ok(StorageOperationOutput::None)
     }
 }
 
