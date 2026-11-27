@@ -347,16 +347,16 @@ fn assert_measured_corpus_is_admitted(fixture: &DrainFixture, home: &Path, appen
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
-    let expected: BTreeMap<String, u64> = (0..MEASURED_ROLLOUTS)
+    let expected: BTreeMap<String, i64> = (0..MEASURED_ROLLOUTS)
         .map(|index| {
             let day = index % DAYS;
             (
                 format!("019a0000-0000-7000-8000-{day:04}{index:08}"),
-                3 + u64::from(appended && index == 0),
+                3 + i64::from(appended && index == 0),
             )
         })
         .collect();
-    let actual: BTreeMap<String, u64> = connection
+    let actual: BTreeMap<String, i64> = connection
         .prepare(
             "SELECT json_extract(observation_json, '$.identity.source.session_id'), COUNT(*)
              FROM observations

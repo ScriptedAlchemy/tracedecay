@@ -302,7 +302,12 @@ pub fn run_git(project: &Path, args: &[&str]) {
         .current_dir(project)
         .output()
         .unwrap();
-    assert!(output.status.success(), "git {args:?} failed");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 pub struct DrainFixture {
