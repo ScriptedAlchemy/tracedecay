@@ -528,6 +528,7 @@ pub async fn run_typescript_producer_v1(
                         configuration,
                         program,
                         &state.projects,
+                        &resolved.checkable,
                     ) =>
             {
                 results.insert(tsconfig.clone(), previous.clone());
@@ -886,6 +887,7 @@ impl GenerationChanges {
         configuration: &TypeScriptConfiguration,
         listed: &[PathBuf],
         projects: &BTreeMap<PathBuf, ProjectResult>,
+        current: &BTreeMap<PathBuf, CheckableProject>,
     ) -> bool {
         let Some(membership) = previous.reusable_membership() else {
             return true;
@@ -900,12 +902,21 @@ impl GenerationChanges {
             if !visited.insert(reference.clone()) {
                 continue;
             }
-            let Some(membership) = projects
-                .get(&reference)
-                .and_then(ProjectResult::reusable_membership)
-            else {
+            let Some(previous) = projects.get(&reference) else {
                 return true;
             };
+            let Some(membership) = previous.reusable_membership() else {
+                return true;
+            };
+            let Some(current) = current.get(&reference) else {
+                return true;
+            };
+            let Ok(current_listed) = current.program.as_ref() else {
+                return true;
+            };
+            if previous.listed() != Some(current_listed.as_slice()) {
+                return true;
+            }
             read.push(membership);
             if let Some(configuration) = projects
                 .get(&reference)

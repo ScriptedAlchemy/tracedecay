@@ -518,6 +518,60 @@ async fn out_of_date_references(release: PinnedTypeScript) {
     );
 }
 
+/// A new indexed source changes a referenced project's fresh program listing,
+/// even though it is absent from the previously recorded membership. The
+/// dependent must recheck and report stale reference outputs rather than
+/// reusing its earlier clean result.
+#[tokio::test]
+async fn an_added_source_in_a_reference_invalidates_dependents() {
+    for release in RELEASES {
+        let project = InstalledCompilerProject::installing(release, SOLUTION);
+        std::fs::write(
+            project.root.join("packages/app/src/main.ts"),
+            "import { size } from \"../../lib/src/index\";\nexport const label: number = size(\"abc\");\n",
+        )
+        .unwrap();
+        let output = Command::new(project.launcher())
+            .current_dir(&project.root)
+            .args(["-b", "tsconfig.json", "--pretty", "false"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{release:?}: clean solution did not build: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let status = TypeScriptProducerStatusHandleV1::default();
+        let mut state = producer(&status);
+        project.run("generation.reference-add.1", &mut state).await;
+        assert_eq!(
+            owner(&project, &status, "packages/app/src/main.ts"),
+            Some((
+                "packages/app/tsconfig.json".to_owned(),
+                Some(TypeScriptProjectCheckV1::Checked)
+            )),
+            "{release:?}: the initial clean app must have a reusable result"
+        );
+
+        std::fs::write(
+            project.root.join("packages/lib/src/generated.ts"),
+            "export const generated: string = 1;\n",
+        )
+        .unwrap();
+        let run = project.run("generation.reference-add.2", &mut state).await;
+        let Some((_, Some(TypeScriptProjectCheckV1::Failed { reason }))) =
+            owner(&project, &status, "packages/app/src/main.ts")
+        else {
+            panic!(
+                "{release:?}: app reused clean diagnostics after the reference changed: {run:?}"
+            );
+        };
+        assert!(reason.contains("packages/lib/tsconfig.json"), "{reason}");
+    }
+}
+
 /// A base the configuration extends is missing. typescript@5 refuses the
 /// configuration and typescript@7 reports it without the error, then fails
 /// the check; either way the project is a typed failure naming the base,
