@@ -393,6 +393,28 @@ async fn refuse_warming_profile_identity(
     request: &AuthenticatedFirstRequest,
     error: &TraceDecayError,
 ) -> Result<()> {
+    // Native clients retry the mounting problem in their invocation envelope;
+    // a JSON-RPC error here would decode as a transport failure instead.
+    if let Some(request) =
+        tracedecay_daemon_protocol::parse_daemon_invocation_request(request.raw())
+    {
+        let response = match request {
+            Ok(request) => match request.validate() {
+                Ok(()) => {
+                    tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
+                        request.request_id,
+                        tracedecay_contracts::ApplicationProblem::runtime_mounting(),
+                    )
+                }
+                Err(problem) => tracedecay_daemon_protocol::DaemonInvocationResponse::problem(
+                    request.request_id,
+                    problem,
+                ),
+            },
+            Err(response) => response,
+        };
+        return write_daemon_response(transport, &response).await;
+    }
     // JSON-RPC 2.0 forbids answering a notification, and a stray null-id frame
     // desynchronizes strict MCP clients mid-handshake. Only an unparseable line
     // falls back to the null id, exactly as `reject_admitted_request` does.
@@ -405,6 +427,132 @@ async fn refuse_warming_profile_identity(
         .unwrap_or(serde_json::Value::Null);
     let response = project_open_error_response(request_id, error);
     write_daemon_response(transport, &response).await
+}
+
+#[cfg(test)]
+mod profile_identity_refusal_tests {
+    use super::{
+        AuthenticatedFirstRequest, profile_identity_warming_error, refuse_warming_profile_identity,
+    };
+    use serde_json::json;
+    use tracedecay_contracts::{
+        ApplicationProblem, CancellationContext, Deadline, MultiRootScopeSetReadRequestV1,
+    };
+    use tracedecay_daemon_protocol::{
+        DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonInvocationOutcome,
+        DaemonInvocationProblem, DaemonInvocationRequest, DaemonInvocationResponse,
+        PROJECT_WARMING_REASON_CODE,
+    };
+    use tracedecay_domain::{ScopeSetId, UtcMicros};
+    use tracedecay_mcp::JsonRpcResponse;
+    use tracedecay_mcp::transport::ChannelTransport;
+    use tracedecay_runtime_core::native_runtime;
+
+    fn warming_refusal(request: String) -> String {
+        let (mut transport, _input, mut output) = ChannelTransport::new();
+        native_runtime::block_on(refuse_warming_profile_identity(
+            &mut transport,
+            &AuthenticatedFirstRequest::new(request),
+            &profile_identity_warming_error(),
+        ))
+        .expect("native runtime runs the warming refusal")
+        .expect("warming refusal reaches the client");
+        std::iter::from_fn(|| output.try_recv().ok()).collect()
+    }
+
+    fn native_request() -> DaemonInvocationRequest {
+        DaemonInvocationRequest::multi_root_scope_set_read(
+            "request.profile.warming",
+            MultiRootScopeSetReadRequestV1::new(
+                ScopeSetId::new("scope-set.absent").expect("scope set id"),
+            )
+            .expect("scope set read"),
+            UtcMicros(1),
+            Deadline::new(UtcMicros(5_000_000)).expect("deadline"),
+            CancellationContext::active("cancel.profile.warming").expect("cancellation"),
+        )
+    }
+
+    #[test]
+    fn native_invocation_receives_the_mounting_problem_with_its_request_id() {
+        let request = native_request();
+        let wire = warming_refusal(serde_json::to_string(&request).expect("invocation wire"));
+        let response: DaemonInvocationResponse =
+            serde_json::from_str(&wire).expect("native client can decode the warming refusal");
+        assert_eq!(response.request_id, request.request_id);
+        assert_eq!(response.protocol, DAEMON_INVOCATION_PROTOCOL);
+        assert_eq!(response.revision, DAEMON_INVOCATION_REVISION);
+        let DaemonInvocationOutcome::ApplicationProblem { problem } = response.outcome else {
+            panic!("warming must remain a typed application problem");
+        };
+        assert_eq!(problem, ApplicationProblem::runtime_mounting());
+    }
+
+    #[test]
+    fn invalid_native_invocations_keep_terminal_protocol_refusals() {
+        let mut foreign_revision = native_request();
+        foreign_revision.revision += 1;
+        let mut missing_id = native_request();
+        missing_id.request_id.clear();
+        for (request, expected) in [
+            (
+                foreign_revision,
+                DaemonInvocationProblem::UnsupportedRevision,
+            ),
+            (missing_id, DaemonInvocationProblem::InvalidRequest),
+        ] {
+            let wire = warming_refusal(serde_json::to_string(&request).expect("invocation wire"));
+            let response: DaemonInvocationResponse =
+                serde_json::from_str(&wire).expect("native protocol refusal");
+            assert_eq!(response.request_id, request.request_id);
+            assert!(matches!(
+                response.outcome,
+                DaemonInvocationOutcome::Problem { problem } if problem == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn malformed_native_invocation_keeps_its_typed_protocol_refusal() {
+        let wire = warming_refusal(
+            json!({
+                "protocol": DAEMON_INVOCATION_PROTOCOL,
+                "revision": DAEMON_INVOCATION_REVISION,
+                "request_id": "request.profile.invalid",
+                "operation": "unknown_operation",
+            })
+            .to_string(),
+        );
+        let response: DaemonInvocationResponse =
+            serde_json::from_str(&wire).expect("native protocol refusal");
+        assert_eq!(response.request_id, "request.profile.invalid");
+        assert!(matches!(
+            response.outcome,
+            DaemonInvocationOutcome::Problem {
+                problem: DaemonInvocationProblem::InvalidRequest,
+            }
+        ));
+    }
+
+    #[test]
+    fn mcp_request_keeps_its_json_rpc_id_and_retryable_reason() {
+        let wire = warming_refusal(
+            json!({"jsonrpc": "2.0", "id": 42, "method": "initialize"}).to_string(),
+        );
+        let response: JsonRpcResponse = serde_json::from_str(&wire).expect("MCP warming refusal");
+        assert_eq!(response.id, json!(42));
+        let data = response.error.expect("warming error").data.expect("reason");
+        assert_eq!(data["reason_code"], PROJECT_WARMING_REASON_CODE);
+        assert_eq!(data["retryable"], true);
+    }
+
+    #[test]
+    fn mcp_notification_does_not_receive_a_warming_response() {
+        let wire = warming_refusal(
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string(),
+        );
+        assert!(wire.is_empty());
+    }
 }
 
 async fn write_refusal_and_drain(

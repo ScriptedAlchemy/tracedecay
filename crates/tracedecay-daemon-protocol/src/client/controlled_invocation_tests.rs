@@ -680,6 +680,160 @@ async fn work_refusals_reuse_the_connection_without_a_delivery_ack() {
     server.await.unwrap();
 }
 
+#[tokio::test]
+async fn profile_warmup_retry_authenticates_on_a_fresh_connection() {
+    const REQUEST_ID: &str = "request.profile-warmup.retry";
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .unwrap();
+    let terminal = tracedecay_contracts::ApplicationProblem::invalid_request(
+        "project_not_enrolled",
+        "The requested project is not enrolled in this profile",
+    );
+    let refused = terminal.clone();
+    let server = tokio::spawn(async move {
+        for problem in [
+            tracedecay_contracts::ApplicationProblem::runtime_mounting(),
+            refused,
+        ] {
+            let stream = listener.accept().await.expect("fresh connection");
+            let (reader, mut writer) = tokio::io::split(stream);
+            let mut lines = authenticated_lines(reader).await;
+            lines.next_line().await.unwrap().expect("handshake");
+            let request: DaemonInvocationRequest =
+                serde_json::from_str(&lines.next_line().await.unwrap().expect("invocation"))
+                    .unwrap();
+            assert_eq!(request.request_id, REQUEST_ID);
+            let response =
+                DaemonInvocationResponse::application_problem(request.request_id, problem);
+            writer
+                .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+                .await
+                .unwrap();
+            writer.write_all(b"\n").await.unwrap();
+            writer.shutdown().await.unwrap();
+        }
+    });
+    let client = invocation_client(endpoint, "client.profile-warmup.retry");
+    let deadline = deadline_after(Duration::from_secs(5));
+    let cancellation = CancellationSignal::active("cancel.profile-warmup.retry").unwrap();
+    let response = client
+        .invoke_controlled(
+            invocation_request(REQUEST_ID, deadline.clone()),
+            deadline.clone(),
+            cancellation.clone(),
+            InvocationCancellationPolicy::ReadOnly,
+        )
+        .await
+        .expect("typed mounting refusal");
+    assert!(matches!(
+        response.outcome,
+        DaemonInvocationOutcome::ApplicationProblem { problem }
+            if problem == tracedecay_contracts::ApplicationProblem::runtime_mounting()
+    ));
+    assert_eq!(
+        idle_pool_size(&client),
+        0,
+        "profile warmup closes its stream before the caller retries"
+    );
+    let response = client
+        .invoke_controlled(
+            invocation_request(REQUEST_ID, deadline.clone()),
+            deadline,
+            cancellation,
+            InvocationCancellationPolicy::ReadOnly,
+        )
+        .await
+        .expect("retry must reconnect and receive the profile's admission decision");
+    assert!(matches!(
+        response.outcome,
+        DaemonInvocationOutcome::ApplicationProblem { problem } if problem == terminal
+    ));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn corrected_protocol_request_authenticates_after_a_terminal_refusal() {
+    const REQUEST_ID: &str = "request.profile-warmup.corrected";
+    for problem in [
+        DaemonInvocationProblem::InvalidRequest,
+        DaemonInvocationProblem::UnsupportedRevision,
+    ] {
+        let (listener, endpoint) =
+            crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+                .await
+                .unwrap();
+        let server = tokio::spawn(async move {
+            for corrected in [false, true] {
+                let stream = listener.accept().await.expect("fresh connection");
+                let (reader, mut writer) = tokio::io::split(stream);
+                let mut lines = authenticated_lines(reader).await;
+                DaemonHandshake::from_line(
+                    &lines.next_line().await.unwrap().expect("fresh handshake"),
+                )
+                .expect("every new stream must bind its client identity");
+                let request: DaemonInvocationRequest =
+                    serde_json::from_str(&lines.next_line().await.unwrap().expect("invocation"))
+                        .unwrap();
+                if corrected {
+                    assert_eq!(request.request_id, REQUEST_ID);
+                    assert_eq!(request.validate(), Ok(()));
+                    write_unavailable_response(&mut writer, &request.request_id).await;
+                } else {
+                    let rejected = request.validate().expect_err("invalid protocol request");
+                    assert_eq!(rejected, problem);
+                    let response = DaemonInvocationResponse::problem(request.request_id, rejected);
+                    writer
+                        .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+                        .await
+                        .unwrap();
+                    writer.write_all(b"\n").await.unwrap();
+                    writer.flush().await.unwrap();
+                }
+                writer.shutdown().await.unwrap();
+            }
+        });
+        let client = invocation_client(endpoint, "client.profile-warmup.corrected");
+        let deadline = deadline_after(Duration::from_secs(5));
+        let mut request = invocation_request(REQUEST_ID, deadline.clone());
+        if problem == DaemonInvocationProblem::UnsupportedRevision {
+            request.revision += 1;
+        } else {
+            request.request_id.clear();
+        }
+        let response = client
+            .invoke(request)
+            .await
+            .expect("typed protocol refusal");
+        assert!(matches!(
+            response.outcome,
+            DaemonInvocationOutcome::Problem { problem: rejected } if rejected == problem
+        ));
+        assert_eq!(
+            idle_pool_size(&client),
+            0,
+            "the stream closed after {problem:?} must not be pooled"
+        );
+        let response = client
+            .invoke_controlled(
+                invocation_request(REQUEST_ID, deadline.clone()),
+                deadline,
+                CancellationSignal::active("cancel.profile-warmup.corrected").unwrap(),
+                InvocationCancellationPolicy::ReadOnly,
+            )
+            .await
+            .expect("the corrected request must reconnect and receive its own answer");
+        assert!(matches!(
+            response.outcome,
+            DaemonInvocationOutcome::Problem {
+                problem: DaemonInvocationProblem::Unavailable,
+            }
+        ));
+        server.await.unwrap();
+    }
+}
+
 async fn assert_work_delivery_ack_wait_interrupts(cancel: bool) {
     let (listener, endpoint) =
         crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())

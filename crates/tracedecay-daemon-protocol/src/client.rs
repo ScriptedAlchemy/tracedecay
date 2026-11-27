@@ -18,7 +18,7 @@ use tracedecay_contracts::{
     ApplicationInvocation, ApplicationInvocationExecutor, ApplicationInvocationFuture,
     ApplicationProblem, ApplicationProblemKind, ApplicationRequest, ApplicationResponse,
     CancellationSignal, CancellationStage, Deadline, InvocationError, InvocationTarget,
-    PageRequest, RequestId, SafeDiagnostic, try_now_micros,
+    PageRequest, RUNTIME_MOUNTING_REASON_CODE, RequestId, SafeDiagnostic, try_now_micros,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{
@@ -506,14 +506,21 @@ impl InvocationConnectionLease {
     }
 
     fn release_after_response(&mut self, response: &crate::contract::DaemonInvocationResponse) {
-        // Admission saturation answers the request and closes the stream.
-        // Preserve that typed answer without pooling a connection it retired.
-        if !matches!(
-            &response.outcome,
+        // Pre-admission refusals can answer before closing the stream. That
+        // includes invalid requests discovered while the profile is warming,
+        // so a corrected request must authenticate on a fresh connection too.
+        match &response.outcome {
             crate::contract::DaemonInvocationOutcome::ApplicationProblem { problem }
                 if problem.kind() == ApplicationProblemKind::Saturated
-        ) {
-            self.release_to_pool();
+                    || problem.diagnostic().is_some_and(|diagnostic| {
+                        diagnostic.code == RUNTIME_MOUNTING_REASON_CODE
+                    }) => {}
+            crate::contract::DaemonInvocationOutcome::Problem {
+                problem:
+                    crate::contract::DaemonInvocationProblem::InvalidRequest
+                    | crate::contract::DaemonInvocationProblem::UnsupportedRevision,
+            } => {}
+            _ => self.release_to_pool(),
         }
     }
 
