@@ -302,6 +302,24 @@ class BinaryOutputNameTests(unittest.TestCase):
                 })
 
 
+class ManualBinarySelectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.gen = load_gen_builds()
+
+    def test_full_cli_requires_an_explicit_target_but_benchmarks_compile_by_default(self) -> None:
+        full_cli = {"name": "tracedecay-full", "kind": ["bin"], "test": False, "required-features": ["full"]}
+        index_bench = {"name": "tracedecay-index-bench", "kind": ["bin"], "test": False, "required-features": ["production"]}
+        self.assertTrue(self.gen.requires_manual_binary("crates/tracedecay-cli", full_cli, set()))
+        self.assertFalse(self.gen.requires_manual_binary("crates/tracedecay-query", index_bench, set()))
+
+    def test_feature_opt_in_applies_only_to_test_participating_binaries(self) -> None:
+        target = {"name": "example", "kind": ["bin"], "required-features": ["production"]}
+        self.assertTrue(self.gen.requires_manual_binary("crates/example", target, set()))
+        self.assertFalse(self.gen.requires_manual_binary("crates/example", target, {"production"}))
+        self.assertFalse(self.gen.requires_manual_binary("crates/example", target | {"test": False}, set()))
+        self.assertFalse(self.gen.requires_manual_binary("crates/example", target | {"kind": ["test"]}, set()))
+
+
 class ProductionDeclarationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.gen = load_gen_builds()

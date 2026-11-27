@@ -532,6 +532,19 @@ def target_requested_features(target, test_overrides):
     return test_overrides.get(target["name"], required) if "test" in target["kind"] else required
 
 
+EXPLICIT_BUILD_BINARIES = {("crates/tracedecay-cli", "tracedecay-full")}
+
+
+def requires_manual_binary(package_directory, target, default_features):
+    """Keep the Full CLI explicit without hiding benchmark binaries from builds."""
+    if "bin" not in target["kind"]:
+        return False
+    if (package_directory, target["name"]) in EXPLICIT_BUILD_BINARIES:
+        return True
+    required = frozenset(target.get("required-features") or [])
+    return target.get("test", True) and not required.issubset(default_features)
+
+
 def binary_name_overrides(package):
     configured = (package.get("metadata") or {}).get("bazel", {}).get("binary_names", {})
     targets = {target["name"] for target in package.get("targets", []) if "bin" in target["kind"]}
@@ -1479,9 +1492,7 @@ def main():
                 srcs += " + [" + q(bin_labels) + "]"
             format_sources(srcs, t["edition"])
             req = frozenset(t.get("required-features") or [])
-            opt_in_binary = (
-                "bin" in kinds and t.get("test", True) and not req.issubset(base[name])
-            )
+            opt_in_binary = requires_manual_binary(dir_of[name], t, base[name])
             binary_name = (
                 binary_names[name].get(t["name"], t["name"])
                 if "bin" in kinds else t["name"]
