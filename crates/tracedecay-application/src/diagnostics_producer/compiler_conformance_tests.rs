@@ -9,6 +9,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
 
+use tracedecay_lsp::list_typescript_program_files;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
 use super::installed_compiler_tests::{InstalledCompilerProject, PinnedTypeScript};
@@ -569,6 +570,163 @@ async fn an_added_source_in_a_reference_invalidates_dependents() {
             );
         };
         assert!(reason.contains("packages/lib/tsconfig.json"), "{reason}");
+    }
+}
+
+/// Keep the declarations in the sealed file set so an unchanged consumer
+/// can actually reuse its result. The usual `dist` fixture is unsealed and
+/// therefore always rechecks consumers, masking reference invalidation bugs.
+fn covered_reference_solution(release: PinnedTypeScript) -> InstalledCompilerProject {
+    let mut files = SOLUTION
+        .iter()
+        .map(|(path, contents)| (*path, contents.replace("\"dist\"", "\"emitted\"")))
+        .collect::<Vec<_>>();
+    files
+        .iter_mut()
+        .find(|(path, _)| *path == "packages/lib/tsconfig.json")
+        .unwrap()
+        .1 = r#"{"compilerOptions":{"composite":true,"rootDir":"src","outDir":"emitted","strict":true},"include":["src"],"references":[{"path":"../leaf"}]}"#.to_owned();
+    files.extend([
+        ("node_modules/reference-base.json", "{}".to_owned()),
+        (
+            "packages/leaf/tsconfig.json",
+            r#"{"extends":"../../node_modules/reference-base.json","compilerOptions":{"composite":true,"rootDir":"src","outDir":"emitted","strict":true},"include":["src"]}"#.to_owned(),
+        ),
+        (
+            "packages/leaf/src/index.ts",
+            "export const value: number = 1;\n".to_owned(),
+        ),
+    ]);
+    let files = files
+        .iter()
+        .map(|(path, contents)| (*path, contents.as_str()))
+        .collect::<Vec<_>>();
+    InstalledCompilerProject::installing(release, &files)
+}
+
+/// Adding a source to a transitive reference leaves app's own listing and
+/// all the inputs its previous check read unchanged. Reusing app would skip
+/// the dry build that establishes whether the reference outputs still stand.
+#[tokio::test]
+async fn a_transitive_reference_source_addition_invalidates_a_reused_check() {
+    for release in RELEASES {
+        let project = covered_reference_solution(release);
+        build_solution(&project);
+        project.log_compiler_runs();
+        let status = TypeScriptProducerStatusHandleV1::default();
+        let mut state = producer(&status);
+        project
+            .run("generation.reference-addition.1", &mut state)
+            .await;
+        assert_eq!(
+            codes(&project.findings("generation.reference-addition.1").await),
+            ["TS2322"],
+            "{release:?}: app has a checked finding before the addition"
+        );
+        let app = project.root.join("packages/app/tsconfig.json");
+        assert!(state.projects[&app].reusable_membership().is_some());
+        let listed = state.projects[&app].listed().unwrap().to_vec();
+        project.checked();
+        project
+            .run("generation.reference-addition.2", &mut state)
+            .await;
+        assert!(
+            !project
+                .checked()
+                .iter()
+                .any(|path| path == "packages/app/tsconfig.json"),
+            "{release:?}: the unchanged app really uses the reuse path"
+        );
+
+        std::fs::write(
+            project.root.join("packages/leaf/src/extra.ts"),
+            "export const extra: number = 2;\n",
+        )
+        .unwrap();
+        assert_eq!(
+            list_typescript_program_files(
+                &state.admission,
+                &project.launcher(),
+                &project.root,
+                &app,
+            )
+            .await
+            .unwrap(),
+            listed,
+            "{release:?}: only the transitive reference's program gained a member"
+        );
+        project
+            .run("generation.reference-addition.3", &mut state)
+            .await;
+        assert!(
+            project
+                .findings("generation.reference-addition.3")
+                .await
+                .is_empty(),
+            "{release:?}: app's stale finding must not be republished"
+        );
+        let Some((_, Some(TypeScriptProjectCheckV1::Failed { reason }))) =
+            owner(&project, &status, "packages/app/src/main.ts")
+        else {
+            panic!("{release:?}: app's transitive reference needs a build");
+        };
+        assert!(reason.contains("packages/leaf/tsconfig.json"), "{reason}");
+    }
+}
+
+/// A referenced project's inherited configuration can change without any
+/// sealed input or program membership changing, including in its consumer.
+#[tokio::test]
+async fn a_transitive_reference_configuration_change_invalidates_a_reused_check() {
+    for release in RELEASES {
+        let project = covered_reference_solution(release);
+        build_solution(&project);
+        let status = TypeScriptProducerStatusHandleV1::default();
+        let mut state = producer(&status);
+        project
+            .run("generation.reference-config.1", &mut state)
+            .await;
+        let app = project.root.join("packages/app/tsconfig.json");
+        assert!(state.projects[&app].reusable_membership().is_some());
+        let listed = state.projects[&app].listed().unwrap().to_vec();
+        assert_eq!(
+            codes(&project.findings("generation.reference-config.1").await),
+            ["TS2322"]
+        );
+
+        std::fs::write(
+            project.root.join("node_modules/reference-base.json"),
+            r#"{"compilerOptions":{"declarationMap":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            list_typescript_program_files(
+                &state.admission,
+                &project.launcher(),
+                &project.root,
+                &app,
+            )
+            .await
+            .unwrap(),
+            listed,
+            "{release:?}: the changed reference configuration leaves app's listing unchanged"
+        );
+        project
+            .run("generation.reference-config.2", &mut state)
+            .await;
+        assert!(
+            project
+                .findings("generation.reference-config.2")
+                .await
+                .is_empty(),
+            "{release:?}: app cannot reuse a check against stale reference outputs"
+        );
+        let Some((_, Some(TypeScriptProjectCheckV1::Failed { reason }))) =
+            owner(&project, &status, "packages/app/src/main.ts")
+        else {
+            panic!("{release:?}: app's reference configuration changed");
+        };
+        assert!(reason.contains("packages/leaf/tsconfig.json"), "{reason}");
     }
 }
 

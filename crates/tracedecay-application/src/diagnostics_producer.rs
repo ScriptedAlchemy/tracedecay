@@ -518,18 +518,12 @@ pub async fn run_typescript_producer_v1(
         };
         match (state.projects.get(tsconfig), &changes) {
             (Some(previous), Some(changes))
-                if revision.is_some()
-                    && previous.compiler_revision == revision
-                    && previous.configuration.as_ref() == Some(configuration)
-                    && !changes.affect(
-                        project_root,
-                        tsconfig,
-                        previous,
-                        configuration,
-                        program,
-                        &state.projects,
-                        &resolved.checkable,
-                    ) =>
+                if !changes.affect(
+                    project_root,
+                    tsconfig,
+                    &state.projects,
+                    &resolved.checkable,
+                ) =>
             {
                 results.insert(tsconfig.clone(), previous.clone());
             }
@@ -866,9 +860,8 @@ impl GenerationChanges {
         Self { changed }
     }
 
-    /// Whether these changes can alter what tsc reports for a project whose
-    /// compiler and resolved configuration are those of `previous`, and whose
-    /// program the compiler lists as `listed` now.
+    /// Whether these changes or the compiler's current evidence can alter
+    /// what tsc reports for a project or any project it references.
     ///
     /// The sealed digests say what changed among the files the index holds;
     /// they cannot say what the compiler reads, since a source the index does
@@ -877,53 +870,45 @@ impl GenerationChanges {
     /// before that result can stand: then every file the program reads is one
     /// the check read, and a changed one is a file in `read`. A failed check,
     /// a listing that differs, or a program with unsealed inputs outside the
-    /// fingerprinted compiler packages cannot rule out a change, as neither
-    /// can a referenced project in that state.
+    /// fingerprinted compiler packages cannot rule out a change. The same
+    /// evidence is required from every referenced project, including its
+    /// current compiler and configuration: otherwise reuse could bypass the
+    /// dry build that refuses its stale outputs.
     fn affect(
         &self,
         project_root: &Path,
         tsconfig: &Path,
-        previous: &ProjectResult,
-        configuration: &TypeScriptConfiguration,
-        listed: &[PathBuf],
         projects: &BTreeMap<PathBuf, ProjectResult>,
         current: &BTreeMap<PathBuf, CheckableProject>,
     ) -> bool {
-        let Some(membership) = previous.reusable_membership() else {
-            return true;
-        };
-        if previous.listed() != Some(listed) {
-            return true;
-        }
-        let mut read = vec![membership];
-        let mut references = configuration.references().to_vec();
+        let mut read = Vec::new();
+        let mut references = vec![tsconfig.to_path_buf()];
         let mut visited = BTreeSet::new();
         while let Some(reference) = references.pop() {
             if !visited.insert(reference.clone()) {
                 continue;
             }
-            let Some(previous) = projects.get(&reference) else {
+            let (Some(previous), Some(current)) =
+                (projects.get(&reference), current.get(&reference))
+            else {
                 return true;
             };
+            let (Some(revision), Ok(configuration), Ok(listed)) =
+                (&current.revision, &current.configuration, &current.program)
+            else {
+                return true;
+            };
+            if previous.compiler_revision != Some(revision.digest)
+                || previous.configuration.as_ref() != Some(configuration)
+                || previous.listed() != Some(listed.as_slice())
+            {
+                return true;
+            }
             let Some(membership) = previous.reusable_membership() else {
                 return true;
             };
-            let Some(current) = current.get(&reference) else {
-                return true;
-            };
-            let Ok(current_listed) = current.program.as_ref() else {
-                return true;
-            };
-            if previous.listed() != Some(current_listed.as_slice()) {
-                return true;
-            }
             read.push(membership);
-            if let Some(configuration) = projects
-                .get(&reference)
-                .and_then(|result| result.configuration.as_ref())
-            {
-                references.extend_from_slice(configuration.references());
-            }
+            references.extend_from_slice(configuration.references());
         }
         let tsconfig = tsconfig
             .to_str()

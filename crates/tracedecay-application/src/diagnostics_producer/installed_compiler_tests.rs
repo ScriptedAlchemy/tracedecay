@@ -715,6 +715,20 @@ async fn an_added_source_the_index_does_not_seal_rechecks_a_clean_project() {
 async fn a_program_the_compiler_cannot_list_is_never_reused() {
     let project = InstalledCompilerProject::new();
     project.log_compiler_runs();
+    // Install the refusal before the first check so the second generation
+    // changes neither the launcher fingerprint nor any sealed input.
+    let shim = std::fs::read_to_string(project.launcher()).unwrap();
+    let refusing = shim.replacen(
+        "#!/bin/sh\n",
+        "#!/bin/sh\n\
+         case \" $* \" in *\" --listFilesOnly \"*)\n\
+           if [ -f node_modules/refuse-program-listing ]; then\n\
+             echo 'error TS5055: cannot list' >&2; exit 1\n\
+           fi ;; esac\n",
+        1,
+    );
+    std::fs::remove_file(project.launcher()).unwrap();
+    write_executable_script(&project.launcher(), refusing).unwrap();
     let mut state = producer_state();
     assert_eq!(
         project.run("generation.unlistable.1", &mut state).await,
@@ -726,19 +740,7 @@ async fn a_program_the_compiler_cannot_list_is_never_reused() {
         missing_property()
     );
 
-    // A launcher that refuses to list the program, as a compiler would for a
-    // configuration it cannot resolve a file set for.
-    let shim = std::fs::read_to_string(project.launcher()).unwrap();
-    let refusing = shim.replacen(
-        "#!/bin/sh\n",
-        "#!/bin/sh\n\
-         case \" $* \" in *\" --listFilesOnly \"*) echo 'error TS5055: cannot list' >&2; exit 1 ;; esac\n",
-        1,
-    );
-    std::fs::remove_file(project.launcher()).unwrap();
-    write_executable_script(&project.launcher(), refusing).unwrap();
-
-    project.edit_readme("# unchanged program\n");
+    std::fs::write(project.root.join("node_modules/refuse-program-listing"), "").unwrap();
     assert_eq!(
         project.run("generation.unlistable.2", &mut state).await,
         published("generation.unlistable.2", 1, 1),
