@@ -75,6 +75,21 @@ const DAEMON_STOP_TIMEOUT_MARGIN_SECS: u64 = 15;
 /// let an OOM-killed cgroup release memory before the next `ExecStart`.
 const DAEMON_RESTART_SEC: u64 = 2;
 
+/// `Nice` value the generated launchd agent applies to the daemon.
+///
+/// The daemon answers interactive MCP and hook requests in the same process
+/// that indexes, so its scheduling class must not be `ProcessType=Background`:
+/// that is a process-wide CPU ceiling which, measured on macOS 26, slows a
+/// CPU-bound job about 2.5x even on an otherwise idle host, taxing every
+/// request to throttle background work the daemon's own
+/// `ProcessBackgroundCpuV1` authority already bounds by concurrency. `Nice`
+/// is the lever with the right shape: it costs nothing while the host is
+/// idle, and under contention it yields the CPU to the operator's foreground
+/// work, which is the condition a runaway daemon creates. Ten is deliberately
+/// conservative; it keeps the daemon responsive without letting it pin a core
+/// against the user.
+const LAUNCHD_DAEMON_NICE: i32 = 10;
+
 /// How long a maintenance window waits, after stopping the managed daemon,
 /// for that daemon to release the shared lifecycle lease it holds for its
 /// whole lifetime.
@@ -769,6 +784,9 @@ impl DaemonServiceSpec {
                <key>ProcessType</key>\n\
                <string>Interactive</string>\n\
              \n\
+               <key>Nice</key>\n\
+               <integer>{nice}</integer>\n\
+             \n\
                <key>KeepAlive</key>\n\
                <dict>\n\
                  <key>SuccessfulExit</key>\n\
@@ -795,6 +813,7 @@ impl DaemonServiceSpec {
             bin = xml_escape(&self.tracedecay_bin.display().to_string()),
             socket = xml_escape(&self.socket_path.display().to_string()),
             open_file_limit = DAEMON_OPEN_FILE_LIMIT,
+            nice = LAUNCHD_DAEMON_NICE,
             stdout = xml_escape(&data_dir.join("daemon.out.log").display().to_string()),
             stderr = xml_escape(&data_dir.join("daemon.err.log").display().to_string()),
         ))
