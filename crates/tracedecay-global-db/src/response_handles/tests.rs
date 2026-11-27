@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tracedecay_runtime_core::db::engine::params;
 
@@ -345,6 +345,80 @@ async fn revoked_write_authority_refuses_publication_without_a_record() {
     assert_eq!(
         rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
         0
+    );
+}
+
+/// The `Commit` authority check is the last gate before `COMMIT`, reached
+/// after the job body has already written the handle row. A publication whose
+/// authority refuses there must roll the written row back, issue no handle,
+/// and leave the writer usable: the row is never durable without its handle.
+#[tokio::test(flavor = "multi_thread")]
+async fn refused_commit_rolls_back_the_written_handle_row() {
+    /// Admits every intent up to the row write and refuses only `Commit`,
+    /// recording what it admitted so the test proves the row was written.
+    struct RefuseCommit(Mutex<Vec<ExactSqlWriteIntent>>);
+    impl ExactSqlWriteAuthority for RefuseCommit {
+        fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
+            self.0.lock().unwrap().push(intent);
+            match intent {
+                ExactSqlWriteIntent::Commit => {
+                    Err(ExactSqlError::AuthorityDenied("commit refused".to_owned()))
+                }
+                _ => Ok(()),
+            }
+        }
+    }
+
+    let harness = RegisteredGlobalDbHarness::open("response-handle-commit-gate").await;
+    let db = &harness.registered;
+    let namespace = db.response_handle_namespace().unwrap();
+    let guard = Arc::new(RefuseCommit(Mutex::new(Vec::new())));
+    let refused = db
+        .publish_response_handle_in(
+            namespace,
+            "must not land".to_owned(),
+            NOW,
+            Some(guard.clone()),
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(ResponseHandleError::Store(_))),
+        "a refused commit must refuse the publication: {refused:?}"
+    );
+    let admitted = guard.0.lock().unwrap().clone();
+    let row_write = admitted
+        .iter()
+        .position(|intent| *intent == ExactSqlWriteIntent::Execute)
+        .expect("the handle row must be written before the commit is refused");
+    let refused_commit = admitted
+        .iter()
+        .position(|intent| *intent == ExactSqlWriteIntent::Commit)
+        .expect("the commit gate must be reached");
+    assert!(
+        row_write < refused_commit,
+        "the row write must precede the refused commit: {admitted:?}"
+    );
+    assert_eq!(
+        db.inventory_response_handles().await.unwrap(),
+        ResponseHandleInventory::default(),
+        "the written handle row must roll back with the refused commit"
+    );
+    assert_eq!(
+        db.lookup_response_handle(&response_handle_for("must not land"), NOW)
+            .await
+            .unwrap(),
+        ResponseHandleLookup::Missing
+    );
+
+    db.publish_response_handle("must not land", NOW)
+        .await
+        .unwrap();
+    assert_eq!(
+        found(db, &response_handle_for("must not land"), NOW)
+            .await
+            .content,
+        "must not land",
+        "the writer must stay usable after the refused commit"
     );
 }
 
