@@ -1,6 +1,6 @@
 # V2 capture boundary
 
-## Status / Role
+## Status / role
 
 Sanitized Claude capture and the subsequent expansion through the shared
 session-observation admission/sanitizer/store path are complete for Claude,

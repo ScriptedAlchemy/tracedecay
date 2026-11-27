@@ -3,7 +3,7 @@ name: evaluating-hook-hints
 description: "Evaluate TraceDecay hook hint relevance, repetition, and host-visible output when auditing or changing hint behavior."
 ---
 
-# Evaluating Hook Hints
+# Evaluating hook hints
 
 Inspect the hint classifier, dedupe state, affected host adapters, and relevant
 transcript evidence before changing behavior. Current sources live under

@@ -1,4 +1,4 @@
-# Work, SDK, and Stack Outstanding Issues Implementation Plan
+# Work, SDK, and stack outstanding issues implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-16-outstanding-issues-delivery-design.md`
 
-## Global Constraints
+## Global constraints
 
 - These are future execution steps. Writing this plan authorized no branch, build, test, daemon start, install, issue edit, or operator-data access. Execute only in the L5 worktree the coordinator assigns, on branches cut from current `origin/master` (baseline `58ccb41d66`). One branch and PR per task; a later task may start locally while the earlier PR is in review, but never stacks on it.
 - Order is fixed: Task 1 (#4436), 2 (#4445), 3 (#4215), 4 (#4419), 5 (#4229), 6-8 (#4226). Tasks 6-8 start after Task 5 against the operation registry on `master` at that time.
@@ -39,7 +39,7 @@ These are decided in the design's Decisions resolved. None is a gate, and none g
 - **#4229 decision.** The Step 7 decision rule in Task 5 turns the measurements into opt-in or a completed no-change. The coordinator verifies the evidence and escalates to the user only a genuine product preference that the evidence cannot settle. If demand or quality evidence is not obtainable without operator data, the issue stays open.
 - **#4226 customization and dependencies.** The user chose to remove `ClientOptions.fetch` in 0.16.0, with the typed `TraceDecayInvalidOptionError` and a README migration section. The design accepts `napi`, `napi-derive`, and `napi-build`. They follow the repository dependency rules: maintained releases declared in `[workspace.dependencies]`, the Bazel repin and `gen_builds` output committed with the manifest, no overlapping library, and removal with their last caller. The addon must build and pass on every OS and architecture in the existing `.github/workflows/release.yml` matrix. A platform that cannot build is a blocker to report, not a matrix change.
 
-## Review Focus
+## Review focus
 
 1. **Hidden-entity disclosure through cross-scope dependencies (Task 3):** a narrow selection that references, collides with, or modifies an entity authored under a scope it cannot see must be refused without confirming that the entity exists. Pinned by `hidden_dependency_is_denied_without_disclosing_the_entity` (Task 3, Step 9), with `concurrent_scoped_writers_conflict_only_within_one_aggregate` for the compare-and-swap boundary.
 2. **Late cleanup against a successor scope registration (Task 1):** a read or owner that outlives its scope's retirement must not remove or publish into a later registration of the same scope. Pinned by `late_retired_owner_cannot_alter_successor_scope` (Task 1, Step 5).

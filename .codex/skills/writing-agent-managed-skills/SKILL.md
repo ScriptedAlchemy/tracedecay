@@ -3,7 +3,7 @@ name: writing-agent-managed-skills
 description: "Create, revise, or audit TraceDecay managed skills and their writer validation, activation, and materialization."
 ---
 
-# Writing Agent-Managed Skills
+# Writing agent-managed skills
 
 Managed skills are profile-owned artifacts. The writer validates, activates,
 and materializes accepted output automatically; bundled `plugin/skills/`

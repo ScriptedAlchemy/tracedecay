@@ -3,7 +3,7 @@ name: introspecting-tracedecay-usage
 description: "Audit TraceDecay adoption and usage evidence to identify concrete repository or skill improvements."
 ---
 
-# Introspecting TraceDecay Usage
+# Introspecting TraceDecay usage
 
 Bound the project set, time window, and question. Use evidence to identify a
 failure before changing code or guidance. A focused question needs only the

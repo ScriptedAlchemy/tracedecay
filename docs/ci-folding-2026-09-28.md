@@ -131,7 +131,7 @@ search-result cap.
 | vercel/ncc | 1 | 0 |
 
 For the ten discovered repositories under ScriptedAlchemy, the run census
-contains **3,117 distinct workflow runs created September 21–28**. Detailed
+contains **3,117 distinct workflow runs created September 21 to 28**. Detailed
 Jobs API responses were collected for 1,312 runs: all but three of TraceDecay's
 450 CI runs, plus recent activity in the other owned repositories. The sample
 contains 11,972 distinct job records, including skipped and never-started jobs.
@@ -140,12 +140,12 @@ API rate limit before the remaining requested detail reads finished; missing
 jobs are not counted as zero-duration work. External organizations appear in
 the PR census but are not assumed to consume the ScriptedAlchemy runner pool.
 
-The run indexes were collected around 04:35–04:42 UTC, and job detail reads
+The run indexes were collected around 04:35 to 04:42 UTC, and job detail reads
 continued through 04:52 UTC. Thus an in-flight run's status can differ from its
 later job states. Raw read-only snapshots are in `/tmp/hauler-ci-audit`; the
 small replay input and aggregate measurements are retained beside the probe.
 
-## The queue really did dominate
+## The queue dominated
 
 For completed, allocated jobs belonging to runs created September 26 onward:
 

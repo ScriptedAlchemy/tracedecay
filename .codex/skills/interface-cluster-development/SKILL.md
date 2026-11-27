@@ -3,7 +3,7 @@ name: interface-cluster-development
 description: "Coordinate parallel agents on a shared interface migration when related caller changes require disjoint file ownership."
 ---
 
-# Interface Cluster Development
+# Interface cluster development
 
 Partition work around canonical interfaces and assign one final writer per
 path. Use this for a migration that benefits from multiple agents, not an

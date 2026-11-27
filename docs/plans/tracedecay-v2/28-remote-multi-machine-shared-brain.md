@@ -1,4 +1,4 @@
-# TraceDecay V2 Remote Multi-Machine Shared Brain Plan
+# TraceDecay V2 remote multi-machine shared Brain plan
 
 ## Status / role
 

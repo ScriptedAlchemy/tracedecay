@@ -7,7 +7,7 @@
 > integration-heavy repos, that is the tool being honest, not a verdict that
 > your code is untested.
 
-This guide explains what the two tools actually measure, where they are known to
+This guide explains what the two tools measure, where they are known to
 undercount, and how to read a risk report without overstating coverage
 certainty.
 
@@ -35,7 +35,7 @@ never run in your configuration.
 
 ---
 
-## 2. Direct vs. Calibrated (closure) attribution
+## 2. Direct vs. calibrated (closure) attribution
 
 Every attributed function records *how* it was deemed covered, in
 `attribution_method`. There are two live methods today:
@@ -43,7 +43,7 @@ Every attributed function records *how* it was deemed covered, in
 | `attribution_method` | `attribution_depth` | Meaning | Risk multiplier |
 |---|---|---|---|
 | `direct_unit` | `1` | A test calls this function **directly** (depth-1 `#[test]` caller, or a caller that lives in a test file). This is the strongest, smallest signal, a real, named test points straight at this function. | `0.1` |
-| `closure` | `2` or `3` | This function is reachable from a test through 1–2 intermediate functions. It is **calibrated integration-style evidence**: a test exercises code that eventually reaches this function, but no test names it directly. | `0.4` |
+| `closure` | `2` or `3` | This function is reachable from a test through 1 to 2 intermediate functions. It is **calibrated integration-style evidence**: a test exercises code that eventually reaches this function, but no test names it directly. | `0.4` |
 | `none` | `null` | No static path from any test reaches this function within depth 3. | `1.0` |
 
 (Other methods, `trait_resolved`, `public_api`, `cli_entry`, are defined in
@@ -65,7 +65,7 @@ The aggregate `summary.attribution` block breaks the numerator out by method:
 "attribution": {
   "depth": 3,
   "direct_unit_attributed": <depth-1 count, strongest signal>,
-  "closure_attributed":     <depth 2–3 count, calibrated integration evidence>,
+  "closure_attributed":     <depth 2 to 3 count, calibrated integration evidence>,
   "trait_resolved_attributed": 0,   // designed (H2), not shipped
   "public_api_attributed":     0,   // designed (H3), not shipped
   "cli_entry_attributed":      0,   // designed (H4), not shipped
@@ -168,5 +168,5 @@ Read the report top-down:
 
 ## 5. Related
 
-- `/// skip-test-coverage` docstring convention, marks genuinely-untestable
+- `/// skip-test-coverage` docstring convention, marks untestable
   functions so they leave the risk view cleanly (see the User Guide).

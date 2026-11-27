@@ -1,6 +1,6 @@
-# TraceDecay V2 Dashboard Frontend
+# TraceDecay V2 dashboard frontend
 
-## Status / Role
+## Status / role
 
 Normative product plan. Every product PR ships its usable UI slice with its
 backend behavior. By current **plan authority**, the core dashboard delivery completes exactly the
@@ -446,7 +446,7 @@ Automations, Observatory, Costs, Settings, Work, and their diagnostic,
 Doctor/recovery, work-item, proposal, attempt, and operation inspectors. A
 deep link carries opaque scope, selection, entity/graph version, valid and
 observation time, filter revision, lens, and evidence-anchor identity. The
-execution-topology lens additionally pins the work-item/plan/topology and exact
+execution-topology lens also pins the work-item/plan/topology and exact
 repository/worktree/ref snapshot identities needed by its contract. Links
 never carry private payloads, card or screen coordinates, process/CWD state,
 mutable labels, or renderer serialization. Expired, revoked, ambiguous,
@@ -884,7 +884,7 @@ rather than presenting a stall as a result; and larger-than-tier selections
 use server grouping/paging rather than raw rendering.
 
 Usability acceptance uses exactly 12 participants: at least four keyboard-
-only users, three screen-reader users, three users who work at 200–400% zoom
+only users, three screen-reader users, three users who work at 200 to 400% zoom
 or high contrast, and two regular dashboard/IDE users; cohorts may overlap but
 all four cohorts must be represented. Participants must not have implemented
 the tested slice. Tasks cover scope identification,
@@ -944,7 +944,7 @@ NVDA/Firefox and VoiceOver/Safari completion remains required; screenshots or
 automated checks cannot substitute for semantic assertions or assistive-
 technology use.
 
-Visual acceptance additionally runs in real Google Chrome, never the
+Visual acceptance also runs in real Google Chrome, never the
 embedded/in-IDE browser whose viewport the user rejected as too small. The
 reviewer captures every page and manually clicks through every interaction
 state, including movement and live updates. Automated Playwright/Chromium

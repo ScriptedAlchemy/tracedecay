@@ -1,6 +1,6 @@
 # V2 store boundary
 
-## Status / Role
+## Status / role
 
 Production **session-observation** persistence is complete. External-source
 persistence is split (status corrected again 2026-07-26): host observations

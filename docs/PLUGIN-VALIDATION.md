@@ -1,4 +1,4 @@
-# Plugin and Skill Validation
+# Plugin and skill validation
 
 > **Current layout:** all agent bundles are composed from the shared
 > `plugin/` tree. Skills live in `plugin/skills/`; per-host manifests in
@@ -25,7 +25,7 @@ extractors are compiled into their owning crate, not loaded by these host bundle
 The plugin bundles are consumed by external hosts (Cursor, Codex, Claude Code)
 whose loaders are strict and whose failure mode is usually *silent*: a manifest
 key with a typo, a skill frontmatter field the host doesn't allow, or an MCP
-config that doesn't match the host's schema simply causes the component to not
+config that doesn't match the host's schema causes the component not to
 load. Nothing in `cargo build` catches that. The validation layers below turn
 those silent failures into test failures.
 
@@ -33,7 +33,7 @@ those silent failures into test failures.
 
 ## Validation layers
 
-The checks form layers, from cheapest to most end-to-end. Layers 1–5 run
+The checks form layers, from cheapest to most end-to-end. Layers 1 to 5 run
 locally under `cargo nextest run` (and therefore also in CI's normal test
 job); layer 6 covers what can't live in the Rust test harness.
 
@@ -66,7 +66,7 @@ Beyond schema shape, `tests/agent_suite/plugin_manifest_schema_test.rs` also ass
 every component path a manifest declares (`skills/`, `hooks/hooks.json`,
 `rules/*.mdc`, …) resolves to a real file or directory in the bundle, and
 that host manifests share the same plugin `name`. The config-schema tests
-include negative cases proving the mcp/hooks schemas actually reject
+include negative cases proving the mcp/hooks schemas reject
 malformed configs (missing `command`, unknown fields, typo'd event names).
 
 The Cursor plugin/hooks schemas declare `additionalProperties: false`. Codex
@@ -89,7 +89,7 @@ cleanly on Claude, Codex, *and* Cursor:
   `claude`/`anthropic` prefix); `name` and `description` are required. A
   Cursor-only key (`disable-model-invocation`/`paths`) would break Codex/Claude,
   so it fails here, that surface belongs in the native commands overlay.
-- **Description budget.** 50–320 characters, ≤45 words, trigger-first ("Use
+- **Description budget.** 50 to 320 characters, ≤45 words, trigger-first ("Use
   when …"), ends with "Load this skill before the first tool call.", no angle
   brackets, unique across the set. A skill that can misfire adds one "Skip
   when …" sentence directly before the load clause, as pstack's `tdd` does.
@@ -171,7 +171,7 @@ repo already conforms, `plugin/.cursor-plugin/plugin.json` in source,
 and `crates/tracedecay-agent-hosts/src/agents/cursor.rs` renders it to
 `~/.cursor/plugins/local/tracedecay/.cursor-plugin/plugin.json`. The layout is
 pinned by existing assertions in `tests/agent_suite/agent_cursor_test.rs` and
-`tests/agent_suite/update_plugin_test.rs`. Note that plain `ls` hides the
+`tests/agent_suite/update_plugin_test.rs`. Plain `ls` hides the
 dot-directory; use `ls -a` before concluding a bundle has no manifest.
 
 **Rendered output.** Installers stamp `CARGO_PKG_VERSION` into the manifest

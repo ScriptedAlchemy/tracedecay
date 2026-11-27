@@ -1,4 +1,4 @@
-# TraceDecay V2 Branch-Aware Feedback Cycle, Read-Only PR Review Ingestion, and Agent Proximity
+# TraceDecay V2 branch-aware feedback cycle, read-only PR review ingestion, and agent proximity
 
 ## Status and existing foundation
 
@@ -325,7 +325,7 @@ feedback requires exact saved-content or clean-generation identity.
 
 ## Later callable extensions
 
-### Dashboard, Doctor, and observability
+### Dashboard, doctor, and observability
 
 Dashboard and Doctor call the same shipped feedback list/get/expand/status
 operations. Plan 26 records system-quality metrics, coverage, relevance,

@@ -27,8 +27,8 @@ inconsistent across the preview boundary: the daemon canonicalized
 index-transaction acceptance fixture among them, captured snapshots from
 uncanonicalized paths.
 On Linux with a real `/tmp` the two forms were identical, so the defect stayed
-latent; on hosts whose repository path traverses a symlink (macOS
-`/tmp` → `/private/tmp`), daemon recapture and caller snapshot diverged and
+latent; on hosts whose repository path traverses a symlink (macOS,
+where `/tmp` points to `/private/tmp`), daemon recapture and caller snapshot diverged and
 `git_preview` misreported `stale_preview` for a current preview.
 
 Closed by canonicalizing through one shared helper at owner mount and snapshot

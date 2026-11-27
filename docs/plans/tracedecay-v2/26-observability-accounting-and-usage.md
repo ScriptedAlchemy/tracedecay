@@ -1,4 +1,4 @@
-# TraceDecay V2 Observability, Accounting, and Usage Plan
+# TraceDecay V2 observability, accounting, and usage plan
 
 ## Status / role
 
@@ -517,7 +517,7 @@ The minimum cross-cutting V1 event payloads added by this plan are:
   `BenchmarkComparisonRecordedV1`; and
 - `TelemetryDropObservedV1` (`telemetry.drop.observed.v1`).
 
-Plans 35–37 and every other owning slice define their additional exhaustive
+Plans 35 to 37 and every other owning slice define their additional exhaustive
 source-event enum in that slice while using `ObservabilityEnvelopeV1`; omission
 from this minimum list is not permission to emit an untyped counter.
 Every listed event has canonical serialization/digest and persistence,
@@ -562,7 +562,7 @@ value decodes only as `Unknown`, never into another cohort.
 consumed candidate budget, raw/eligible/deduplicated/returned candidate
 counts, budget/cutoff reason, queue/I/O/parse/model/rank duration, final-top-k
 and unique contribution counts, and fixed rank buckets `1`, `2..3`, `4..5`,
-`6..10`, `11..25`, `26..50`, and `over_50`. Labeled evaluation additionally
+`6..10`, `11..25`, `26..50`, and `over_50`. Labeled evaluation also
 records oracle Recall@N, first-useful rank, relevant selected count, and
 marginal Recall@K/nDCG@10. Online traffic without a pinned oracle records those
 fields as unavailable, never zero.
@@ -618,7 +618,7 @@ first-pass status; review independence; accepted correctness; rework; and
 outcome coverage. `ContextSupplied | EvidenceCited |
 IndependentlyVerifiedUse | NoUseObserved` describes linkage, not causality.
 Plan 32 `Completed` and worker self-report cannot produce Plan 26 `Accepted`.
-Plan 24 context packets additionally report count and token/byte distributions
+Plan 24 context packets also report count and token/byte distributions
 by its closed work class and fixture-size stratum, using fixed packet buckets
 `0`, `1..1024`, `1025..4096`, `4097..16384`, `16385..65536`, and
 `over_65536`; no work title, payload, path, or task identity becomes a metric
@@ -882,7 +882,7 @@ decision with collision, ambiguity, and maintenance review.
 - Analytics consume canonical versioned events only. Session or surface
   handlers never maintain private counters, outcome rules, or database queries.
 
-### Observatory and Costs
+### Observatory and costs
 
 - The dashboard delivery exposes shared typed read models through application queries and the
   then-shipped CLI, MCP, HTTP, and dashboard adapters. SDK adapters

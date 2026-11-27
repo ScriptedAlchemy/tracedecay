@@ -1,6 +1,6 @@
-# Secret Detection, Redaction, and Private Data Safety
+# Secret detection, redaction, and private data safety
 
-## Status / Role
+## Status / role
 
 - Cross-cutting V2 safety requirement; its sanitized-capture foundation is complete.
 - Mandatory for every later ingestion, storage, indexing, retrieval, logging, and export path.

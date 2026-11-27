@@ -1,7 +1,7 @@
-# Behavioral Memory-Hygiene Evals
+# Behavioral memory-hygiene evals
 
 tracedecay's holographic memory is only useful if agents keep it clean: no run
-noise, no secrets, no duplicate preferences, and recall that actually works
+noise, no secrets, no duplicate preferences, and recall that works
 across sessions. The memory suite under [`evals/memory/`](../evals/memory/) tests those
 *behaviors* end-to-end instead of unit-testing internals.
 
@@ -48,9 +48,9 @@ Each scenario runs up to two phases:
   duplicate, skipping recall) is replayed against a fresh fixture. Depending
   on the scenario's `expectation`:
   - `detect`, at least one assertion must fail, proving the assertion set
-    can actually catch a misbehaving agent (instrument self-check).
+    can catch a misbehaving agent (instrument self-check).
   - `defend-or-detect`, either the write path or deterministic curator
-    refuses/neutralizes the bad state (all assertions pass ⇒ defended), or the
+    refuses/neutralizes the bad state (all assertions pass, which counts as defended), or the
     assertion set catches the violation. Stable-contract scenarios fail on
     "accepted + bad end-state" regressions.
 
@@ -171,7 +171,7 @@ Cost note: `codex` uses the local subscription (no per-token API); `claude`
 - **Fix:** `install --agent codex` writes the shared prompt rules plus a
   proactive-memory paragraph to the **global** `~/.codex/AGENTS.md`
   (`crates/tracedecay-agent-hosts/src/agents/codex.rs::install_codex_global_prompt_rules`).
-- **Result (n=1): proactive-store 0% → 100%, overall adoption 40% → 60%.**
+- **Result (n=1): proactive-store rose from 0% to 100%, and overall adoption from 40% to 60%.**
 
 **The lever for adoption is the always-on, profile-level instruction the model
 sees every turn, not tool metadata.** The same behavioral memory rule belongs

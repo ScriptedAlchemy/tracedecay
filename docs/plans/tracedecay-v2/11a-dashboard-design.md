@@ -209,7 +209,7 @@ Motion:
 
 Beautiful and functional are one requirement, not a tradeoff. The reference
 benchmark named by the user is cosmograph.app's visual quality; this is not a
-library-selection instruction. The design owner additionally selected the
+library-selection instruction. The design owner also selected the
 best-crafted developer tools of this era as research references (Linear's
 calm, Vercel's restraint, Perfetto's density done legibly). Those latter
 references are agent choices. TraceDecay should sit comfortably beside them

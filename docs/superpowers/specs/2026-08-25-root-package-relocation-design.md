@@ -1,4 +1,4 @@
-# TraceDecay Root Package Relocation Design
+# TraceDecay root package relocation design
 
 ## Status
 
@@ -22,7 +22,7 @@ The package move must preserve the package name, binary name, product version,
 feature behavior, release artifacts, persisted formats, and public runtime
 behavior.
 
-## Why This Is Architectural
+## Why this is architectural
 
 The current repository is a valid Cargo layout: a manifest may be both a
 workspace root and a package. The root package is not an obsolete binary. It is
@@ -35,7 +35,7 @@ workspace-wide configuration and product assets. A path-only move that leaves
 version, packaging, fixtures, and test ownership ambiguous would not meet this
 goal.
 
-## Current State
+## Current state
 
 - The workspace-root `Cargo.toml` contains both `[workspace]` and `[package]`.
 - The root package is named `tracedecay` and exposes only a library target.
@@ -52,7 +52,7 @@ goal.
   fixtures are compiled into the library so external integration tests can
   reach them.
 
-## Considered Approaches
+## Considered approaches
 
 ### 1. Keep the mixed workspace/package root
 
@@ -76,7 +76,7 @@ dependency direction and runtime interfaces. Combining it with relocation
 would make regressions impossible to attribute. It is explicitly deferred
 until dependency and build-time evidence justifies each extraction.
 
-## Target Layout
+## Target layout
 
 ```text
 Cargo.toml                         # virtual workspace and shared policy
@@ -100,7 +100,7 @@ vendor/                            # canonical vendored parsers remain shared
 No second copy of dashboard, plugin, benchmark, fixture, or vendor data may be
 checked in beneath `crates/tracedecay`.
 
-## Package and Dependency Contracts
+## Package and dependency contracts
 
 The relocated package remains named `tracedecay`; this is not a rename. Its
 features and dependency graph remain byte-for-byte equivalent unless a path
@@ -115,7 +115,7 @@ loses `[package]`, `[lib]`, package features, package dependencies, dev
 dependencies, tests, and benches. Workspace dependencies, profiles, patches,
 and lint policy remain at the root.
 
-## Product Version Authority
+## Product version authority
 
 The repository must retain one literal product version that release tooling
 can update and host bundles can bake without building the CLI.
@@ -131,7 +131,7 @@ product version.
 No fallback to a crate-local version, Git tag, or fabricated default is
 allowed.
 
-## Repository Asset Resolution
+## Repository asset resolution
 
 Relocation changes `CARGO_MANIFEST_DIR`, so repository assets need an explicit
 authority. Code must not scatter `../..` joins throughout production modules.
@@ -146,7 +146,7 @@ Installed production behavior may not depend on the source checkout. Assets
 needed at runtime remain embedded or copied into the distribution artifact.
 Tests and developer benchmarks may use checkout-only fixture paths.
 
-## Dashboard and Package Archive
+## Dashboard and package archive
 
 The dashboard source remains at `dashboard/`. The relocated build script still
 builds that source and embeds the canonical `dashboard/app-dist` manifest.
@@ -167,7 +167,7 @@ contents, feature wiring, build identity, host bundles, and the executable. It
 must compare the staged manifest to `crates/tracedecay/Cargo.toml` rather than
 the virtual workspace manifest.
 
-## Tests and Benches
+## Tests and benches
 
 Package-owned Rust integration tests and benches move with the package. Shared
 fixture directories remain at the repository root and are resolved through the
@@ -179,7 +179,7 @@ Before removing root `tests/` or `benches/`, an inventory must map every current
 Rust target to its relocated target. Non-Rust shell/Python acceptance tests and
 shared fixtures stay at the repository root.
 
-## Compatibility Shims
+## Compatibility shims
 
 Relocation alone does not prove a public item is unused. After the mechanical
 move is green, the small root compatibility modules that merely glob-re-export
@@ -192,7 +192,7 @@ canonical `tracedecay-usecases` modules are handled in a separate commit:
 The root package is unpublished, so an unshipped compatibility path does not
 justify permanent duplication. Persisted and wire contracts remain unchanged.
 
-## Test-Support Boundary
+## Test-support boundary
 
 Host-admission integration support is a distinct concern from dead production
 surface. External integration tests currently require those helpers from a
@@ -208,7 +208,7 @@ the two meanings remain distinct.
 No test-support crate or public trait facade is added merely to avoid declaring
 the feature.
 
-## Migration Sequence
+## Migration sequence
 
 1. Establish workspace product-version authority and update its consumers.
 2. Add the relocated package manifest and move build/source ownership in one
@@ -254,7 +254,7 @@ Before merge, rollback is a normal branch revert. No persisted data or runtime
 configuration changes are involved. The mechanical relocation commit is kept
 separate so it can be reverted without retaining half-moved package paths.
 
-## Non-Goals
+## Non-goals
 
 - Renaming the `tracedecay` library or executable.
 - Splitting daemon, MCP, dashboard, or runtime composition into additional

@@ -1,4 +1,4 @@
-# TraceDecay Followups Implementation Plan
+# TraceDecay followups implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Registry And Storage Doctor Drift Report
+### Task 1: Registry and storage doctor drift report
 
 **Files:**
 - Modify: `src/doctor.rs`
@@ -24,7 +24,7 @@
 - [ ] Surface the helper in doctor output with bounded rows and actionable wording.
 - [ ] Run `cargo test --test global_registry_test registry_ -- --nocapture` and the targeted CLI test.
 
-### Task 2: Storage Hygiene And Response Handle Inventory
+### Task 2: Storage hygiene and response handle inventory
 
 **Files:**
 - Modify: `src/doctor.rs`
@@ -38,7 +38,7 @@
 - [ ] Add a dry-run only report path first; defer destructive cleanup behind existing explicit GC/repair gates.
 - [ ] Run targeted doctor/inventory tests.
 
-### Task 3: Normalized Tool, Skill, Hint, And Transport Analytics
+### Task 3: Normalized tool, skill, hint, and transport analytics
 
 **Files:**
 - Modify: `src/analytics.rs`
@@ -54,7 +54,7 @@
 - [ ] Add dedupe/concurrency-safe JSONL append coverage where hooks currently write sidecars.
 - [ ] Run targeted analytics and hook tests.
 
-### Task 4: Project Memory Curation Automation
+### Task 4: Project memory curation automation
 
 **Files:**
 - Modify: `crates/tracedecay-agent-hosts/src/automation/memory_curator.rs`
@@ -68,7 +68,7 @@
 - [ ] Implement proposal generation that remains host-delegated when configuration says the host owns mutation decisions.
 - [ ] Run memory curator and memory store tests.
 
-### Task 5: Transcript Audit Scoping And Cursor Health
+### Task 5: Transcript audit scoping and Cursor health
 
 **Files:**
 - Modify: `crates/tracedecay-sessions/src/runtime/lcm/query.rs`
@@ -83,7 +83,7 @@
 - [ ] Keep `#` query escaping covered by existing grep tests.
 - [ ] Run LCM query and Cursor transcript tests.
 
-### Task 6: Daemon And Scheduler Status Summary
+### Task 6: Daemon and scheduler status summary
 
 **Files:**
 - Modify: `src/daemon.rs`
@@ -98,7 +98,7 @@
 - [ ] Add scheduler skip coalescing so repeated skip noise is summarized.
 - [ ] Run daemon and scheduler tests.
 
-### Task 7: Lazy Ignored-Dependency Indexing
+### Task 7: Lazy ignored-dependency indexing
 
 **Files:**
 - Modify: `src/config.rs`
@@ -118,7 +118,7 @@
 - [ ] Keep dependency nodes marked as dependency-scope metadata, not project-owned source.
 - [ ] Run targeted sync, TypeScript extraction, and MCP handler tests.
 
-### Task 8: Final Integration
+### Task 8: Final integration
 
 **Files:**
 - Modify as needed based on changed modules.

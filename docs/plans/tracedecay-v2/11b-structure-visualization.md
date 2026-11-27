@@ -114,7 +114,7 @@ Gates before build:
 1. Anatomy (thin endpoints + drill-in route; the payoff that justifies the
    symbol list).
 2. Transit (two endpoints, machinery exists).
-3. Disagreement (after gates 1–3; consider a session→file indexed
+3. Disagreement (after gates 1 to 3; consider a session→file indexed
    materialization first, it also de-risks Anatomy's JSON-scan).
 
 Open wire-contract question tracked separately: adding `path` to

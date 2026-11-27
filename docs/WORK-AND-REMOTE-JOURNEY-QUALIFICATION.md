@@ -1,4 +1,4 @@
-# Work and Remote Brain journey qualification
+# Work and remote Brain journey qualification
 
 Issue #3656 asked whether a lighter core interface or an optional deployment
 boundary would improve usability for Work and Remote Brain, decided only

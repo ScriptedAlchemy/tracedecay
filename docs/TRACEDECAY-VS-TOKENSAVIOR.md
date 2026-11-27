@@ -37,7 +37,7 @@ results from a synthetic indexer benchmark and a 96-task agent benchmark
 Both tools are multi-language, but they take different approaches.
 
 **token-savior** ships hand-written regex-based annotators per language:
-Python, TypeScript/JavaScript, Rust, Go, C, C# (each 200–750 lines of
+Python, TypeScript/JavaScript, Rust, Go, C, C# (each 200 to 750 lines of
 regex + brace-matching), plus structured-format annotators for TOML,
 JSON, YAML, XML, INI, HCL, `.env*`, and Dockerfile. Regex parsing is
 simple to extend, deliberately permissive on partial / malformed code,
@@ -230,7 +230,7 @@ the agent uses `tracedecay_str_replace` against the model block directly.
 
 These are arguably out of scope: a single `add_field` tool needs syntax
 support per (language × ORM × type-system) combination; a single
-`move_symbol` needs robust import-graph rewriting per language. Both are
+`move_symbol` needs correct import-graph rewriting per language. Both are
 multi-thousand-LoC commitments per dialect.
 
 ### 2.4 Shell-output compaction (handled by RTK)
@@ -249,7 +249,7 @@ token-savior accepts `names=[...]` lists in find / get_function_source /
 get_full_context: one round-trip retrieves multiple symbols. tracedecay's
 equivalent tools each take a single symbol or node_id. Issuing N MCP calls
 pays N × stdio JSON-RPC overheads (~300 µs each per the §3 benchmark).
-For typical agent workloads, 5–10 queries per task, the absolute cost is
+For typical agent workloads, 5 to 10 queries per task, the absolute cost is
 sub-millisecond per call, but at hundreds of queries it adds up.
 **Mitigation**: `tracedecay_context` retrieves a relevance-ranked bundle of
 related symbols in one call when the task is open-ended, which usually
@@ -315,7 +315,7 @@ armed with the MCP server under test plus a tightly tuned system prompt.
 
 Our adaptation:
 
-- Fork `bench.py` → `bench_tracedecay.py`. Swap the MCP config to launch
+- Fork `bench.py` into `bench_tracedecay.py`. Swap the MCP config to launch
   `tracedecay serve -p <root> --timings`.
 - Rewrite `SYSTEM_PROMPT_TS` to map each token-savior tool to its tracedecay
   equivalent (or, where none exists, a `Read` / `Edit` fallback).
@@ -353,7 +353,7 @@ Our adaptation:
 ### What's notable
 
 - **First-attempt, untuned.** token-savior reports 97.9% after multiple
-  rounds of audit + tuning (April–May 2026) including memory-hook fixes,
+  rounds of audit + tuning (April to May 2026) including memory-hook fixes,
   schema thinning, and rubric-matched vocabulary in the system prompt.
   tracedecay's 95.8% is the *first run* of an unmodified-rubric
   translation. Polishing the dead-code mapping (TASK-008) and the

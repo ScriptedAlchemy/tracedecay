@@ -178,7 +178,7 @@ and migrate movers took the production half and left the test runtime behind.
 
 **Recommendation:** move the test runtimes down to `tracedecay-sessions::admission`
 behind that crate's new `test-helpers` feature, alongside the production half
-that already moved. This is the single highest-leverage Tier 2 item, it is the
+that already moved. This is the highest-value Tier 2 item. It is the
 largest error class and it unblocks the root crate's own lib target.
 
 ### 2b. `FixtureGraph` / `GraphRuntimePort` test doubles, owner: usecases lead

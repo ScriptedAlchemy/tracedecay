@@ -1,6 +1,6 @@
 # V2 domain boundary
 
-## Status / Role
+## Status / role
 
 Sanitized-capture **session-observation** contracts are complete. External-source delivery is
 split (status corrected again 2026-07-26): the host-observation specialization

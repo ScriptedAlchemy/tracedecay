@@ -1,4 +1,4 @@
-# Embedded Grafeo Graph Database Implementation Plan
+# Embedded Grafeo graph database implementation plan
 
 > **SUPERSEDED BY LANDING (2026-08-13).** The checklist below predates the
 > cutover and was never ticked; the work shipped regardless. Evidence:
@@ -24,7 +24,7 @@ does not store shadow adjacency, graph indexes, or vector indexes.
 crates.io, TraceDecay domain/store ports, Tokio cancellation, Criterion, and
 cargo-nextest.
 
-## Global Constraints
+## Global constraints
 
 - Use Grafeo embedded in-process. No server, sidecar process, network
   transport, or separately managed database process.
@@ -850,7 +850,7 @@ git commit -am "feat(graph-db): wire embedded graph journeys"
 - Modify: `docs/dashboard.md`
 
 **Interfaces:**
-- Consumes: completed production cutovers from Tasks 3–10.
+- Consumes: completed production cutovers from Tasks 3 to 10.
 - Produces: one final V2 data design with no dead compatibility or duplicate graph authority.
 
 - [ ] **Step 1: Prove every old caller moved**

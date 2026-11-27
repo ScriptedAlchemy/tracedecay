@@ -1,6 +1,6 @@
-# TraceDecay V2 Stable Anchors and Provenance
+# TraceDecay V2 stable anchors and provenance
 
-## Status / Role
+## Status / role
 
 Status: active product contract.
 
@@ -282,7 +282,7 @@ evidence-span identity, and payload-free retriever-contribution anchors all exis
     task projection may abbreviate presentation, but its prose, score, status, branch
     label, or aggregate cannot become replacement evidence.
 
-**Status (2026-07-23; item 19 completed 2026-07-29):** Items 1–22 implemented.
+**Status (2026-07-23; item 19 completed 2026-07-29):** Items 1 to 22 implemented.
 Shipped reality:
 
 - Item 1: the opaque `RetrievalAnchorId` is realized as a derived, digest-tagged
@@ -298,7 +298,7 @@ Shipped reality:
 - Coverage: derived-group (Span/Burst) candidate anchors are excluded from the coverage
   denominator so grouped members are not double-counted as hidden omissions
   (`src/query/temporal/mod.rs`; landed as commit `67a7f253`).
-- Items 11–18, 20–21: native repository/worktree/ref/object/PR/check/conflict/preflight/
+- Items 11 to 18, 20 to 21: native repository/worktree/ref/object/PR/check/conflict/preflight/
   integration anchors ship in `crates/tracedecay-domain/src/research/git_topology.rs`.
 
 ## Native Git, worktree, and integration-receipt anchors
@@ -334,7 +334,7 @@ not an implementation layout requirement.
 
 `RepositoryCaptureAnchorRefV1` identity is the Plan 16 `RepositoryId` plus the
 exact Plan 36 native repository snapshot identity, object format, and common-Git-
-directory identity. `WorktreeCaptureAnchorRefV1` identity additionally binds the
+directory identity. `WorktreeCaptureAnchorRefV1` identity also binds the
 Plan 16 `WorktreeId`, native linked-worktree administrative identity, captured
 HEAD/index state, and capture receipt. A path, CWD, remote URL, branch name,
 inode, timestamp, matching `HEAD`, copied object bytes, or content hash is never

@@ -69,7 +69,7 @@ tracedecay status --json            # inspect readiness and coverage
 generation. It returns a typed not-ready receipt once that request is
 accepted; the index continues in the background. `tracedecay status`
 immediately afterwards can still show `project_open.state=converging` and
-`graph_statistics.state=unavailable` with exit 0 — that is a typed
+`graph_statistics.state=unavailable` with exit 0. That is a typed
 not-ready reading, not a usable project. Pass `tracedecay init --wait` to
 block until the first generation is ready, or poll `status` until
 `graph_statistics.state` is available. `--wait` holds for as long as the
@@ -116,7 +116,7 @@ Codex first-time installs drive `codex plugin add tracedecay@personal` themselve
 Trust new command hooks inside Codex with `/hooks`, then start a new session so
 the installed cache is loaded.
 
-## Common Commands
+## Common commands
 
 ```bash
 tracedecay daemon install-service   # optional persistent user service
@@ -140,7 +140,7 @@ Every MCP tool is reachable from the shell as `tracedecay tool <name>`; there
 are no separate per-tool subcommands. Run `tracedecay tool` for the grouped
 list and `tracedecay tool <name> --help` for one tool's parameters.
 
-## Agent Tools
+## Agent tools
 
 The MCP server exposes tools grouped around normal coding workflows:
 
@@ -173,7 +173,7 @@ including untracked files: a staged edit undone in the worktree has no net
 change in that default view. `diff_context` answers prospective impact for all
 indexed symbols in supplied files, including declarations the patch did not change.
 
-## Index Freshness
+## Index freshness
 
 The daemon owns freshness and background convergence. Hooks, MCP, LSP, and
 workspace events submit bounded, content-free hints; the daemon resolves exact

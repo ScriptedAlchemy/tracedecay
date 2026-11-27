@@ -3,7 +3,7 @@ name: inspecting-automation-cycles
 description: "Inspect TraceDecay automation run outcomes, suspicious skips, and curator or skill-writer validation receipts."
 ---
 
-# TraceDecay Dev: Inspecting Automation Cycles
+# TraceDecay dev: Inspecting automation cycles
 
 TraceDecay automation is a loop, not a single artifact: config schedules jobs,
 runs produce artifacts, dashboards expose outcomes/telemetry, and usage
@@ -29,7 +29,7 @@ the sole semantic launcher, `fact_store_curate`, through
 `fact_review_limit` and `min_confidence_millionths`; the daemon owns run
 identity, validation, policy, and settlement.
 
-## Reading Results
+## Reading results
 
 | Signal | Meaning | Next step |
 |---|---|---|

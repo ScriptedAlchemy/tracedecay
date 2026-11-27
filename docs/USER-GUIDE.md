@@ -1,4 +1,4 @@
-# TraceDecay User Guide
+# TraceDecay user guide
 
 Thanks for downloading TraceDecay!
 
@@ -7,7 +7,7 @@ TraceDecay is a code intelligence tool that builds a semantic knowledge graph of
 Core indexing and retrieval require the local daemon: `tracedecay init` and the
 read commands connect to a running daemon rather than starting one. Configured
 remote sources and authorities are separate, policy-bound effects; see
-[Privacy and Network](#privacy-and-network) before assuming an offline-only
+[Privacy and network](#privacy-and-network) before assuming an offline-only
 deployment.
 
 > **Final V2:** `tracedecay-graph-db` is the sole Grafeo boundary. Incompatible
@@ -17,22 +17,22 @@ deployment.
 
 ---
 
-## Table of Contents
+## Table of contents
 
 1. [Installing TraceDecay](#installing-tracedecay)
-2. [Your First Index](#your-first-index)
-3. [Connecting to Your Agent](#connecting-to-your-agent)
-4. [Exploring Your Codebase from the CLI](#exploring-your-codebase-from-the-cli)
-5. [Choosing a Dashboard Workspace](#choosing-a-dashboard-workspace)
-6. [Keeping the Index Fresh](#keeping-the-index-fresh)
-7. [Running Parallel Work with Synthesis](#running-parallel-work-with-synthesis)
-8. [Checking Your Setup with Doctor](#checking-your-setup-with-doctor)
-9. [Finding Affected Tests](#finding-affected-tests)
-10. [MCP Tools for AI Agents](#mcp-tools-for-ai-agents)
-11. [Supported Languages](#supported-languages)
-12. [Privacy and Network](#privacy-and-network)
+2. [Your first index](#your-first-index)
+3. [Connecting to your agent](#connecting-to-your-agent)
+4. [Exploring your codebase from the CLI](#exploring-your-codebase-from-the-cli)
+5. [Choosing a dashboard workspace](#choosing-a-dashboard-workspace)
+6. [Keeping the index fresh](#keeping-the-index-fresh)
+7. [Running parallel work with synthesis](#running-parallel-work-with-synthesis)
+8. [Checking your setup with doctor](#checking-your-setup-with-doctor)
+9. [Finding affected tests](#finding-affected-tests)
+10. [MCP tools for AI agents](#mcp-tools-for-ai-agents)
+11. [Supported languages](#supported-languages)
+12. [Privacy and network](#privacy-and-network)
 13. [Updating TraceDecay](#updating-tracedecay)
-14. [Configuration Files](#configuration-files)
+14. [Configuration files](#configuration-files)
 15. [Troubleshooting](#troubleshooting)
 
 ---
@@ -80,7 +80,7 @@ Download from the [latest release](https://github.com/ScriptedAlchemy/tracedecay
 
 ---
 
-## Your First Index
+## Your first index
 
 Start the daemon first. To install the optional per-user service:
 
@@ -236,7 +236,7 @@ malformed pattern is refused before anything is written. There is no per-run
 folder exclusion; `init` and `sync` take no folder flags.
 
 Direct Git submodules are excluded by default. To index their checked-out
-files under parent-relative paths, set the project’s Boolean
+files under parent-relative paths, set the project's Boolean
 `index.include_submodules.v1` setting and restart the daemon.
 
 ```bash
@@ -297,7 +297,7 @@ delete the `.tracedecay/` directory.
 
 ---
 
-## Connecting to Your Agent
+## Connecting to your agent
 
 TraceDecay works as an MCP (Model Context Protocol) server. AI coding agents connect to it to query your codebase instead of scanning files directly. The `install` command sets everything up automatically.
 
@@ -537,7 +537,7 @@ tracedecay uninstall --agent hermes
 
 ---
 
-## Exploring Your Codebase from the CLI
+## Exploring your codebase from the CLI
 
 You don't need an AI agent to use tracedecay. Every MCP tool is reachable from
 the shell through `tracedecay tool <name>`, which dispatches the same tool the
@@ -716,7 +716,7 @@ You can always override the automatic scope by passing an explicit `path` parame
 
 ---
 
-## Choosing a Dashboard Workspace
+## Choosing a dashboard workspace
 
 The navigation rail and command palette show the same workspace names. The
 palette also searches the task hints beside those names, so searching for
@@ -744,7 +744,7 @@ session, file, or task from the old project is not carried into the new one.
 
 ---
 
-## Keeping the Index Fresh
+## Keeping the index fresh
 
 The daemon owns freshness and convergence. Hooks, MCP, LSP, and workspace
 events submit bounded, content-free hints; the daemon coalesces them, resolves
@@ -851,10 +851,10 @@ service. If the daemon is unavailable, it may be intentionally held; report the
 typed state instead of retrying or changing lifecycle. Use `start` or `restart`
 only when you intentionally want the daemon running.
 
-### CLI-Only Workflows
+### CLI-only workflows
 
-If you don't keep an agent attached, keep the daemon running — the optional
-per-user service or a `tracedecay daemon run` terminal — and install the
+If you don't keep an agent attached, keep the daemon running, either as the optional
+per-user service or in a `tracedecay daemon run` terminal, and install the
 optional Git hint hook:
 
 ```bash
@@ -866,7 +866,7 @@ Use `tracedecay sync` only as an explicit administrative refresh request when a
 diagnostic says the selected generation is stale; routine freshness remains a
 daemon-owned background journey.
 
-## Running Parallel Work with Synthesis
+## Running parallel work with synthesis
 
 Work runs provider attempts for you: several tasks implemented in parallel,
 then one synthesis attempt that reviews their outputs. The guided path,
@@ -985,7 +985,7 @@ next call refuses synthesis with `application.work-run-control.paused`. After
 its own placement admitted, and the synthesis runs in its task's placement
 root. A placement without a root runs in the project checkout.
 
-## Checking Your Setup with Doctor
+## Checking your setup with doctor
 
 The `doctor` command runs a read-only health check:
 
@@ -1073,7 +1073,7 @@ a daemon answered without an observed report.
 
 ---
 
-## Finding Affected Tests
+## Finding affected tests
 
 When you change source files, you often want to know which tests might be affected. The `affected` tool traces through the file dependency graph to find them. `files` is an array, so pass the whole arguments object with `--args`:
 
@@ -1117,9 +1117,9 @@ tracedecay tool affected --args '{"files":["src/lib.rs"]}' --json
 
 ---
 
-## MCP Tools for AI Agents
+## MCP tools for AI agents
 
-When running as an MCP server, tracedecay exposes typed operations that AI agents can call. Here's what they do, grouped by purpose.
+When running as an MCP server, tracedecay exposes typed operations that AI agents can call. The sections below group them by purpose.
 
 ### Core exploration
 
@@ -1243,17 +1243,17 @@ result as complete.
 
 | Tool | What it does |
 |------|-------------|
-| `tracedecay_health` | Health panel: the measured dimensions (acyclicity, depth, equality, redundancy, modularity, coverage_discipline), worst first, then the dimensions the scope gave nothing to measure under `no evidence:` with the reason. `quality_signal` (0–10000) is the geometric mean of the five structural dimensions with a low-weight penalty for `/// skip-test-coverage` overuse. Dimensions without evidence enter it at their formula value, so an empty scope reads 10000 and one file reads 0; read `panel` before the number. |
+| `tracedecay_health` | Health panel: the measured dimensions (acyclicity, depth, equality, redundancy, modularity, coverage_discipline), worst first, then the dimensions the scope gave nothing to measure under `no evidence:` with the reason. `quality_signal` (0 to 10000) is the geometric mean of the five structural dimensions with a low-weight penalty for `/// skip-test-coverage` overuse. Dimensions without evidence enter it at their formula value, so an empty scope reads 10000 and one file reads 0; read `panel` before the number. |
 | `tracedecay_gini` | Gini inequality coefficient for any metric (complexity, lines, fan-in, fan-out, members). Finds god files and uneven distributions. |
 | `tracedecay_dependency_depth` | Longest file-level dependency chains, the critical paths where upstream changes ripple through the most layers. |
 | `tracedecay_dsm` | Design Structure Matrix showing file dependencies as clusters, density stats, or an NxN grid. Reveals hidden coupling patterns. |
 | `tracedecay_test_risk` | Risk-weighted test gaps combining complexity, coupling, git churn, and test coverage. Answers "where should the next test go?" Reports a **static attribution lower bound** (not line/branch coverage): each function is attributed via a direct test edge (`direct_unit`) or a depth-3 transitive path (`closure`), with the weaker `closure` method keeping a higher residual risk. See [Reading the test_risk / test_map coverage signal](./TEST-MAP-INTERPRETATION.md) for how to interpret the signal honestly on integration-heavy repos. |
 
-### Test Coverage Conventions
+### Test coverage conventions
 
 #### `/// skip-test-coverage`
 
-Mark functions that are genuinely untestable in unit tests (e.g. infrastructure-dependent, framework-invoked, or private helpers tested only transitively):
+Mark functions that are untestable in unit tests (e.g. infrastructure-dependent, framework-invoked, or private helpers tested only transitively):
 
 ```rust
 /// skip-test-coverage
@@ -1434,7 +1434,7 @@ directly. Edit tools modify source files.
 
 ---
 
-## Supported Languages
+## Supported languages
 
 TraceDecay supports more than 50 languages, organized into three tiers. Each tier includes all the languages from the tier below it.
 
@@ -1479,7 +1479,7 @@ For each supported language, tracedecay extracts:
 
 ---
 
-## Privacy and Network
+## Privacy and network
 
 TraceDecay's core functionality is local-first. Indexing, search, graph queries,
 and the MCP server run through the local daemon and its embedded Grafeo/SQLite
@@ -1681,7 +1681,7 @@ A store `wipe --stale` cannot reset on its own names `tracedecay wipe --all
 
 ---
 
-## Configuration Files
+## Configuration files
 
 TraceDecay stores data through one daemon-owned project/profile authority.
 Clients and hosts never open the underlying files directly.

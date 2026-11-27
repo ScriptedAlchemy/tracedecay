@@ -1,4 +1,4 @@
-# Official Public API and SDKs
+# Official public API and SDKs
 
 ## Status / role
 

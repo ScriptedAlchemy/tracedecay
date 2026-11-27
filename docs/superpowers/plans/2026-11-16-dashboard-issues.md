@@ -1,4 +1,4 @@
-# Dashboard Outstanding Issues Implementation Plan
+# Dashboard outstanding issues implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-16-outstanding-issues-delivery-design.md`
 
-## Global Constraints
+## Global constraints
 
 - Work in this checkout only. These are future execution steps, not authorization to change branches, run tests, start a daemon, modify issues, or touch operator data while writing this plan.
 - Execute #4432, then #4220, then #4223. #4223 can measure early, but cannot merge until L5 #4215 merges; rebase, regenerate any affected contracts, and re-measure after that merge. Coordinate shared generated SDK output with L5.
@@ -24,7 +24,7 @@
 - Retain #4480's Loom Weave/Strata/Rails (Weave default), Brain Neural/Luminous/Points/Atlas (Neural default, project scope), and Code Luminous/Plate/Relief (Luminous default). Keep all Work projections, production data, view controls, selected identities, inspectors, replay/window state, camera/minimap, and failure recovery.
 - Commits are proposed per task. Stage only task-owned paths, use conventional headers, and do not claim issue closure before merged `master` has evidence for every criterion. If a requirement needs a path owned by L5, stop and hand the seam to the coordinator.
 
-## Review Focus
+## Review focus
 
 1. **Stream lifetime under disconnect or supersession:** Task 1's `disconnect_drops_unfinished_explorer_sources` and `superseded_explorer_stream_cannot_replace_new_results` must prove both downstream cancellation and stale-frame exclusion.
 2. **Foreign or unresolved project selection:** Task 1's `foreign_project_explorer_stream_is_refused` and `selected_project_stream_does_not_use_active_project` must prove exact isolation.

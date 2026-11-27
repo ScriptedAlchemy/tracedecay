@@ -3,7 +3,7 @@ name: self-improving-from-usage-logs
 description: "Find repeated TraceDecay tool or skill friction in session logs and turn supported patterns into scoped fixes."
 ---
 
-# Self-Improving From Usage Logs
+# Self-improving from usage logs
 
 Start from the reported symptom or a bounded session window. Search with
 `tracedecay_message_search`, then use `tracedecay_lcm_grep` or

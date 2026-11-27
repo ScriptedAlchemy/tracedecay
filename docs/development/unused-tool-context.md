@@ -53,7 +53,7 @@ The `Coverage` line reports, per provider, how many sessions were discovered,
 loaded, empty, or unreadable (with the daemon's problem code), plus calls whose
 result was never stored (`calls_without_result`). When any scored call lacks a
 stored `token_count`, token columns stay `null` and the coverage object adds
-`token_count_coverage` — the share of non-error calls that had a real count.
+`token_count_coverage`, the share of non-error calls that had a real count.
 That share is the number to cite; do not fill the missing token columns.
 
 ## Matching rules

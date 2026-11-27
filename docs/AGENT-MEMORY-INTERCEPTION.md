@@ -1,4 +1,4 @@
-# Agent Memory Interception: Codex CLI & Cursor × TraceDecay Fact Store
+# Agent memory interception: Codex CLI & Cursor × TraceDecay fact store
 
 **Status:** research + design proposal (2026-07-02; plugin paths refreshed
 2026-07-03).
@@ -286,12 +286,12 @@ surfaces on a schedule.
 
 | Stage | Codex | Cursor |
 | --- | --- | --- |
-| Facts stored | ✅ fact store (9 facts here) + LCM transcripts | same store |
-| Model *can* recall | ✅ MCP `tracedecay_fact_store_search` + skill | ✅ same |
-| Model is *told* to recall | ⚠️ daemon-approved SessionStart/PostToolUse guidance when available; `project-memory` skill matches only when the model thinks "recall" | ⚠️ one Recall bullet in `tracedecay.mdc`; same skill-match dependency |
-| Facts *pushed* into context | ❌ none, hook context is index status + hints only | ❌ none |
-| Automatic storage | ⚠️ session_reflector exists but disabled by default; skills say "add facts **only when the user asks**" (`project-memory` guardrail) | same |
-| Native memory overlap | ⚠️ Codex memories **on** (`features.memories=true`), learning from the same threads in parallel | Unknown toggle state; server-side, uninspectable |
+| Facts stored | Yes: fact store (9 facts here) and LCM transcripts | same store |
+| Model *can* recall | Yes: MCP `tracedecay_fact_store_search` and the skill | Yes, same |
+| Model is *told* to recall | Partial: daemon-approved SessionStart/PostToolUse guidance when available; `project-memory` skill matches only when the model thinks "recall" | Partial: one Recall bullet in `tracedecay.mdc`; same skill-match dependency |
+| Facts *pushed* into context | No. Hook context is index status and hints only | No |
+| Automatic storage | Partial: session_reflector exists but disabled by default; skills say "add facts **only when the user asks**" (`project-memory` guardrail) | same |
+| Native memory overlap | Partial: Codex memories **on** (`features.memories=true`), learning from the same threads in parallel | Unknown toggle state; server-side, uninspectable |
 
 The delta is precisely: **nothing proactively retrieves facts at
 session/prompt time**, and **nothing writes facts without an explicit user
@@ -326,7 +326,7 @@ Implementation pointers: `src/hooks/codex.rs`, `src/hooks/cursor.rs`,
 `src/hooks/steering.rs`, shared helpers in `src/hooks/mod.rs`, and the verified
 memory-similarity application port. Analytics still flow through
 `record_hint_analytics` so injection quality is measurable. No plugin schema
-change; hook hashes change → users re-trust via `/hooks` (already documented
+change; hook hashes change, so users re-trust via `/hooks` (already documented
 in the Codex plugin README).
 
 ### B. Rejected: hook-local Cursor injection and materialized memory
@@ -405,7 +405,7 @@ reaches *every* agent (Claude, Gemini, etc., `crates/tracedecay-agent-hosts/src/
 integrations) via one artifact, but it edits user/repo-owned files (needs
 fenced-section ownership, `.gitignore` questions, merge conflicts) and its
 freshness is only as good as the schedule. Recommend only as the
-generalization step after A–C prove out, implemented as an automation task
+generalization step after A to C prove out, implemented as an automation task
 alongside D and reusing the managed-file conventions from the skill overlay.
 
 ### Non-options investigated and rejected
@@ -432,5 +432,5 @@ alongside D and reusing the managed-file conventions from the skill overlay.
 3. **D** (reflector enablement UX), config/doctor/dashboard nudge.
 4. **E** (coexistence policy + optional Codex-memories harvest importer).
 5. **F** (generalized AGENTS.md materialization across all 15 agent
-   integrations), only if A–C leave recall gaps for agents without hook
+   integrations), only if A to C leave recall gaps for agents without hook
    surfaces.

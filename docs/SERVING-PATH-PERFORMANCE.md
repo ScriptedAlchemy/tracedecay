@@ -1,4 +1,4 @@
-# Serving-Path Performance Architecture
+# Serving-path performance architecture
 
 Measured baseline (2026-08-01, live daemon, 151K-node store, 8 concurrent
 readers): 670% CPU, one search 6+ minutes. perf attribution: ~20% per-access
@@ -75,7 +75,7 @@ did, meant a query entered the single-flight sealed-generation decode
 (`DecodedGenerationCacheV1`) before it could discover it already had a servable
 generation. Whenever a new generation was being decoded/activated, every query
 parked on that O(store) sweep and the fallback was unreachable for its whole
-duration. Measured live: search served 190–220ms right after restart, then
+duration. Measured live: search served 190 to 220ms right after restart, then
 blocked 45s+ during the next full rebuild.
 
 Resolution therefore checks the O(1) `serving_generation` **first**. When it
@@ -459,7 +459,7 @@ parameter against the runtime's 64MB `MAX_REQUEST_BYTES`:
 
 | encoding | 2,000 chunks | 5,000 | 10,000 | 20,000 |
 |---|---|---|---|---|
-| inline floats | ok | `RequestLimitExceeded` | — | — |
+| inline floats | ok | `RequestLimitExceeded` | not run | not run |
 | row-per-vector | ok | ok | ok | `RequestLimitExceeded` |
 | externalized metadata | ok | ok | ok | ok |
 

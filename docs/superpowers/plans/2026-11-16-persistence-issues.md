@@ -1,4 +1,4 @@
-# L1 Persistence Implementation Plan
+# L1 Persistence implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-16-outstanding-issues-delivery-design.md`
 
-## Global Constraints
+## Global constraints
 
 - Deliver in this order: #4448, #4427, then #4447. Each task is one coherent issue PR and one coherent commit. Start the next issue from the merged previous issue; cross-lane dependencies are start/merge gates, never permission to edit another lane's files.
 - L1 is the first owner of five shared files (design, Shared files): `crates/tracedecay/src/daemon/project_open_owners.rs`, `crates/tracedecay-application/src/advisory/runtime/local_cycle_tests.rs`, and `crates/tracedecay/src/daemon/maintenance.rs` (Task 1), `crates/tracedecay/src/mcp/server.rs` (Tasks 1 and 3), and `crates/tracedecay-dashboard-api/src/state.rs` (Task 2). L5 #4436, L6 #4423, L2 #4099, and L5 #4419 integrate their edits to those files only after the L1 PR that edits them merges. Report each of those merge SHAs to the coordinator at once.
@@ -23,19 +23,19 @@
 - Run builds, tests, checks, and codegen only through the prescribed Bazel/dashboard paths. A green named run is `REQUIRE_EXACT_TEST_COUNT=1 scripts/require-exact-test.sh bazel test <one target> --test_output=all --test_arg=<full module path> --test_arg=--exact`; the helper proves only a pass and never an expected red, because it exits with a failing command's status and checks no signature. An expected red invokes Bazel directly, `bazel test <one target> --test_output=all --test_arg=<full module path> --test_arg=--exact`, and counts only when Bazel exits nonzero and the log shows the step's exact signature: rustc `error[E…]` lines naming the stated missing symbol, all in the stated file, or `test <full module path> ... FAILED` with the stated assertion text and `test result: FAILED. 0 passed; 1 failed`. A compile red covers every new test in its target, so assertion reds in the same target run before a test there names a new symbol. No substring filter is evidence. Broad/heavy Bazel suites and measurement runs require coordinator slots under the design's at-most-two default; timing-sensitive checks rerun in isolation without loosening any bound. Measurements yield raw evidence, not speedup claims.
 - Never hand-edit `dashboard/src/contracts/`, `sdks/typescript/src/`, or `crates/tracedecay-sdk/src/operations.rs`; regenerate and check them in separate steps when implicated. Bazel prints a passing test's log only with `--test_output=all`; the helper runs below use it, and so does every unfiltered target run whose counts are cited. Commits use conventional headers of at most 72 characters without issue numbers and stage only the task's owned paths.
 
-## Review Focus
+## Review focus
 
-- A copied handle/run ID presented to a different logical shard must not become authorization, and retired JSON/JSONL must remain byte-identical after feature-scoped refusal — Task 1 test `foreign_namespace_and_legacy_json_are_refused_without_touching_bytes`; Task 2 test `wrong_project_and_legacy_jsonl_refuse_without_touching_bytes`.
-- Multibyte text crossing a storage chunk/page boundary, a damaged chunk, or cleanup racing renewal must return exact text or a typed refusal — Task 1 tests `utf8_chunks_tamper_and_renewal_races_recover_exactly` and `cleanup_removes_only_expired_rows_in_the_admitted_namespace`.
-- An external effect committed before its exact terminal is published must neither replay the effect nor fabricate success after any crash/cancellation boundary — Task 2 test `external_effect_crash_and_cancellation_boundaries_settle_once`.
-- Reset can slip between reservation and completion, an identity/delta or observation can conflict, and an unsupported/null/missing request identity must never become a shared accounting key — Task 3 tests `pre_reset_reservation_conflict_and_overflow_keep_exact_epoch_state` and `identity_unavailable_never_credits_positive_savings`.
-- Disconnect/restart and writer-stage failure can strand reservations and history while later responses commit and graph metadata contains a different-looking total — Task 3 tests `disconnect_restart_pending_stages_and_graph_totals_replay_once` and `savings_history_repairs_once_without_duplicate_rows`.
+- A copied handle/run ID presented to a different logical shard must not become authorization, and retired JSON/JSONL must remain byte-identical after feature-scoped refusal: Task 1 test `foreign_namespace_and_legacy_json_are_refused_without_touching_bytes`; Task 2 test `wrong_project_and_legacy_jsonl_refuse_without_touching_bytes`.
+- Multibyte text crossing a storage chunk/page boundary, a damaged chunk, or cleanup racing renewal must return exact text or a typed refusal: Task 1 tests `utf8_chunks_tamper_and_renewal_races_recover_exactly` and `cleanup_removes_only_expired_rows_in_the_admitted_namespace`.
+- An external effect committed before its exact terminal is published must neither replay the effect nor fabricate success after any crash/cancellation boundary: Task 2 test `external_effect_crash_and_cancellation_boundaries_settle_once`.
+- Reset can slip between reservation and completion, an identity/delta or observation can conflict, and an unsupported/null/missing request identity must never become a shared accounting key: Task 3 tests `pre_reset_reservation_conflict_and_overflow_keep_exact_epoch_state` and `identity_unavailable_never_credits_positive_savings`.
+- Disconnect/restart and writer-stage failure can strand reservations and history while later responses commit and graph metadata contains a different-looking total: Task 3 tests `disconnect_restart_pending_stages_and_graph_totals_replay_once` and `savings_history_repairs_once_without_duplicate_rows`.
 
 ---
 
 ### Task 1: Complete response-handle registered-store cutover (#4448)
 
-**Files — production and generated contracts:**
+**Production and generated contract files:**
 - Create: `crates/tracedecay-global-db/src/response_handles.rs`
 - Create: `crates/tracedecay-global-db/src/response_handles/tests.rs`
 - Modify: `crates/tracedecay-global-db/src/lib.rs`
@@ -73,7 +73,7 @@
 - Modify: `crates/tracedecay-session-memory/src/lib.rs`
 - Regenerate only by command: `dashboard/src/contracts/`, `sdks/typescript/src/`, `crates/tracedecay-sdk/src/operations.rs`
 
-**Files — tests, fixtures, and module registration:**
+**Test, fixture, and module registration files:**
 - Create: `crates/tracedecay-session-memory/src/response_handles/tests.rs`
 - Create: `crates/tracedecay-application/tests/application_suite/feedback_test.rs`
 - Modify: `crates/tracedecay-application/tests/application_suite/main.rs` (register `mod feedback_test;` before the suite's test modules)
@@ -182,7 +182,7 @@
 
 ### Task 2: Complete automation run-state cutover (#4427)
 
-**Files — production:**
+**Production files:**
 - Create: `crates/tracedecay-global-db/src/automation_run_state.rs`
 - Modify: `crates/tracedecay-global-db/src/lib.rs`
 - Modify: `crates/tracedecay-global-db/src/schema_stages.rs`
@@ -210,7 +210,7 @@
 - Modify: `crates/tracedecay-cli/src/automation_cli/runs.rs`
 - Modify: `crates/tracedecay/src/daemon/scheduler/effect_admission.rs`
 
-**Files — tests, fixtures, and module registration:**
+**Test, fixture, and module registration files:**
 - Create: `crates/tracedecay/tests/automation_runner_test/registered_run_store.rs`
 - Modify: `crates/tracedecay/tests/automation_runner_test/main.rs` (register `mod registered_run_store;`)
 - Test: `crates/tracedecay-automation-runtime/src/automation/lifecycle/tests.rs`
@@ -330,7 +330,7 @@
 
 ### Task 3: Complete per-response saved-token cutover (#4447)
 
-**Files — production:**
+**Production files:**
 - Modify: `crates/tracedecay-global-db/src/registered_accounting.rs`
 - Create: `crates/tracedecay-global-db/src/registered_accounting/tests.rs`
 - Modify: `crates/tracedecay-global-db/src/lib.rs`
@@ -348,7 +348,7 @@
 - Modify: `crates/tracedecay-mcp/src/handlers/hook_runtime/mod.rs`
 - Modify: `crates/tracedecay-mcp/src/handlers/admin_cli.rs`
 
-**Files — tests and fixtures:**
+**Test and fixture files:**
 - Test: `crates/tracedecay-global-db/src/registry_maintenance/tests.rs` only if its committed-max behavior changes; retain it unchanged otherwise.
 - Test: `crates/tracedecay-project/src/config/tests.rs`
 - Test: `crates/tracedecay-project/src/test_support/host_admission/accounting_test_support.rs`

@@ -1,6 +1,6 @@
-# TraceDecay V2 API Crate
+# TraceDecay V2 API crate
 
-## Status / Role
+## Status / role
 
 Normative public-service delivery contract; completion status is owned solely by
 `00-plan-set-index.md`. `tracedecay-api` is the canonical thin Axum

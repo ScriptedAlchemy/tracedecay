@@ -160,7 +160,7 @@ disconnected from the graph; affected-set narrowing (already available via
 short pre-extracted snippet. Caches the last clean state and the result digest so a
 no-op re-run is free.
 
-**Value:** Replaces a 3-step loop (run cargo → parse text → read file) with a single
+**Value:** Replaces a 3-step loop (run cargo, parse the text, read the file) with a single
 structured response that's already mapped to graph nodes. The biggest single Bash : tracedecay
 gap by raw count. Affected-set scoping turns 30-second full builds into sub-second
 incremental checks during refactor cycles.
@@ -216,8 +216,8 @@ signature shape, return types, parameter types, generic bounds, attributes.
 **Returns:** Matching symbols with `file`, `line`, `signature`, `kind`, and the matched
 sub-pattern. Implementation can reuse the AST matcher already feeding `tracedecay_ast_grep_rewrite`.
 
-**Value:** Unlocks signature-based refactoring questions that currently force a grep
-+ manual filter. The volume is smaller than the symbol-skeleton greps, but the token cost is
+**Value:** Answers signature-based refactoring questions that currently force a grep
+and a manual filter. The volume is smaller than the symbol-skeleton greps, but the token cost is
 high when it does come up. A single signature query can replace dozens of file Reads.
 
 ---
@@ -376,7 +376,7 @@ case-insensitively. Default limit is 200, max 2000.
 
 ---
 
-## Notes / Prioritization
+## Notes / prioritization
 
 Observed across all projects (tracedecay + claurst + bruto-pascal + amexx + others). The
 `Evidence` column shows raw count of the workaround pattern from the 2026-05-04 telemetry

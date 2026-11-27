@@ -1,4 +1,4 @@
-# TraceDecay V2 Root and Fresh-Store Reset
+# TraceDecay V2 root and fresh-store reset
 
 ## Status / role
 

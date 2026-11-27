@@ -1,4 +1,4 @@
-# Domain Symbol Extractors
+# Domain symbol extractors
 
 > **Status: design, not implemented.** No code reads
 > `.tracedecay/domain-symbols.toml` or `~/.tracedecay/domain-packs/`, and there

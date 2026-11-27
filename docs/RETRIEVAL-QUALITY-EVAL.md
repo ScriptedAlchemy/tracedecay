@@ -171,7 +171,7 @@ current binary before citing exact scores again.
   `project_memory_tokens` / the holographic tokenizer still key on the exact
   lowercased surface string. The new prefix-wildcarding and coverage-prefix
   matching (§1) now cover the common case of one token being a literal prefix
-  of another (`install` → `installing`), but not compound/word-order
+  of another (`install` and `installing`), but not compound/word-order
   differences (`backup` vs. `back up`) or non-suffix inflection.
 - **Trust remains a hard multiplicative gate.** `score = relevance * trust *
   temporal_decay * usage_boost`, a low-trust, on-topic fact still needs a

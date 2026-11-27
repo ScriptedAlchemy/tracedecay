@@ -63,7 +63,7 @@ has the full map.
   `storage_kind IN ('inline','external')` (`schema.rs:381-419`).
 - **Write order is not atomic with the DB transaction.** `SessionStoreAccess::lcm_ingest_raw_message`
   (`crates/tracedecay-sessions/src/runtime/store_access/lcm.rs:606-625`) stages the raw
-  message and writes its external file (`crates/tracedecay-lcm/src/raw.rs:827-868` →
+  message and writes its external file (`crates/tracedecay-lcm/src/raw.rs:827-868`, which calls
   `crates/tracedecay-lcm/src/payload.rs:112`) before opening the write transaction.
   `commit_staged_raw_message` then writes the metadata row (`raw.rs:894`) and raw row
   (`raw.rs:895`). The same stage-then-commit order is wrapped by
@@ -140,7 +140,7 @@ different message gets a different ref. Compression-boundary carry-over reassign
 (`reassign_session_payloads`) without moving files, refs are stable across session rotation.
 
 Rationale: the current schema already encodes this and the read path already trusts it. Adding
-a raw→payload FK now would reject legitimate transient states (orphan files from a crashed
+a foreign key from raw rows to payloads now would reject legitimate transient states (orphan files from a crashed
 ingest, unreferenced metadata from inline-conversion) that GC is responsible for reconciling.
 The contract treats those transients as first-class states instead of constraint violations.
 
@@ -202,7 +202,7 @@ a payload; Doctor never invokes it.
 
 Rationale: deleting the file *before* the DB transaction commits would destroy body bytes the
 transaction might still roll back to need, unrecoverable data loss. Deleting the DB row first
-means a crash in the commit→file-remove window leaves an **orphan file** (safe; GC reaps it
+means a crash in the window between commit and file remove leaves an **orphan file** (safe; GC reaps it
 later) rather than a missing file behind a live reference (unsafe; expand would fail). This is
 the inverse of the ingest order (file before row) and is chosen for the same crash-safety
 reason: always err toward leaving an orphan file, never toward losing referenced data.
@@ -247,7 +247,7 @@ least the grace period.
 change in v1:
 
 - **Orphan files** (no metadata row): by file `mtime`/`ctime`. Reap only files older than the
-  grace period. This bounds the ingest-crash and commit→remove windows automatically.
+  grace period. This bounds the ingest-crash window and the window between commit and remove automatically.
 - **Unreferenced metadata** (row present, no references): by the **two-scan rule**. GC marks a
   ref as a candidate on pass N and reaps it on pass N+1 only if it is *still* unreferenced,
   with the two passes separated by ≥ the grace period. This needs no new column.
@@ -279,7 +279,7 @@ investigate before the reference is tombstoned.
 ## 8. Idempotency requirements
 
 - **Write** (`write_external_payload`): already idempotent, `create_new` + same-bytes accepted,
-  different bytes → `PayloadIntegrityMismatch` (`payload.rs:405-437`). Re-ingest of identical
+  and different bytes return `PayloadIntegrityMismatch` (`payload.rs:405-437`). Re-ingest of identical
   content is a no-op file write. **Keep this invariant.**
 - **Upsert**: `upsert_payload_metadata` and `upsert_*_raw_message` are `ON CONFLICT … DO UPDATE`
   and safe to replay.
