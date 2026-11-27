@@ -551,7 +551,7 @@ mod profile_identity_refusal_tests {
         let wire = warming_refusal(
             json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string(),
         );
-        assert!(wire.is_empty());
+        assert_eq!(wire, "");
     }
 }
 
