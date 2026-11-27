@@ -1033,6 +1033,7 @@ impl DaemonWorkRuntimeRegistrar {
         }
     }
 
+    #[tracing::instrument(name = "daemon.service.work.register", level = "trace", skip_all)]
     pub async fn register(
         &self,
         project_root: PathBuf,

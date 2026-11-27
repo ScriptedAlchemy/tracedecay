@@ -177,6 +177,11 @@ async fn run_recovery(
     .await;
 }
 
+#[tracing::instrument(
+    name = "daemon.service.work.recover_blocked_intervals",
+    level = "trace",
+    skip_all
+)]
 async fn recover_once(
     database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     context: RequestContext,

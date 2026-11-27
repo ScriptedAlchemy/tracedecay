@@ -236,6 +236,88 @@ first refusal with its typed problem, so every safety check stays.
 Synthesis". Pause, resume, cancel, retry, and adjudication stay available as
 advanced operations.
 
+## Default footprint and durable ownership
+
+Issue #4223 asked whether Work and workflow cost an ordinary project open,
+and whether their task, attempt, projection, and effect state has one owner
+each. The brief for this pass named `crates/tracedecay/src/daemon/project_composition/runtime.rs`
+as the place Work and workflow "attach unconditionally". That premise is
+false, and the measurement below was taken before any behavior was changed.
+
+**Where attach actually happens.** `runtime.rs` attaches Work and workflow
+only inside its own tests. In production, `RegisteredWorkApplicationServicesV1::attach`
+and `RegisteredWorkflowApplicationServicesV1::attach` (`crates/tracedecay-application/src/work/registered.rs`)
+are called per request from the daemon invocation surface, and the only
+project-open path is `DaemonWorkRuntimeRegistrar::register` (`crates/tracedecay-daemon-service/src/invocation/registrars.rs`),
+which spawns three recovery owners. Each owner runs one restart scan
+immediately, then waits for a durable-write signal.
+
+**Instrumentation.** None of those boundaries had a span, so the cost was
+invisible under `TRACEDECAY_SPAN_TIMINGS=1`. This change adds
+`daemon.service.work.register`, `application.work.attach`,
+`application.workflow.attach`, and one span per recovery scan
+(`daemon.service.work.recover_blocked_intervals`,
+`daemon.service.workflow.recover_census`,
+`daemon.service.workflow.recover_fan_out_startup`,
+`daemon.service.workflow.reconcile_fan_out_page`).
+
+**Measurement.** One fresh `tracedecay daemon run` per trial under a
+throwaway HOME and profile, a one-file Git project, `tracedecay init` run
+from the project, then `tracedecay work views` and `tracedecay work
+topology` through the CLI. `RUST_LOG=info,tracedecay_daemon_service::invocation=trace,tracedecay_application::work=trace`
+and `TRACEDECAY_SPAN_TIMINGS=1`. darwin_arm64 fastbuild, host otherwise
+loaded by concurrent builds, so the spread is wide and the medians are the
+numbers to read.
+
+| Boundary | n | median | range |
+| --- | --- | --- | --- |
+| Project open to `session_capabilities_published` | 5 | 566 ms | 521 to 618 ms |
+| `daemon.service.work.register` (the attach at open) | 9 | 100 µs | 95 to 256 µs |
+| Three initial recovery scans, summed, concurrent with the open tail | 4 | 1.0 ms | 0.5 to 11 ms |
+| `application.work.attach` inside one Work request | 10 | 30 µs | 25 to 37 µs |
+| One Work request (`daemon.service.work.dispatch`) | 10 | 162 µs | 113 to 272 µs |
+
+Attach is about 0.02% of project open. The recovery scans begin when
+`work.register` closes and finish 2 to 9 ms later, while the open itself
+runs another 37 to 40 ms to `http_application_mounted`, so they never extend
+it. The 11 ms trial is scan scheduling on a loaded host, not attach cost, and
+it is off the critical path either way. Inside a Work request, attach is 19%
+of a 162 µs request, which is 30 µs of handle clones per call.
+
+**Decision: no de-overlap change.** The cost is noise, so behavior is
+retained and this change lands instrumentation and evidence only. Deferring
+the recovery owners would save nothing an operator can observe and would
+delay recovery of settled receipts after a restart.
+
+**Durable ownership.** Each row below has exactly one writer, named from
+current code. Every derived row is written in the same writer transaction as
+the event it derives from and carries that event's digest, so a derived view
+cannot disagree silently with its source.
+
+| Datum | Canonical owner | Writer |
+| --- | --- | --- |
+| Task, plan, milestone, initiative, relation | `work_product_events_v1` journal; `WorkProductGraphV1` is its fold | `work_product/events.rs` `insert_event` |
+| Graph checkpoint and version | Cache of an immutable journal prefix, digest-verified against the event it covers | `work_product/publication.rs`, same transaction as the event |
+| Attempt | `work_attempts_v1` | `work_attempt.rs` `insert_attempt_row`; retry path `work/retry.rs` `insert_attempt` |
+| Run control | `work_run_controls_v1` | `work_run_control.rs` `publish_run_control_tx` |
+| Blocked interval | `work_blocked_intervals_v1` | `work_run_control.rs` `persist_blocked_intervals` |
+| Placement | `work_placements_v1` | `work_placement.rs` `publish_placement_tx` |
+| Retry receipt | `work_retry_receipts_v1` | `work/retry.rs` `insert_receipt`, same transaction as the retried attempt |
+| Workflow definition | `workflow_definition_source_journal` | `workflow.rs` `insert` |
+| Workflow run | `workflow_run_journal` | `workflow/run_journal.rs` `append_in_transaction` |
+| Workflow effect | `workflow_effect_journal` | `workflow.rs` `reserve_effect` then `execute_effect`, one transaction |
+| Workflow topology | Projection of a definition; generation id is a digest of definition and projector revision | `workflow_topology.rs` `publish_from_definition` |
+| Fan-out census | `workflow_fan_out_census_journal` | `workflow/census.rs` `persist_census_tx` |
+
+The graph model and the workflow topology projection do not overlap as
+authorities. The graph owns task hierarchy, proposals, acceptance, and
+handoffs. The topology is a read projection of one workflow definition whose
+identity is a digest of that definition, so it is reproducible from its
+source and holds no independent state. A safe retry coordinates attempt
+state, graph linkage, the retry receipt, and the workflow child rebind in one
+writer transaction (`RegisteredWorkProductServicesV1::retry_attempt`), which
+is the correct shape for one atomic effect and not duplication.
+
 ## Retained behavior
 
 Nothing in this record removes or weakens: task and definition histories,
