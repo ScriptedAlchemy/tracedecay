@@ -542,6 +542,9 @@ pub async fn backlog_drain_read_per_message(
     database.release_connection_memory().await.unwrap();
     let before = StoreReadWork::sample(database);
     let projected = drain(facade, scope).await;
+    // Commit replies precede scheduled checkpoints. Join the normal writer
+    // checkpoint lane so the final sample includes that maintenance too.
+    database.checkpoint_result().await.unwrap();
     let after = StoreReadWork::sample(database);
     let mut work = StoreReadWork::default();
     work.add_interval(&before, &after);
@@ -643,12 +646,16 @@ pub async fn ingest_live_messages_after_wal_restart(
     let timestamp = SEED_TIMESTAMP + 10_000_000 + i64::try_from(padding.next_ordinal).unwrap();
     advance_to_wal_restart(facade, fixture, padding, timestamp).await;
     assert_eq!(refresh_until_idle(database, refresh).await, 1);
+    // Join setup maintenance before the interval, and the last writer's
+    // scheduled checkpoint before checking it. Per-phase samples alone can
+    // miss a checkpoint that completes after the final commit reply.
+    database.checkpoint_result().await.unwrap();
+    let checkpointed = writer_telemetry(database).wal.checkpointed_frames;
     let work = ingest_live_messages(facade, fixture, database, refresh, cursor, count).await;
+    database.checkpoint_result().await.unwrap();
     assert_eq!(
-        work.capture.checkpointed_frames
-            + work.drain.checkpointed_frames
-            + work.refresh.checkpointed_frames,
-        0,
+        writer_telemetry(database).wal.checkpointed_frames,
+        checkpointed,
         "the live ingest comparison must not include a periodic checkpoint: {work:?}"
     );
     work
