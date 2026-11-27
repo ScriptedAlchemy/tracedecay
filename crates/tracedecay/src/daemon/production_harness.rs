@@ -1401,27 +1401,6 @@ impl Drop for ProductionProjectCompositionHarnessV1 {
 }
 
 async fn shutdown_production_project_harness(mut resources: ProductionProjectHarnessResourcesV1) {
-    // Hosted dashboards survive individual server retirement (including the
-    // Core-to-Full remount), so the composition owner must stop its project
-    // listeners before releasing the invocation and store authorities they
-    // retain. Other isolated compositions keep their own dashboards.
-    let dashboard_deadline =
-        std::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
-    for project_root in resources.servers.keys() {
-        if let Err(error) = crate::mcp::tools::handlers::dashboard::shutdown_dashboard_for_until(
-            project_root,
-            dashboard_deadline,
-        )
-        .await
-        {
-            tracing::warn!(
-                event = "production_harness_dashboard_shutdown_failed",
-                project = %project_root.display(),
-                %error,
-                "production-composition dashboard did not stop cleanly"
-            );
-        }
-    }
     #[cfg(unix)]
     if let Err(reason) = resources
         .store_administration

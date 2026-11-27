@@ -3715,21 +3715,30 @@ async fn production_composition_dashboard_persists_project_settings_over_http() 
         assert_eq!(unchanged["project"]["config"]["track_call_sites"], true);
     })
     .await;
-    // The harness owns its hosted dashboard alongside its project servers.
-    // Join it before reporting an HTTP assertion failure or releasing the
-    // stores, so a failed journey cannot leak process-global serving state.
+    // This fixture created the dashboard on its unique project root. Stop
+    // that listener before retiring the composition, even when an HTTP
+    // assertion failed; generic harness cleanup cannot claim every dashboard
+    // sharing a root. Report both results only after the stores are released.
+    let stopped = harness
+        .call_tool(
+            &project,
+            "tracedecay_dashboard",
+            json!({"action": "stop", "format": "json"}),
+        )
+        .await;
     harness.shutdown().await;
     let still_serving = tokio::task::spawn_blocking(move || {
         std::net::TcpStream::connect_timeout(&dashboard_addr, std::time::Duration::from_secs(4))
             .is_ok()
     })
-    .await
-    .expect("probe joined dashboard listener");
+    .await;
+    assertions.expect("dashboard HTTP assertions");
+    stopped.expect("stop production dashboard");
+    let still_serving = still_serving.expect("probe joined dashboard listener");
     assert!(
         !still_serving,
-        "harness shutdown must join its hosted dashboard before releasing its stores"
+        "the fixture must join its hosted dashboard before releasing its stores"
     );
-    assertions.expect("dashboard HTTP assertions");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

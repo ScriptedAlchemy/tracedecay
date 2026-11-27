@@ -1,10 +1,11 @@
 use std::sync::Arc;
+use std::task::Poll;
 
 use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 
 use super::{
-    DASHBOARD_TEST_LOCK, DashboardTaskCompletion, RunningDashboard, get_manager,
-    shutdown_dashboard_for_until, shutdown_dashboard_until,
+    DASHBOARD_TEST_LOCK, DashboardTaskCompletion, RunningDashboard, get_manager, join_dashboard,
+    shutdown_dashboard_for_until, shutdown_dashboard_until, take_finished_dashboard_for,
 };
 
 fn native_task(work: impl Future<Output = ()> + Send + 'static) -> Arc<NativeTask<()>> {
@@ -93,6 +94,109 @@ async fn shutdown_observes_a_completion_signalled_before_the_stop_began() {
     .expect("a stop that begins after the completion signal must not miss it");
 
     assert!(get_manager().lock().await.is_empty());
+}
+
+/// A stop that already selected the old task must not follow the root's slot
+/// to a replacement installed by a concurrent start.
+#[tokio::test]
+async fn a_suspended_stop_joins_its_original_task_and_preserves_a_replacement() {
+    let _guard = DASHBOARD_TEST_LOCK.lock().await;
+    let project_root = std::path::PathBuf::from("/dashboard-test/replaced-during-stop");
+    let (shutdown, shutdown_requested) = tokio::sync::oneshot::channel();
+    let (shutdown_seen, observe_shutdown) = tokio::sync::oneshot::channel();
+    let (finish, finish_requested) = tokio::sync::oneshot::channel();
+    let completed = Arc::new(tokio::sync::Semaphore::new(0));
+    let completion = DashboardTaskCompletion(Arc::clone(&completed));
+    let task = native_task(async move {
+        let _completion = completion;
+        let _ = shutdown_requested.await;
+        let _ = shutdown_seen.send(());
+        let _ = finish_requested.await;
+    });
+    get_manager().lock().await.insert(
+        project_root.clone(),
+        RunningDashboard {
+            url: "http://127.0.0.1:0/".to_owned(),
+            addr: "127.0.0.1:0".parse().expect("socket addr"),
+            shutdown: Some(shutdown),
+            task,
+            completed: Arc::clone(&completed),
+        },
+    );
+    let mut stopping = Box::pin(shutdown_dashboard_for_until(
+        &project_root,
+        std::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
+    ));
+    tokio::select! {
+        result = stopping.as_mut() => {
+            panic!("the old task remains held until the fixture releases it: {result:?}");
+        }
+        requested = observe_shutdown => requested.expect("stop selected the old task"),
+    }
+
+    // Leave the stop unpolled while the old task finishes. Exercise the same
+    // reap/join steps that Start performs before installing a new dashboard.
+    finish.send(()).expect("release old task");
+    let _ = completed.acquire().await;
+    let finished = take_finished_dashboard_for(&project_root)
+        .await
+        .expect("a concurrent start can reap the old completed task");
+    join_dashboard(finished.addr, finished.task.as_ref(), false)
+        .await
+        .expect("old task joined");
+    drop(finished);
+
+    let (shutdown, shutdown_requested) = tokio::sync::oneshot::channel();
+    let replacement_completed = Arc::new(tokio::sync::Semaphore::new(0));
+    let completion = DashboardTaskCompletion(Arc::clone(&replacement_completed));
+    let replacement_task = native_task(async move {
+        let _completion = completion;
+        let _ = shutdown_requested.await;
+    });
+    get_manager().lock().await.insert(
+        project_root.clone(),
+        RunningDashboard {
+            url: "http://127.0.0.1:0/".to_owned(),
+            addr: "127.0.0.1:0".parse().expect("socket addr"),
+            shutdown: Some(shutdown),
+            task: Arc::clone(&replacement_task),
+            completed: Arc::clone(&replacement_completed),
+        },
+    );
+
+    // The old task has already joined and the manager lock is free, so one
+    // poll must complete. Following the replacement instead would park here;
+    // no timing sleep or deadline expiry is needed to expose that regression.
+    let stopped = std::future::poll_fn(|cx| Poll::Ready(stopping.as_mut().poll(cx))).await;
+    let replacement_retained = get_manager()
+        .lock()
+        .await
+        .get(&project_root)
+        .is_some_and(|dashboard| Arc::ptr_eq(&dashboard.task, &replacement_task));
+    let replacement_running = !replacement_completed.is_closed() && !replacement_task.is_finished();
+    drop(stopping);
+
+    // Drain the fixture before checking the old stop's result, including when
+    // this test is run against an implementation that follows the replacement.
+    let cleanup = shutdown_dashboard_for_until(
+        &project_root,
+        std::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
+    )
+    .await;
+    cleanup.expect("replacement task joined");
+    assert!(get_manager().lock().await.is_empty());
+    assert!(
+        matches!(&stopped, Poll::Ready(Ok(()))),
+        "the old stop must join only its already completed task: {stopped:?}"
+    );
+    assert!(
+        replacement_retained,
+        "the replacement must retain its manager slot"
+    );
+    assert!(
+        replacement_running,
+        "the old stop must leave the replacement serving"
+    );
 }
 
 /// The daemon coordinator drops the hosted-dashboard join at its phase

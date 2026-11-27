@@ -574,9 +574,13 @@ async fn take_finished_dashboard_for(project_root: &Path) -> Option<RunningDashb
     }
 }
 
-async fn join_dashboard(dashboard: RunningDashboard, exceeded_deadline: bool) -> Result<()> {
-    let url = format!("http://{}/", dashboard.addr);
-    match dashboard.task.wait().await {
+async fn join_dashboard(
+    addr: std::net::SocketAddr,
+    task: &NativeTask<()>,
+    exceeded_deadline: bool,
+) -> Result<()> {
+    let url = format!("http://{addr}/");
+    match task.wait().await {
         NativeTaskOutcome::Completed(()) if !exceeded_deadline => Ok(()),
         NativeTaskOutcome::Completed(()) => Err(TraceDecayError::Config {
             message: format!("dashboard '{url}' exceeded its shutdown deadline"),
@@ -600,30 +604,24 @@ pub(crate) async fn shutdown_dashboard_for_until(
     project_root: &Path,
     deadline: std::time::Instant,
 ) -> Result<()> {
-    {
+    let (addr, task, completed) = {
         let mut manager = get_manager().lock().await;
         let Some(dashboard) = manager.get_mut(project_root) else {
             return Ok(());
         };
         dashboard.request_shutdown();
-    }
+        (
+            dashboard.addr,
+            Arc::clone(&dashboard.task),
+            Arc::clone(&dashboard.completed),
+        )
+    };
 
+    // A concurrent start can reap this completed dashboard and install a
+    // replacement while this stop is suspended. Wait, abort, and join only
+    // the captured task; the retained Arc also prevents identity reuse.
     let mut exceeded_deadline = false;
-    loop {
-        if let Some(dashboard) = take_finished_dashboard_for(project_root).await {
-            return join_dashboard(dashboard, exceeded_deadline).await;
-        }
-        let completed = {
-            let manager = get_manager().lock().await;
-            let Some(dashboard) = manager.get(project_root) else {
-                return Ok(());
-            };
-            Arc::clone(&dashboard.completed)
-        };
-        if exceeded_deadline {
-            let _ = completed.acquire().await;
-            continue;
-        }
+    if !completed.is_closed() {
         tokio::select! {
             biased;
             _ = completed.acquire() => {}
@@ -633,14 +631,22 @@ pub(crate) async fn shutdown_dashboard_for_until(
                 if let Err(error) = fired {
                     tracing::warn!(%error, "dashboard stop deadline timer unavailable");
                 }
-                let mut manager = get_manager().lock().await;
-                if let Some(dashboard) = manager.get_mut(project_root) {
-                    dashboard.task.abort();
-                }
+                task.abort();
                 exceeded_deadline = true;
+                let _ = completed.acquire().await;
             }
         }
     }
+    {
+        let mut manager = get_manager().lock().await;
+        if manager
+            .get(project_root)
+            .is_some_and(|dashboard| Arc::ptr_eq(&dashboard.task, &task))
+        {
+            manager.remove(project_root);
+        }
+    }
+    join_dashboard(addr, task.as_ref(), exceeded_deadline).await
 }
 
 pub(crate) async fn shutdown_dashboard_for(project_root: &Path) -> Result<()> {
@@ -880,7 +886,7 @@ pub(super) async fn compute_dashboard(
                         ),
                     })?;
             if let Some(finished) = take_finished_dashboard_for(&requested_root).await {
-                join_dashboard(finished, false).await?;
+                join_dashboard(finished.addr, finished.task.as_ref(), false).await?;
             }
             let host = request
                 .host
