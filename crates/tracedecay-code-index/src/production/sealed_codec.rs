@@ -59,8 +59,8 @@ use super::*;
 /// Revision 24 stores all logical payloads in the two self-contained pack
 /// roles authenticated by the manifest's extent map.
 /// Revision 25 lets a successor reference the immutable packs of its parent
-/// for the extents it carries unchanged, so a one-file edit writes only its
-/// own bytes instead of re-materializing the whole generation.
+/// for unchanged extents. It writes new extents plus the still-required
+/// extents of any inherited pack folded to keep the pack count bounded.
 pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 25;
 
 /// The typed refusal for a sealed generation this build no longer reads.

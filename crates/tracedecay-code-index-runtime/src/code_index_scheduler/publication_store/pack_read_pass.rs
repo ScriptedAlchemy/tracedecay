@@ -88,6 +88,10 @@ pub(super) struct GenerationPackReadPassV1 {
 }
 
 impl GenerationPackReadPassV1 {
+    pub(super) fn handle_storage_bytes(packs: usize) -> usize {
+        std::mem::size_of::<PinnedPackV1>().saturating_mul(packs)
+    }
+
     /// The ordinary path/string allowance is already admitted by the caller.
     /// Add both native lease bounds before either ancestor vector or UTF-16
     /// buffer is allocated. The first retained owner can coexist with the
@@ -250,28 +254,33 @@ impl GenerationPackReadPassV1 {
         self.failed
     }
 
-    /// The canonical pathname and admitted inode identity of every pinned
-    /// pack. A preparation that inherits a parent's packs records these as
-    /// its own authenticated witnesses, so commit rechecks them by identity
-    /// instead of re-hashing bytes the parent already proved.
-    #[cfg(unix)]
-    pub(super) fn admitted_identities(&self) -> impl Iterator<Item = (&Path, &std::fs::Metadata)> {
+    /// A bound parent's identity must remain unchanged even when a successor
+    /// inherits its extents without reading them during preparation.
+    pub(super) fn revalidate(&self) -> Result<(), CodeIndexProductionErrorV1> {
+        if self.failed {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation pack read pass was invalidated".to_owned(),
+            ));
+        }
         self.packs
             .iter()
-            .map(|pack| (pack.path.as_path(), &pack.segment.admitted_metadata))
+            .try_for_each(PinnedPackV1::require_unchanged)
     }
 
     pub(super) fn retained_heap_bytes(&self) -> usize {
-        self.packs.iter().fold(0_usize, |bytes, pack| {
-            #[cfg(windows)]
-            let bytes = bytes.saturating_add(match &pack.segment.file {
-                PinnedGenerationFileV1::Shared(_) => 0,
-                PinnedGenerationFileV1::Immutable(owner) => owner.retained_heap_bytes(),
-            });
-            bytes
-                .saturating_add(pack.segment.digest.capacity())
-                .saturating_add(pack.path.capacity())
-        })
+        self.packs.iter().fold(
+            Self::handle_storage_bytes(self.packs.capacity()),
+            |bytes, pack| {
+                #[cfg(windows)]
+                let bytes = bytes.saturating_add(match &pack.segment.file {
+                    PinnedGenerationFileV1::Shared(_) => 0,
+                    PinnedGenerationFileV1::Immutable(owner) => owner.retained_heap_bytes(),
+                });
+                bytes
+                    .saturating_add(pack.segment.digest.capacity())
+                    .saturating_add(pack.path.capacity())
+            },
+        )
     }
 
     pub(super) fn read(

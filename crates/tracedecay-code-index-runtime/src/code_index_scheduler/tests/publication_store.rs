@@ -63,9 +63,10 @@ use tracedecay_code_index::production::{
     CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1,
     CodeIndexInterruptionV1, CodeIndexPreparationPort, CodeIndexProductionErrorV1,
     CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-    DAEMON_CODE_INDEX_CHUNKER_REVISION, SEALED_GENERATION_FORMAT_REVISION_V1,
-    SealedGenerationPackLayoutV1, SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
-    UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
+    DAEMON_CODE_INDEX_CHUNKER_REVISION, MAX_SEALED_GENERATION_CONTENT_PACKS_V1,
+    SEALED_GENERATION_FORMAT_REVISION_V1, SealedGenerationPackLayoutV1,
+    SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1, UninterruptibleCodeIndexControlV1,
+    VerifiedSealedLexicalPageReadV1,
 };
 
 struct PublicationFixture {
@@ -2404,6 +2405,333 @@ fn retention_reclaims_a_superseded_pack_only_once_no_live_successor_needs_it() {
             .is_some(),
         "the live cold rebuild must remain readable"
     );
+}
+
+#[test]
+fn bounded_pack_compaction_drops_deleted_and_superseded_extents() {
+    // Each newly written pack keeps three independently addressable files.
+    // At the bound, deleting one and editing another still leaves that pack
+    // needed, so the next publication must fold it rather than just drop it.
+    let files = (0..MAX_SEALED_GENERATION_CONTENT_PACKS_V1 * 3)
+        .map(|index| {
+            (
+                format!("src/item_{index:02}.rs"),
+                format!("pub fn item_{index}() -> usize {{ 0 }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let fixture_files = files
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&fixture_files);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let active_manifest = || {
+        let pointer = active_pointer(store.path());
+        std::fs::read(
+            store
+                .path()
+                .join("code-generations-v1")
+                .join(pointer.generation_file),
+        )
+        .expect("active manifest")
+    };
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("publish the cold generation"),
+    );
+    for batch in 0..MAX_SEALED_GENERATION_CONTENT_PACKS_V1 - 1 {
+        let mut changed = Vec::new();
+        for (index, (path, _)) in files.iter().enumerate().skip(batch * 3).take(3) {
+            fixture.edit(path, &format!("pub fn item_{index}() -> usize {{ 1 }}\n"));
+            changed.push(PathBuf::from(path));
+        }
+        scheduler.notify_hook_paths(changed);
+        published(
+            scheduler
+                .reconcile_now()
+                .expect("publish disjoint file edits"),
+        );
+        let layout = SealedGenerationPackLayoutV1::open(&active_manifest())
+            .expect("canonical intermediate pack layout");
+        assert_eq!(
+            layout.content_packs().packs.len(),
+            batch + 2,
+            "each disjoint edit retains the earlier live packs and adds one"
+        );
+    }
+
+    let parent_bytes = active_manifest();
+    let parent_layout =
+        SealedGenerationPackLayoutV1::open(&parent_bytes).expect("canonical parent layout");
+    let folded = &parent_layout.content_packs().packs[0];
+    let parent_manifest: serde_json::Value =
+        serde_json::from_slice(&parent_bytes).expect("parent manifest JSON");
+    let parent_files = parent_manifest["generation"]["snapshot"]["files"]
+        .as_array()
+        .expect("parent snapshot files");
+    let candidates = parent_manifest["generation"]["file_segments"]
+        .as_array()
+        .expect("parent file segments")
+        .iter()
+        .filter_map(|segment| {
+            let digest =
+                ManifestDigest::new(segment["segment_digest"].as_str().expect("file digest"))
+                    .expect("file digest identity");
+            let size_bytes = segment["segment_size_bytes"].as_u64().expect("file size");
+            let resolved = parent_layout
+                .resolve(SealedGenerationSegmentReadV1::Whole {
+                    digest: &digest,
+                    size_bytes,
+                })
+                .expect("current file resolves through its parent");
+            let SealedGenerationSegmentReadV1::Range {
+                digest: physical, ..
+            } = resolved
+            else {
+                panic!("a file segment must resolve into a physical pack");
+            };
+            if physical != &folded.digest {
+                return None;
+            }
+            let key = usize::try_from(segment["file_key"].as_u64().expect("file key"))
+                .expect("file key fits usize");
+            Some((
+                parent_files[key]["logical_path"]
+                    .as_str()
+                    .expect("logical path")
+                    .to_owned(),
+                digest,
+                size_bytes,
+            ))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        candidates.len() >= 3,
+        "the pack selected for folding must retain a live file after deletion and edit"
+    );
+    let (deleted_path, deleted_digest, deleted_size) = &candidates[0];
+    let (edited_path, edited_digest, edited_size) = &candidates[1];
+    let (carried_path, carried_digest, carried_size) = &candidates[2];
+    fixture.remove(deleted_path);
+    fixture.edit(edited_path, "pub fn compacted_edit() -> usize { 2 }\n");
+    scheduler.notify_hook_paths([PathBuf::from(deleted_path), PathBuf::from(edited_path)]);
+    let compacted = published(
+        scheduler
+            .reconcile_now()
+            .expect("publish the bounded compaction with deletion and edit"),
+    )
+    .generation_id;
+    let compacted_bytes = active_manifest();
+    let compacted_layout =
+        SealedGenerationPackLayoutV1::open(&compacted_bytes).expect("canonical compacted layout");
+    assert_eq!(
+        compacted_layout.content_packs().packs.len(),
+        MAX_SEALED_GENERATION_CONTENT_PACKS_V1
+    );
+    assert!(
+        !compacted_layout
+            .content_packs()
+            .packs
+            .iter()
+            .any(|pack| pack.digest == folded.digest),
+        "the overflowing successor must replace the selected inherited pack"
+    );
+    for (digest, size_bytes) in [
+        (deleted_digest, *deleted_size),
+        (edited_digest, *edited_size),
+    ] {
+        assert!(
+            compacted_layout.content_packs().locate(digest).is_none(),
+            "compaction must not copy obsolete extent {digest} into its new pack"
+        );
+        assert!(
+            compacted_layout
+                .resolve(SealedGenerationSegmentReadV1::Whole { digest, size_bytes })
+                .is_err(),
+            "an obsolete extent must no longer be addressable after compaction"
+        );
+    }
+    assert!(
+        compacted_layout
+            .resolve(SealedGenerationSegmentReadV1::Whole {
+                digest: carried_digest,
+                size_bytes: *carried_size,
+            })
+            .is_ok(),
+        "the carried file must survive compaction of its physical pack"
+    );
+    let compacted_manifest: serde_json::Value =
+        serde_json::from_slice(&compacted_bytes).expect("compacted manifest JSON");
+    let current_paths = compacted_manifest["generation"]["snapshot"]["files"]
+        .as_array()
+        .expect("compacted snapshot files")
+        .iter()
+        .map(|file| file["logical_path"].as_str().expect("logical path"))
+        .collect::<BTreeSet<_>>();
+    assert!(!current_paths.contains(deleted_path.as_str()));
+    assert!(current_paths.contains(edited_path.as_str()));
+    assert!(current_paths.contains(carried_path.as_str()));
+
+    let folded_path = store
+        .path()
+        .join("code-generation-segments-v1")
+        .join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(folded.digest.as_str()).expect("physical pack digest")
+        ));
+    assert!(
+        folded_path.is_file(),
+        "superseded manifests still retain the old pack"
+    );
+    drop(scheduler);
+    let report = run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(20_000),
+        None,
+    )
+    .expect("collect the superseded generations and folded pack");
+    assert!(!report.deleted_generations.is_empty());
+    assert!(!folded_path.exists(), "the folded pack is no longer live");
+    let reopened = opened_publication(&fixture, store.path());
+    assert!(
+        reopened
+            .load_generation(&compacted)
+            .expect("cold read verifies all compacted and inherited packs")
+            .is_some(),
+        "the compacted generation survives a cold reopen after retention"
+    );
+}
+
+// Unix permits the same-length rewrite after binding that must invalidate an
+// inode witness. Windows' retained immutable handles prevent that rewrite.
+#[cfg(unix)]
+#[test]
+fn inherited_pack_corruption_before_or_after_binding_cannot_publish() {
+    let fixture = GitFixture::new(&[
+        ("src/carried.rs", "pub fn carried() -> usize { 0 }\n"),
+        ("src/edited.rs", "pub fn edited() -> usize { 0 }\n"),
+    ]);
+    let source_root = TempDir::new().expect("source store");
+    let mut source = scheduler(
+        &fixture,
+        source_root.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(source.reconcile_now().expect("publish source parent"));
+    let parent = source
+        .latest_complete()
+        .expect("decoded source parent")
+        .generation;
+    let target_root = TempDir::new().expect("target store");
+    let mut target = opened_publication(&fixture, target_root.path());
+    publish_generation(&mut target, &parent, None).expect("publish target parent");
+    let sealed_parent = target
+        .load_active(&parent.sealed_scope())
+        .expect("load target parent metadata")
+        .expect("target parent is active");
+    let layout = SealedGenerationPackLayoutV1::open(sealed_parent.manifest_bytes())
+        .expect("canonical parent layout");
+    let pack = &layout.content_packs().packs[0];
+    let pack_path = code_generation_segments_root(target_root.path()).join(format!(
+        "segment-{}.json",
+        sha256_hex_suffix(pack.digest.as_str()).expect("parent pack digest")
+    ));
+    let original_bytes = std::fs::read(&pack_path).expect("parent pack bytes");
+    assert!(!original_bytes.is_empty());
+    let original_permissions = std::fs::metadata(&pack_path)
+        .expect("parent metadata")
+        .permissions();
+    let mut writable_permissions = original_permissions.clone();
+    #[allow(clippy::permissions_set_readonly_false)]
+    writable_permissions.set_readonly(false);
+    let mut corrupted_bytes = original_bytes.clone();
+    corrupted_bytes[0] ^= 1;
+    let corrupt_parent = || {
+        std::fs::set_permissions(&pack_path, writable_permissions.clone())
+            .expect("make fixture pack writable");
+        std::fs::write(&pack_path, &corrupted_bytes).expect("corrupt the inherited pack");
+        std::fs::set_permissions(&pack_path, original_permissions.clone())
+            .expect("restore immutable fixture permissions");
+    };
+    let parent_pointer = std::fs::read(target_root.path().join("active-code-generation-v1.json"))
+        .expect("exact parent pointer");
+
+    fixture.edit("src/edited.rs", "pub fn edited() -> usize { 1 }\n");
+    source.notify_hook_paths([PathBuf::from("src/edited.rs")]);
+    published(source.reconcile_now().expect("publish source child"));
+    let child = source
+        .latest_complete()
+        .expect("decoded source child")
+        .generation;
+    assert_eq!(
+        child.manifest().parent_generation.as_ref(),
+        Some(&parent.manifest().generation_id)
+    );
+    for before_bind in [true, false] {
+        let operation = target
+            .resident_memory_authority()
+            .expect("canonical process authority")
+            .begin_operation();
+        let mut preparation = target
+            .prepare(
+                &child.sealed_scope(),
+                Some(&parent.manifest().generation_id),
+                &operation,
+            )
+            .expect("prepare the actual successor");
+        if before_bind {
+            corrupt_parent();
+        }
+        preparation
+            .bind_parent(&sealed_parent)
+            .expect("bind the parent carrier");
+        let publication = child
+            .stage_publication(&mut preparation, &operation)
+            .expect("stage the successor before final physical authentication");
+        assert!(
+            publication
+                .pack_layout()
+                .content_packs()
+                .packs
+                .iter()
+                .any(|inherited| inherited.digest == pack.digest),
+            "the child must reference the corruptible parent pack"
+        );
+        if !before_bind {
+            corrupt_parent();
+        }
+        let error = target
+            .commit(&mut preparation, &publication)
+            .expect_err("an observed inode is not proof that its bytes match the parent digest");
+        assert!(
+            matches!(
+                error,
+                CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_)
+            ),
+            "corruption before_bind={before_bind} must retain its typed refusal: {error:?}"
+        );
+        preparation.abort().expect("abort the refused successor");
+        assert_eq!(
+            std::fs::read(target_root.path().join("active-code-generation-v1.json"))
+                .expect("parent pointer survives refusal"),
+            parent_pointer,
+            "corruption before_bind={before_bind} must not publish the child"
+        );
+        std::fs::set_permissions(&pack_path, writable_permissions.clone())
+            .expect("repair fixture permissions");
+        std::fs::write(&pack_path, &original_bytes).expect("repair fixture bytes");
+        std::fs::set_permissions(&pack_path, original_permissions.clone())
+            .expect("restore immutable fixture permissions");
+    }
 }
 
 #[test]

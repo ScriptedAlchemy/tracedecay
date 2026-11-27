@@ -1075,7 +1075,7 @@ impl<'a> GraphSegmentReadPassV1<'a> {
         Self {
             roots,
             max_handles,
-            pinned: Vec::new(),
+            pinned: Vec::with_capacity(max_handles),
             open_attempts: 0,
             open_wall_time: std::time::Duration::ZERO,
             reads: 0,
@@ -4594,46 +4594,56 @@ mod tests {
         };
         assert!(observed.contains("event=sealed_source_proof"));
         assert!(observed_field(&observed, "hashed_segments") > 0);
-        assert!(
-            observed_field(&observed, "reused_segments") > 0,
-            "the inherited pack's extents reuse the parent's completed witnesses"
-        );
-        assert!(
-            parent_witness_reads < cold_reads,
-            "the parent's completed witnesses cover only the inherited pack; the pack this \\
-             successor wrote is still authenticated ({parent_witness_reads} vs {cold_reads} reads)"
-        );
-        let pack_sizes = |manifest: &serde_json::Value| {
-            manifest["generation"]["content_packs"]["packs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|pack| pack["size_bytes"].as_u64().unwrap())
-                .collect::<Vec<_>>()
-        };
-        let parent_sizes = pack_sizes(&first_manifest);
-        let successor_sizes = pack_sizes(&successor);
-        let inherited_size = successor_sizes
+        if cfg!(unix) {
+            assert!(
+                observed_field(&observed, "reused_segments") > 0,
+                "the inherited pack's extents reuse the parent's completed witnesses"
+            );
+            assert!(
+                parent_witness_reads < cold_reads,
+                "the parent's completed witnesses cover only the inherited pack; the pack this \\
+                 successor wrote is still authenticated ({parent_witness_reads} vs {cold_reads} reads)"
+            );
+        } else {
+            assert_eq!(observed_field(&observed, "reused_segments"), 0);
+            assert_eq!(
+                parent_witness_reads, cold_reads,
+                "a platform without fingerprints must authenticate every pack again"
+            );
+        }
+        let successor_packs = successor["generation"]["content_packs"]["packs"]
+            .as_array()
+            .unwrap();
+        let inherited_size = successor_packs
             .iter()
-            .copied()
-            .filter(|size| parent_sizes.contains(size))
+            .filter(|pack| parent_pack_digests.contains(pack["digest"].as_str().unwrap()))
+            .map(|pack| pack["size_bytes"].as_u64().unwrap())
             .sum::<u64>();
-        let written_size = successor_sizes.iter().sum::<u64>() - inherited_size;
+        let content_size = successor_packs
+            .iter()
+            .map(|pack| pack["size_bytes"].as_u64().unwrap())
+            .sum::<u64>();
+        let written_size = content_size - inherited_size;
         let evidence_size = successor["generation"]["generation_evidence"]["segment_size_bytes"]
             .as_u64()
             .unwrap();
         assert!(written_size > 0 && inherited_size > 0 && evidence_size > 0);
-        let cold_bytes = observed_field(&observed, "range_bytes");
-        let cold_opens = observed_field(&observed, "pack_open_attempts");
+        let parent_witness_bytes = observed_field(&observed, "range_bytes");
+        let parent_witness_opens = observed_field(&observed, "pack_open_attempts");
+        let expected_content_bytes = if cfg!(unix) {
+            written_size
+        } else {
+            content_size
+        };
         assert_eq!(
             observed_field(&observed, "content_pack_bytes"),
-            written_size,
-            "the cold proof reads only the pack this successor wrote"
+            expected_content_bytes,
+            "only completed fingerprint witnesses can exclude inherited bytes from proof reads"
         );
-        assert_eq!(cold_bytes, written_size + evidence_size);
+        assert_eq!(parent_witness_bytes, expected_content_bytes + evidence_size);
         assert_eq!(
-            cold_opens,
-            payload_open_count(successor_sizes.len() + 1) as u64,
+            parent_witness_opens,
+            payload_open_count(successor_packs.len() + 1) as u64,
             "one open per addressed pack, including the inherited one"
         );
         let (successor_warm_reads, warm_observed) = trace_proof(&verified);
@@ -4641,19 +4651,20 @@ mod tests {
         let warm_opens = observed_field(&warm_observed, "pack_open_attempts");
         assert_eq!(
             observed_field(&warm_observed, "content_pack_bytes"),
-            if cfg!(unix) { 0 } else { written_size }
+            if cfg!(unix) { 0 } else { content_size }
         );
         assert_eq!(
             warm_bytes,
             if cfg!(unix) {
                 evidence_size
             } else {
-                cold_bytes
+                parent_witness_bytes
             }
         );
-        assert_eq!(warm_opens, cold_opens);
+        assert_eq!(warm_opens, parent_witness_opens);
         println!(
-            "successor payload: {cold_bytes} bytes / {cold_opens} pack opens; repeated proof: \
+            "successor proof with parent record: {parent_witness_bytes} bytes / \
+             {parent_witness_opens} pack opens; repeated proof: \
              {warm_bytes} bytes / {warm_opens} pack opens"
         );
         if cfg!(unix) {
@@ -4762,19 +4773,26 @@ mod tests {
             trace_proof(&VerifiedSealedSegmentsV1::default());
         let recovered_hashes = observed_field(&recovered_observed, "hashed_segments");
         let recovery_cold_hashes = observed_field(&recovery_cold_observed, "hashed_segments");
-        assert!(
-            recovery_cold_reads > recovered_reads,
-            "recovery with the parent's witnesses reads only the pack it repaired: \\
-             cold={recovery_cold_reads} recovered={recovered_reads}"
-        );
-        // A cold recovery proof re-hashes every extent the reset record no
-        // longer covers, so it hashes strictly more than the warm recovered
-        // proof, which still reuses the inherited pack's witnesses.
-        assert!(
-            recovery_cold_hashes > recovered_hashes,
-            "a cold recovery proof must re-hash the inherited extents the reset record dropped: \\
-             cold={recovery_cold_hashes} recovered={recovered_hashes}"
-        );
+        if cfg!(unix) {
+            assert!(
+                recovery_cold_reads > recovered_reads,
+                "recovery with the parent's witnesses reads only the pack it repaired: \\
+                 cold={recovery_cold_reads} recovered={recovered_reads}"
+            );
+            // A cold recovery proof re-hashes every extent the reset record
+            // no longer covers, including the inherited pack's extents.
+            assert!(
+                recovery_cold_hashes > recovered_hashes,
+                "a cold recovery proof must re-hash the inherited extents the reset record dropped: \\
+                 cold={recovery_cold_hashes} recovered={recovered_hashes}"
+            );
+        } else {
+            assert_eq!(recovery_cold_reads, recovered_reads);
+            assert_eq!(
+                recovery_cold_hashes, recovered_hashes,
+                "a platform without fingerprints must rehash the same extents after recovery"
+            );
+        }
 
         let inherited = successor["generation"]["file_segments"]
             .as_array_mut()

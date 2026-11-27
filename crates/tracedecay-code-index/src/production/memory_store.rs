@@ -1,7 +1,7 @@
 //! An in-memory sealed publication store.
 //!
 //! Benchmarks, evaluation tools, and tests publish through the same sealed
-//! format the daemon store writes: a content pack, a generation evidence
+//! format the daemon store writes: bounded content packs, a generation evidence
 //! pack, and each scope's active manifest. Logical segments exist only in an
 //! unpublished preparation; committed readers resolve their packed extents.
 
@@ -567,11 +567,21 @@ impl CodeIndexPreparationPort for MemoryCodeIndexPreparationV1 {
             }
             previous = Some(&identity.digest);
         }
+        let planning_bytes = segments.iter().fold(
+            btree_bytes(MAX_SEALED_GENERATION_CONTENT_PACKS_V1, size_of::<usize>()),
+            |bytes, identity| {
+                bytes
+                    .saturating_add(size_of::<SealedGenerationSegmentIdentityV1>())
+                    .saturating_add(identity.digest.as_str().len())
+            },
+        );
+        state.reserve(planning_bytes)?;
         // Mirror the durable store: a pack the bound parent already holds is
         // inherited by reference, verbatim, so its digest stays reproducible;
         // only the rest is written to a new pack.
         let mut inherited: BTreeSet<usize> = BTreeSet::new();
-        let mut written: Vec<SealedGenerationSegmentIdentityV1> = Vec::new();
+        let mut written: Vec<SealedGenerationSegmentIdentityV1> =
+            Vec::with_capacity(segments.len());
         for identity in segments {
             let located = state.parent.as_ref().and_then(|parent| {
                 parent
@@ -612,6 +622,12 @@ impl CodeIndexPreparationPort for MemoryCodeIndexPreparationV1 {
                 parent
                     .extents
                     .iter()
+                    .filter(|extent| {
+                        segments
+                            .binary_search_by(|identity| identity.digest.cmp(&extent.digest))
+                            .ok()
+                            .is_some_and(|index| segments[index].size_bytes == extent.size_bytes)
+                    })
                     .map(|extent| SealedGenerationSegmentIdentityV1 {
                         digest: extent.digest.clone(),
                         size_bytes: extent.size_bytes,
@@ -623,6 +639,7 @@ impl CodeIndexPreparationPort for MemoryCodeIndexPreparationV1 {
         let mut largest = 0_usize;
         let mut descriptors = size_of::<SealedGenerationContentRosterV1>()
             .saturating_add(size_of::<SealedGenerationContentPackV1>())
+            .saturating_add("sha256:".len() + 64)
             .saturating_add(
                 inherited
                     .len()
@@ -648,6 +665,7 @@ impl CodeIndexPreparationPort for MemoryCodeIndexPreparationV1 {
                     Self::unavailable("inherited content pack is absent from the bound parent")
                 })?;
             descriptors = descriptors
+                .saturating_add(parent.digest.as_str().len())
                 .saturating_add(
                     size_of::<SealedGenerationContentExtentV1>()
                         .saturating_mul(parent.extents.len()),
@@ -677,6 +695,7 @@ impl CodeIndexPreparationPort for MemoryCodeIndexPreparationV1 {
                 .saturating_mul(2)
                 .saturating_add(largest)
                 .saturating_add(descriptors.saturating_mul(2))
+                .saturating_add(planning_bytes)
                 .saturating_add(map)
                 .saturating_add(ARC_HEADER_BYTES)
                 .saturating_add(digest_bytes.saturating_mul(3)),
