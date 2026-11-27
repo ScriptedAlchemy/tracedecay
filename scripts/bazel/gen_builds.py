@@ -1479,7 +1479,9 @@ def main():
                 srcs += " + [" + q(bin_labels) + "]"
             format_sources(srcs, t["edition"])
             req = frozenset(t.get("required-features") or [])
-            opt_in_binary = "bin" in kinds and not req.issubset(base[name])
+            opt_in_binary = (
+                "bin" in kinds and t.get("test", True) and not req.issubset(base[name])
+            )
             binary_name = (
                 binary_names[name].get(t["name"], t["name"])
                 if "bin" in kinds else t["name"]

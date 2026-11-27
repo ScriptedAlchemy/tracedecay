@@ -138,7 +138,6 @@ rust_library(
 
 rust_binary(
     name = "tracedecay-index-bench",
-    tags = ["manual"],
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/bin/tracedecay_index_bench.rs",
     edition = crate_edition(),
@@ -154,7 +153,6 @@ rust_binary(
 
 rust_binary(
     name = "tracedecay-index-bench__test",
-    tags = ["manual"],
     testonly = True,
     binary_name = "test/tracedecay-index-bench",
     crate_name = "tracedecay_index_bench",
