@@ -44,8 +44,8 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 /// connects in well under a second).
 const CLI_ROUNDTRIP_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Bound for local, in-process readiness signals (a spawned thread binding a
-/// socket and sending on an mpsc channel). These do not spawn external
+/// Bound for local, in-process readiness signals from a prepared server
+/// thread. These do not perform durable fixture setup or spawn external
 /// processes, but the thread can still be scheduled slowly under load.
 const LOCAL_READY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -131,21 +131,29 @@ fn seed_fake_daemon_authority(socket_path: &Path) -> DaemonAuthority {
     .expect("seed fake daemon authority")
 }
 
+/// Prepare the durable profile identity and authority record before the
+/// thread-readiness wait. Their file and directory syncs are fixture setup;
+/// the readiness signal acknowledges that the prepared server is running.
+fn bind_scripted_daemon(socket_path: &Path) -> (DaemonAuthority, UnixListener) {
+    let _ = std::fs::remove_file(socket_path);
+    let authority = seed_fake_daemon_authority(socket_path);
+    let listener = UnixListener::bind(socket_path).expect("bind fake daemon socket");
+    listener
+        .set_nonblocking(true)
+        .expect("set listener nonblocking");
+    (authority, listener)
+}
+
 fn spawn_scripted_daemon(
     socket_path: PathBuf,
     expected_tool_name: &'static str,
     response: FakeDaemonResponse,
 ) -> mpsc::Receiver<Value> {
+    let (authority, listener) = bind_scripted_daemon(&socket_path);
     let (ready_tx, ready_rx) = mpsc::channel();
     let (request_tx, request_rx) = mpsc::channel();
 
     std::thread::spawn(move || {
-        let _ = std::fs::remove_file(&socket_path);
-        let authority = seed_fake_daemon_authority(&socket_path);
-        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
-        listener
-            .set_nonblocking(true)
-            .expect("set listener nonblocking");
         ready_tx.send(()).expect("notify fake daemon readiness");
 
         // The CLI may open preliminary connections before the scripted tool
@@ -3324,25 +3332,20 @@ fn spawn_scripted_retained_daemon(
     problems: Vec<ApplicationProblem>,
 ) -> ScriptedRetainedDaemon {
     let socket_path = common::daemon_socket_path(home);
+    let (authority, listener) = bind_scripted_daemon(&socket_path);
+    let scope = ResolvedScope::new(
+        ProjectId::new("project.scripted-daemon").expect("project id"),
+        RepositoryId::new("repository.scripted-daemon").expect("repository id"),
+        WorktreeId::new("worktree.scripted-daemon").expect("worktree id"),
+        None,
+    )
+    .expect("scripted daemon scope");
     let (ready_tx, ready_rx) = mpsc::channel();
     let (request_tx, request_rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let daemon_stop = Arc::clone(&stop);
 
     std::thread::spawn(move || {
-        let _ = std::fs::remove_file(&socket_path);
-        let authority = seed_fake_daemon_authority(&socket_path);
-        let scope = ResolvedScope::new(
-            ProjectId::new("project.scripted-daemon").expect("project id"),
-            RepositoryId::new("repository.scripted-daemon").expect("repository id"),
-            WorktreeId::new("worktree.scripted-daemon").expect("worktree id"),
-            None,
-        )
-        .expect("scripted daemon scope");
-        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
-        listener
-            .set_nonblocking(true)
-            .expect("set listener nonblocking");
         ready_tx.send(()).expect("notify fake daemon readiness");
         let mut problems = problems.into_iter();
         let mut current = problems.next().expect("at least one scripted problem");

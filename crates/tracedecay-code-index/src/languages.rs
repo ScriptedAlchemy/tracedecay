@@ -668,6 +668,68 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "lite")]
+    fn lite_tier_extracts_cargo_package_identity() {
+        let registry = StaticLanguageRegistry::new();
+        for (extension, expected_language) in [
+            ("rs", "rust"),
+            ("ts", "typescript"),
+            ("js", "typescript"),
+            ("md", "markdown"),
+            ("json", "json"),
+            ("toml", "toml"),
+        ] {
+            assert_eq!(
+                registry
+                    .descriptor_for_extension(extension)
+                    .map(|descriptor| descriptor.language.as_str()),
+                Some(expected_language),
+                "core code and its documentation and manifests remain admitted"
+            );
+        }
+
+        let extractors = tracedecay_code_extraction::LanguageRegistry::new();
+        let manifest = extractors
+            .extractor_for_file("Cargo.toml")
+            .expect("Lite must retain Rust's package-name authority")
+            .extract_artifact("Cargo.toml", "[package]\nname = \"declared-crate\"\n");
+        assert!(manifest.result.errors.is_empty());
+        let package_name = manifest
+            .result
+            .nodes
+            .iter()
+            .find(|node| node.qualified_name == "Cargo.toml::package::name")
+            .expect("the resolver consumes the extracted package.name symbol");
+        assert_eq!(
+            package_name.signature.as_deref(),
+            Some("name = \"declared-crate\"")
+        );
+    }
+
+    /// Full builds retain the niche extensions alongside the complete
+    /// descriptor set checked by `full_tier_registers_every_compiled_extractor_language`.
+    #[test]
+    #[cfg(feature = "full")]
+    fn full_tier_admits_niche_extensions() {
+        let registry = StaticLanguageRegistry::new();
+        for (extension, language) in [
+            ("cob", "cobol"),
+            ("f90", "fortran"),
+            ("qnt", "quint"),
+            ("lean", "lean"),
+            ("gw", "gwbasic"),
+            ("bas", "msbasic2"),
+            ("qb", "qbasic"),
+        ] {
+            let descriptor = registry
+                .descriptor_for_extension(extension)
+                .unwrap_or_else(|| panic!("{extension} must be admitted under the extras profile"));
+            assert_eq!(descriptor.language.as_str(), language);
+            assert!(descriptor.capabilities.extraction);
+        }
+    }
+
+    #[test]
     #[cfg(feature = "lang-markdown")]
     fn markdown_is_admitted_with_stable_section_spans() {
         let registry = StaticLanguageRegistry::new();

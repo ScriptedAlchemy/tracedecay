@@ -57,7 +57,23 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-code-extraction__cfg_2583ec52__d66eddaf54a",
+    name = "tracedecay-code-extraction__cfg_0337364c__d43c44aaccc__dev",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay_code_extraction",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-domain:tracedecay-domain__dev", ":build_script_build"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(2),
+    crate_features = ["lang-bash", "lang-dart", "lang-json", "lang-markdown", "lang-nix", "lang-pascal", "lang-php", "lang-powershell", "lang-protobuf", "lang-ruby", "lang-toml", "lang-vbnet", "large-grammars", "lite", "medium", "medium-grammars", "test-helpers"],
+)
+
+rust_library(
+    name = "tracedecay-code-extraction__cfg_ada1ae63__dc82e5a9163",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_code_extraction",
@@ -69,7 +85,23 @@ rust_library(
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
     rustc_flags = perf_rustc_flags(2),
-    crate_features = ["lang-json", "lang-markdown", "lite", "medium-grammars"],
+    crate_features = ["lang-json", "lang-markdown", "lang-toml", "large-grammars", "lite", "medium-grammars"],
+)
+
+rust_library(
+    name = "tracedecay-code-extraction__cfg_fee579c7__d0987b3264e",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay_code_extraction",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-domain:tracedecay-domain", ":build_script_build"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(2),
+    crate_features = ["lang-bash", "lang-dart", "lang-json", "lang-markdown", "lang-nix", "lang-pascal", "lang-php", "lang-powershell", "lang-protobuf", "lang-ruby", "lang-toml", "lang-vbnet", "large-grammars", "lite", "medium", "medium-grammars"],
 )
 
 cargo_build_script(

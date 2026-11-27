@@ -16,9 +16,11 @@ stale or obsolete groups are detectable drift rather than inherited bytes.
 
 Feature model. Cargo compiles a member once per resolved feature set, and the
 set depends on the consuming context (normal build vs dev/test resolution vs
-required-features). Test contexts resolve once across the whole workspace,
-as one `cargo test --workspace` does, so every member's tests share one
-dependency build. Each member gets one rust_library per distinct feature set it is ever
+required-features). Ordinary test contexts resolve once across the whole
+workspace, as one `cargo test --workspace` does, so those tests share one
+dependency build. Integration suites declaring a no-default feature selection
+resolve separately to exercise the absence of optional features. Each member
+gets one rust_library per distinct feature set it is ever
 built with. `<pkg>` covers its own build context and
 `<pkg>__<extra-features>` names the variants. A variant's own member deps are the union
 of the labels every producing context resolves for them. Dependents pick the
@@ -231,6 +233,17 @@ RUNTIME_BINARIES = (
 # Marks a resolution context that Cargo builds with `--no-default-features`.
 NO_DEFAULT_FEATURES = "!no-default-features"
 PRODUCTION_CONTEXT = ("tracedecay", "normal,build", frozenset())
+PRODUCTION_CONTEXTS = {
+    PRODUCTION_CONTEXT: "tracedecay",
+    ("tracedecay-cli", "normal,build", frozenset()): "tracedecay",
+    # The index benchmark must parse the shipped grammar profile without
+    # depending on the composition root itself.
+    ("tracedecay-query", "normal,build", frozenset({"production"})): "tracedecay-query",
+}
+GRAMMAR_PROFILE_PACKAGES = {
+    "tracedecay", "tracedecay-cli", "tracedecay-code-index",
+    "tracedecay-code-index-runtime", "tracedecay-code-extraction",
+}
 
 
 def owner_pkg(repo_rel, repo):
@@ -388,8 +401,12 @@ def validate_production_features(members):
     if features.get("default") != ["production"]:
         raise ValueError("tracedecay default feature must delegate only to production")
     production = set(features.get("production", []))
-    if not {"token-counting", "lite", "full"}.issubset(production):
+    if not {"token-counting", "lite", "medium"}.issubset(production):
         raise ValueError("tracedecay production feature set lost a required member")
+    if "full" in production:
+        raise ValueError(
+            "tracedecay production must not enable the opt-in full grammar tier"
+        )
     if "test-transport" in production:
         raise ValueError("tracedecay production feature directly enables test-transport")
 
@@ -436,7 +453,13 @@ def _parse_tree_row(line):
 
 
 def _parse_feature_map(output, context):
-    production = context == PRODUCTION_CONTEXT
+    production_root = PRODUCTION_CONTEXTS.get(context)
+    package, edges, requested = context
+    artifact = (
+        package in {"tracedecay", "tracedecay-cli"}
+        and edges == "normal,build"
+        and "test-transport" not in requested
+    )
     fmap = {}
     for line in output.splitlines():
         # Cargo separates workspace roots with an empty line.
@@ -446,16 +469,106 @@ def _parse_feature_map(output, context):
             row = _parse_tree_row(line)
         except ValueError as error:
             raise ValueError(f"{context}: {error}") from error
-        if production and "test-transport" in row.features:
+        if artifact and "test-transport" in row.features:
             raise ValueError(
                 f"{context}: production graph enables test-transport for {row.package_id}"
+            )
+        if production_root and row.name in GRAMMAR_PROFILE_PACKAGES and "full" in row.features:
+            raise ValueError(
+                f"{context}: production graph enables the opt-in full grammar tier "
+                f"for {row.package_id}"
             )
         # Cargo renders host-native paths; source URLs are not member paths.
         if row.path is not None and "/crates/" in row.path.replace("\\", "/"):
             fmap.setdefault(row.name, set()).update(row.features)
-    if production and "tracedecay" not in fmap:
-        raise ValueError(f"{context}: cargo tree omitted the tracedecay root package")
+    if production_root and production_root not in fmap:
+        raise ValueError(f"{context}: cargo tree omitted the {production_root} root package")
     return fmap
+
+
+def test_feature_overrides(package):
+    """Selected integration suites exercise a feature-absent dependency graph.
+
+    Cargo's own per-package resolution remains authoritative. An explicit
+    no-default-features selection cannot join the workspace-wide dev graph,
+    whose union would silently enable the features the suite must exclude.
+    """
+    configured = (package.get("metadata") or {}).get("bazel", {}).get("test_features", {})
+    if not isinstance(configured, dict):
+        raise ValueError(f"{package['name']}: test_features must map integration tests to features")
+    targets = {
+        target["name"]: target
+        for target in package.get("targets", [])
+        if "test" in target["kind"]
+    }
+    declared = package.get("features") or {}
+    overrides = {}
+    for name, options in configured.items():
+        if name not in targets:
+            raise ValueError(f"{package['name']}: test_features names unknown integration test {name}")
+        if (
+            not isinstance(options, dict)
+            or set(options) != {"default-features", "features"}
+            or options["default-features"] is not False
+            or not isinstance(options["features"], list)
+            or any(not isinstance(feature, str) or feature not in declared for feature in options["features"])
+        ):
+            raise ValueError(
+                f"{package['name']}: test_features.{name} requires default-features=false "
+                "and a list of declared package features"
+            )
+        overrides[name] = frozenset(options["features"]) | frozenset(
+            targets[name].get("required-features") or []
+        ) | {NO_DEFAULT_FEATURES}
+    return overrides
+
+
+def feature_resolution_context(key, workspace_test_features):
+    name, edges, requested = key
+    if "dev" in edges and NO_DEFAULT_FEATURES not in requested:
+        return (None, edges, workspace_test_features)
+    return key
+
+
+def target_requested_features(target, test_overrides):
+    required = frozenset(target.get("required-features") or [])
+    return test_overrides.get(target["name"], required) if "test" in target["kind"] else required
+
+
+EXPLICIT_BUILD_BINARIES = {("crates/tracedecay-cli", "tracedecay-full")}
+
+
+def requires_manual_binary(package_directory, target, default_features):
+    """Keep the Full CLI explicit without hiding benchmark binaries from builds."""
+    if "bin" not in target["kind"]:
+        return False
+    if (package_directory, target["name"]) in EXPLICIT_BUILD_BINARIES:
+        return True
+    required = frozenset(target.get("required-features") or [])
+    return target.get("test", True) and not required.issubset(default_features)
+
+
+def binary_name_overrides(package):
+    configured = (package.get("metadata") or {}).get("bazel", {}).get("binary_names", {})
+    targets = {target["name"] for target in package.get("targets", []) if "bin" in target["kind"]}
+    if not isinstance(configured, dict) or set(configured) - targets:
+        raise ValueError(f"{package['name']}: binary_names must name declared binary targets")
+    for target, name in configured.items():
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*", name)
+            or any(part in {".", ".."} for part in name.split("/"))
+            or name.split("/")[0] == "test"
+        ):
+            raise ValueError(f"{package['name']}: binary_names.{target} must be a relative output path outside test/")
+    outputs = [configured.get(target, target) for target in targets]
+    for index, name in enumerate(outputs):
+        if any(
+            name == other or name.startswith(other + "/") or other.startswith(name + "/")
+            for other in outputs[index + 1:]
+        ):
+            raise ValueError(f"{package['name']}: binary_names has overlapping output paths")
+    return configured
 
 
 def feature_map(query, pkg_name, edges, features=()):
@@ -793,6 +906,18 @@ RE_INCLUDE_MANIFEST = re.compile(
 )
 
 
+def source_package_builds(directory):
+    """Direct source packages only; Bazel output links may name another checkout."""
+    if directory.is_symlink() or directory.is_junction() or not directory.is_dir():
+        return
+    for package in sorted(directory.iterdir()):
+        if package.is_symlink() or package.is_junction() or not package.is_dir():
+            continue
+        build = package / "BUILD.bazel"
+        if not build.is_symlink() and build.is_file():
+            yield build
+
+
 def main():
     if sys.argv[1:] not in ([], ["--check"]):
         sys.exit("usage: bazel run //scripts:gen_builds [-- --check]")
@@ -802,6 +927,8 @@ def main():
     meta = cargo_metadata(query)
     members = {p["name"]: p for p in meta["packages"]}
     validate_production_features(members)
+    test_overrides = {p["name"]: test_feature_overrides(p) for p in meta["packages"]}
+    binary_names = {p["name"]: binary_name_overrides(p) for p in meta["packages"]}
     opt_default, opt_levels = perf_opt_levels(workspace)
     dir_of = {
         p["name"]: Path(p["manifest_path"]).parent.relative_to(workspace).as_posix()
@@ -837,7 +964,7 @@ def main():
         contexts[(name, "normal,build,dev", frozenset())] = None
         reqs = set()
         for t in p["targets"]:
-            req = t.get("required-features") or []
+            req = target_requested_features(t, test_overrides[name])
             if not req:
                 continue
             edges = (
@@ -846,24 +973,27 @@ def main():
                 else "normal,build"
             )
             reqs.add((edges, frozenset(req)))
+            if "bin" in t["kind"]:
+                reqs.add(("normal,build,dev", frozenset(req)))
         for edges, req in reqs:
             contexts[(name, edges, req)] = None
     # The lean root build (`cargo check -p tracedecay --no-default-features`).
     contexts[("tracedecay", "normal,build", frozenset({NO_DEFAULT_FEATURES}))] = None
 
-    # Every test context shares one workspace-wide resolution, as one `cargo
-    # test --workspace` does, with every feature a test, bench or example
+    # Ordinary test contexts share one workspace-wide resolution, as one `cargo
+    # test --workspace` does, with every feature a test, bench, example or binary
     # requires and each test-transport surface CI checks compiles (`cargo
     # check --workspace --all-targets --features test-transport`) enabled,
     # as the hosted CI test partitions enabled them. Resolving each member's
     # tests on their own, as `cargo test -p <member>` does, gave every member
     # its own featured copy of its dependency closure: 534 libraries for 50
-    # crates. Feature-absence tests carry their own cfg gates.
+    # crates. Explicit no-default integration profiles keep their separate
+    # per-package resolution so optional-feature absence is testable.
     gated = frozenset(
         f"{p['name']}/{f}"
         for p in meta["packages"]
         for t in p["targets"]
-        if {"test", "bench", "example"} & set(t["kind"])
+        if {"test", "bench", "example", "bin"} & set(t["kind"])
         for f in t.get("required-features") or []
     ) | frozenset(
         f"{p['name']}/test-transport"
@@ -872,8 +1002,7 @@ def main():
     )
 
     def resolution(key):
-        name, edges, req = key
-        return (None, edges, gated) if "dev" in edges else key
+        return feature_resolution_context(key, gated)
 
     # Each distinct resolution is an independent `cargo tree` walk.
     walks = list(dict.fromkeys(resolution(key) for key in contexts))
@@ -1366,6 +1495,11 @@ def main():
                 srcs += " + [" + q(bin_labels) + "]"
             format_sources(srcs, t["edition"])
             req = frozenset(t.get("required-features") or [])
+            opt_in_binary = requires_manual_binary(dir_of[name], t, base[name])
+            binary_name = (
+                binary_names[name].get(t["name"], t["name"])
+                if "bin" in kinds else t["name"]
+            )
             # Cargo builds examples against the dev resolution, and builds the
             # binaries a test run spawns with that run's features too (test
             # hooks, test-transport). `<bin>__test` is that build; the plain
@@ -1395,13 +1529,17 @@ def main():
                 out += [
                     "rust_binary(",
                     f'    name = "{emitted}",',
+                    *(['    tags = ["manual"],'] if opt_in_binary else []),
                     # Suites check the spawned binary's own name, so the test
                     # build keeps the shipped file name in a directory of its own.
                     *([
                         "    testonly = True,",
-                        f'    binary_name = "test/{t["name"]}",',
+                        f'    binary_name = "test/{binary_name}",',
                         f'    crate_name = "{t["name"].replace("-", "_")}",',
-                    ] if emitted == test_flavor else []),
+                    ] if emitted == test_flavor else [
+                        f'    binary_name = "{binary_name}",',
+                        f'    crate_name = "{t["name"].replace("-", "_")}",',
+                    ] if binary_name != t["name"] else []),
                     "    srcs = " + srcs + ",",
                     f'    crate_root = {crate_root},',
                     '    edition = crate_edition(),',
@@ -1475,7 +1613,7 @@ def main():
                  if target.get("name") == t["name"]),
                 {},
             )
-            req = frozenset(t.get("required-features") or [])
+            req = target_requested_features(t, test_overrides[name])
             fmap = contexts[(name, "normal,build,dev", req)]
             deps = dedup(
                 sorted(
@@ -1810,7 +1948,7 @@ def main():
     outputs[root_build] = splice_generated(root_build.read_text(encoding="utf-8"), format_aggregate, root_build)
     # A generated block or fully generated file can also go stale when its
     # last Cargo reference disappears; re-render the marked ones too.
-    for path in sorted(workspace.glob("*/BUILD.bazel")):
+    for path in source_package_builds(workspace):
         if path.resolve() in outputs or not path.exists():
             continue
         text = path.read_text(encoding="utf-8")
@@ -1831,7 +1969,7 @@ def main():
         ]
         # A removed member leaves its generated BUILD behind.
         stale += [
-            path for path in sorted(workspace.glob("crates/*/BUILD.bazel"))
+            path for path in source_package_builds(workspace / "crates")
             if path not in outputs and path.read_text(encoding="utf-8").startswith(
                 "# Generated by scripts/bazel/gen_builds.py"
             )
