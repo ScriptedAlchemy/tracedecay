@@ -394,7 +394,8 @@ async fn refuse_warming_profile_identity(
     error: &TraceDecayError,
 ) -> Result<()> {
     // Native clients retry the mounting problem in their invocation envelope;
-    // a JSON-RPC error here would decode as a transport failure instead.
+    // a JSON-RPC error here would decode as a transport failure instead. The
+    // stream is never admitted, so every native answer here names it closing.
     if let Some(request) =
         tracedecay_daemon_protocol::parse_daemon_invocation_request(request.raw())
     {
@@ -412,7 +413,8 @@ async fn refuse_warming_profile_identity(
                 ),
             },
             Err(response) => response,
-        };
+        }
+        .closing_stream();
         return write_daemon_response(transport, &response).await;
     }
     // JSON-RPC 2.0 forbids answering a notification, and a stray null-id frame
@@ -441,7 +443,7 @@ mod profile_identity_refusal_tests {
     use tracedecay_daemon_protocol::{
         DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonInvocationOutcome,
         DaemonInvocationProblem, DaemonInvocationRequest, DaemonInvocationResponse,
-        PROJECT_WARMING_REASON_CODE,
+        DaemonInvocationStream, PROJECT_WARMING_REASON_CODE,
     };
     use tracedecay_domain::{ScopeSetId, UtcMicros};
     use tracedecay_mcp::JsonRpcResponse;
@@ -482,6 +484,11 @@ mod profile_identity_refusal_tests {
         assert_eq!(response.request_id, request.request_id);
         assert_eq!(response.protocol, DAEMON_INVOCATION_PROTOCOL);
         assert_eq!(response.revision, DAEMON_INVOCATION_REVISION);
+        assert_eq!(
+            response.stream,
+            DaemonInvocationStream::Closing,
+            "the unadmitted stream closes, so the client must resend on a fresh one"
+        );
         let DaemonInvocationOutcome::ApplicationProblem { problem } = response.outcome else {
             panic!("warming must remain a typed application problem");
         };
@@ -505,6 +512,7 @@ mod profile_identity_refusal_tests {
             let response: DaemonInvocationResponse =
                 serde_json::from_str(&wire).expect("native protocol refusal");
             assert_eq!(response.request_id, request.request_id);
+            assert_eq!(response.stream, DaemonInvocationStream::Closing);
             assert!(matches!(
                 response.outcome,
                 DaemonInvocationOutcome::Problem { problem } if problem == expected
@@ -526,6 +534,7 @@ mod profile_identity_refusal_tests {
         let response: DaemonInvocationResponse =
             serde_json::from_str(&wire).expect("native protocol refusal");
         assert_eq!(response.request_id, "request.profile.invalid");
+        assert_eq!(response.stream, DaemonInvocationStream::Closing);
         assert!(matches!(
             response.outcome,
             DaemonInvocationOutcome::Problem {

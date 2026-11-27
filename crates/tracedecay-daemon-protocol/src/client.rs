@@ -18,7 +18,7 @@ use tracedecay_contracts::{
     ApplicationInvocation, ApplicationInvocationExecutor, ApplicationInvocationFuture,
     ApplicationProblem, ApplicationProblemKind, ApplicationRequest, ApplicationResponse,
     CancellationSignal, CancellationStage, Deadline, InvocationError, InvocationTarget,
-    PageRequest, RUNTIME_MOUNTING_REASON_CODE, RequestId, SafeDiagnostic, try_now_micros,
+    PageRequest, RequestId, SafeDiagnostic, try_now_micros,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{
@@ -506,21 +506,17 @@ impl InvocationConnectionLease {
     }
 
     fn release_after_response(&mut self, response: &crate::contract::DaemonInvocationResponse) {
-        // Pre-admission refusals can answer before closing the stream. That
-        // includes invalid requests discovered while the profile is warming,
-        // so a corrected request must authenticate on a fresh connection too.
-        match &response.outcome {
+        // Admission saturation answers the request and closes the stream.
+        // A profile-warmup refusal does too, but an admitted owner answers the
+        // same mounting and protocol problems on a stream it keeps serving,
+        // so only the daemon's stream disposition tells those apart.
+        let saturated = matches!(
+            &response.outcome,
             crate::contract::DaemonInvocationOutcome::ApplicationProblem { problem }
                 if problem.kind() == ApplicationProblemKind::Saturated
-                    || problem.diagnostic().is_some_and(|diagnostic| {
-                        diagnostic.code == RUNTIME_MOUNTING_REASON_CODE
-                    }) => {}
-            crate::contract::DaemonInvocationOutcome::Problem {
-                problem:
-                    crate::contract::DaemonInvocationProblem::InvalidRequest
-                    | crate::contract::DaemonInvocationProblem::UnsupportedRevision,
-            } => {}
-            _ => self.release_to_pool(),
+        );
+        if !saturated && response.stream.is_open() {
+            self.release_to_pool();
         }
     }
 

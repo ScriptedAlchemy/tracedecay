@@ -706,7 +706,8 @@ async fn profile_warmup_retry_authenticates_on_a_fresh_connection() {
                     .unwrap();
             assert_eq!(request.request_id, REQUEST_ID);
             let response =
-                DaemonInvocationResponse::application_problem(request.request_id, problem);
+                DaemonInvocationResponse::application_problem(request.request_id, problem)
+                    .closing_stream();
             writer
                 .write_all(serde_json::to_string(&response).unwrap().as_bytes())
                 .await
@@ -754,6 +755,81 @@ async fn profile_warmup_retry_authenticates_on_a_fresh_connection() {
 }
 
 #[tokio::test]
+async fn admitted_mounting_refusal_keeps_its_stream_for_the_resend() {
+    const REQUEST_ID: &str = "request.admitted-mounting.resend";
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .unwrap();
+    let server = tokio::spawn(async move {
+        // One accept: a resend that reconnects finds no daemon behind it.
+        let stream = listener.accept().await.expect("admitted connection");
+        drop(listener);
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut lines = authenticated_lines(reader).await;
+        lines.next_line().await.unwrap().expect("handshake");
+        for mounting in [true, false] {
+            let request: DaemonInvocationRequest =
+                serde_json::from_str(&lines.next_line().await.unwrap().expect("invocation"))
+                    .unwrap();
+            assert_eq!(request.request_id, REQUEST_ID);
+            if mounting {
+                let response = DaemonInvocationResponse::application_problem(
+                    request.request_id,
+                    tracedecay_contracts::ApplicationProblem::runtime_mounting(),
+                );
+                writer
+                    .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+                    .await
+                    .unwrap();
+                writer.write_all(b"\n").await.unwrap();
+                writer.flush().await.unwrap();
+            } else {
+                write_unavailable_response(&mut writer, &request.request_id).await;
+            }
+        }
+    });
+    let client = invocation_client(endpoint, "client.admitted-mounting.resend");
+    let deadline = deadline_after(Duration::from_secs(5));
+    let cancellation = CancellationSignal::active("cancel.admitted-mounting.resend").unwrap();
+    let response = client
+        .invoke_controlled(
+            invocation_request(REQUEST_ID, deadline.clone()),
+            deadline.clone(),
+            cancellation.clone(),
+            InvocationCancellationPolicy::ReadOnly,
+        )
+        .await
+        .expect("typed mounting refusal");
+    assert!(matches!(
+        response.outcome,
+        DaemonInvocationOutcome::ApplicationProblem { problem }
+            if problem == tracedecay_contracts::ApplicationProblem::runtime_mounting()
+    ));
+    assert_eq!(
+        idle_pool_size(&client),
+        1,
+        "an admitted owner keeps serving the stream that answered mounting"
+    );
+    let response = client
+        .invoke_controlled(
+            invocation_request(REQUEST_ID, deadline.clone()),
+            deadline,
+            cancellation,
+            InvocationCancellationPolicy::ReadOnly,
+        )
+        .await
+        .expect("the resend must reach the owner on the admitted stream");
+    assert!(matches!(
+        response.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::Unavailable,
+        }
+    ));
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn corrected_protocol_request_authenticates_after_a_terminal_refusal() {
     const REQUEST_ID: &str = "request.profile-warmup.corrected";
     for problem in [
@@ -783,7 +859,8 @@ async fn corrected_protocol_request_authenticates_after_a_terminal_refusal() {
                 } else {
                     let rejected = request.validate().expect_err("invalid protocol request");
                     assert_eq!(rejected, problem);
-                    let response = DaemonInvocationResponse::problem(request.request_id, rejected);
+                    let response = DaemonInvocationResponse::problem(request.request_id, rejected)
+                        .closing_stream();
                     writer
                         .write_all(serde_json::to_string(&response).unwrap().as_bytes())
                         .await
