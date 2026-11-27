@@ -1,11 +1,10 @@
 //! Common tree-sitter grammars for tokensave.
 //!
-//! Tier: **medium** — the lite tier (Rust, Python, JavaScript, TypeScript,
-//! Go, Java, C) plus C++, C#, Ruby, Swift, Scala, PHP, TSX, Bash, Lua, Dart.
+//! The medium tier adds C++, C#, Ruby, Swift, Scala, PHP, TSX, Bash, Lua, and
+//! Dart to the lite tier's Rust, Python, JavaScript, TypeScript, Go, Java, and C.
 //!
-//! Kotlin is intentionally omitted: TraceDecay registers it from
-//! `arborium-kotlin` so the large-bundle copy and a second medium-bundle copy
-//! are never both linked.
+//! TraceDecay registers Kotlin from `arborium-kotlin`. This tier omits Kotlin
+//! so the binary never links both the large-bundle and medium-bundle copies.
 
 pub mod languages {
     pub use tree_sitter_bash;

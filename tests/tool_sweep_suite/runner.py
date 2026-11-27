@@ -1233,10 +1233,9 @@ def prime_fixture_values(
                 "message": str(error),
             }
 
-    # The code-index search surface publishes canonical code anchors, while the
-    # legacy graph consumer requires a graph node id. Resolve the fixture's
-    # known semantic name through the live qualified-name producer instead of
-    # reconstructing either opaque identity in the harness.
+    # Code-index search returns code anchors. The legacy graph tool needs a
+    # graph node ID. Look up the fixture's known qualified name in the live
+    # graph rather than trying to reconstruct either opaque ID in the test.
     with prime_group("graph"):
         ends_at = time.monotonic() + 30
         node_id: str | None = None
@@ -1883,9 +1882,9 @@ OPAQUE_FIELDS = frozenset(
     }
 )
 
-# Bounded wait for the fixture's first complete code-index generation. The
-# code-query surface deliberately serves only complete immutable generations,
-# so a cold fixture answers typed-stale until its first build publishes.
+# Limit the wait for the fixture's first complete code-index generation.
+# Code queries serve only complete, immutable generations. They return a
+# typed stale result until the first build publishes its generation.
 CODE_INDEX_READY_TIMEOUT_S = 120
 
 CODE_NAVIGATION_NODE_NAMES = {
@@ -2622,12 +2621,11 @@ def _unavailable_tool_row(client: McpClient, policy: ToolPolicy) -> dict[str, An
     return row
 
 
-# Authorities mount asynchronously after project open and report a typed,
-# retryable `unavailable` problem until ready (observed hermetically:
-# feedback_advisory_cycle settles to real evidence ~7s after open). The reads
-# phase honors that product retry contract with one bounded budget; a surface
-# that stays unavailable past the budget still fails, so the retry is
-# falsifiable and is not a blanket skip.
+# Services start asynchronously after project open. Until ready, they return
+# a typed, retryable `unavailable` problem. In a hermetic run,
+# feedback_advisory_cycle returned evidence about 7 seconds after open. The
+# reads phase retries within one time limit and fails if the operation is still
+# unavailable after that limit.
 MOUNT_RETRY_BUDGET_S = 60
 MOUNT_RETRY_DELAY_S = 0.5
 # The code-index branch-diff authority is the last to activate after project

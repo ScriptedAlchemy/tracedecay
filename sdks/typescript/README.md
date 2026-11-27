@@ -3,10 +3,9 @@
 `@tracedecay/sdk` provides generated TypeScript contracts and a strict client
 for TraceDecay's public application API.
 
-The generated client includes every Work and Workflow operation
-admitted by the canonical executable binding registry plus the
-cancellation/resumable-stream lifecycle. Only the canonical executable binding
-registry determines whether an operation is available to the SDK.
+Only the canonical executable binding registry determines which operations the
+SDK offers. The generated client includes every Work and Workflow operation
+that registry admits. It also supports cancellation and resuming streams.
 
 ## Requirements
 
@@ -17,12 +16,11 @@ registry determines whether an operation is available to the SDK.
 
 ## Architecture
 
-The HTTP lifecycle runs in Rust. The package is a generated TypeScript facade
-over a Node-API binding of the TraceDecay Rust SDK. Node and Rust clients share
-the same envelope, problem, stream-framing, terminal-state and reconnect rules.
-Network waits run on the binding's own threads and never block
-the Node event loop. The daemon remains the authority for storage, scheduling
-and admission.
+The generated TypeScript client uses a Node-API binding to the TraceDecay Rust
+SDK for HTTP. The Node and Rust clients use the same rules for envelopes,
+problems, stream framing, terminal states, and reconnection. The binding waits
+for network responses on its own threads, so it never blocks the Node event
+loop. The daemon handles storage, scheduling, and admission.
 
 The binding ships as an optional platform package
 (`@tracedecay/sdk-darwin-arm64`, `-linux-x64-gnu`, `-linux-arm64-gnu`,
@@ -86,12 +84,12 @@ const graph = await client.operations.work_views(
 );
 ```
 
-Request and result types, decoders, and operation methods are generated from
-the Rust contracts that own the wire format. Deadline metadata is retained on
-each operation descriptor and invocation deadlines are forwarded to daemon
-admission. `UNAVAILABLE_OPERATIONS` reports cataloged operations that still
-lack a canonical schema or SDK transport without creating callable methods.
-Malformed or unavailable contracts fail closed.
+The Rust contracts define the wire format. The generator uses them to produce
+request and result types, decoders, and operation methods. Each operation
+descriptor retains its deadline metadata. The client forwards invocation
+deadlines to the daemon for admission. `UNAVAILABLE_OPERATIONS` lists cataloged
+operations that lack a canonical schema or SDK transport. The generator does not
+create callable methods for them. Malformed or unavailable contracts fail closed.
 
 ## HTTP cancellation and failures
 
@@ -113,10 +111,11 @@ Use `cancelOperation` to explicitly request cancellation of a running operation.
 
 ## Resuming an operation stream
 
-An `open` event's `frontier.next_sequence` is the server's publication watermark.
-It does not mean that the subscriber has consumed those events. The client keeps
-its delivered cursor unchanged on `open` and uses the frontier's `resume_token`
-for reconnection. A delivered event advances the cursor to its sequence plus one;
+An `open` event's `frontier.next_sequence` is the next sequence the server will
+publish. It does not mean that the subscriber has consumed the earlier events.
+The client keeps its delivered cursor unchanged on `open` and uses the
+frontier's `resume_token` for reconnection. A delivered event advances the
+cursor to its sequence plus one;
 a `resume_gap` advances it to `gap.last_missing_sequence + 1` and explicitly
 reports the lost range.
 

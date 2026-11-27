@@ -5,7 +5,7 @@ metadata:
   opencode/slash: "true"
 ---
 
-# Managing Workflows
+# Managing workflows
 
 Follow these steps in order. Report a step you skip as `skip: <reason>`. Every
 mutation consumes the exact definition, run, or grant identity a read or a prior
@@ -28,10 +28,10 @@ operation schemas for arguments.
    Active version and a run started from it, and redeem
    (`tracedecay_workflow_handoff_redeem`) only the grant it returned. skip: no
    handoff was requested.
-6. Act on a refusal by its type. `stale` carries the requested and current
-   `expected_revision` or `expected_sequence` in `detail`: refresh and resend.
-   `conflict` is an illegal lifecycle edge or a run from an inactive version.
-   `reauthorize` needs a new handoff from its issuer.
+6. Act on a refusal by its type. For `stale`, check the requested and current
+   `expected_revision` or `expected_sequence` in `detail`, then refresh and
+   resend. `conflict` means the transition is not allowed or the run came from
+   an inactive version. For `reauthorize`, get a new handoff from its issuer.
 
 `tracedecay_workflows` reads historical `wf_*` session runs and controls
 nothing; that history belongs to `managing-session-context`, and task, attempt,

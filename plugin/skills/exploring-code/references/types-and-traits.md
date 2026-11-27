@@ -1,30 +1,27 @@
 # Types & traits
 
-Type-level exploration for the `tracedecay:exploring-code` skill.
-
-- Implementations, impl blocks, and hierarchies
-- Derives and synthesized methods
-- Construction sites and field usage
+Use these tools when the `tracedecay:exploring-code` skill needs information
+about a type, its implementations, or its uses.
 
 ## Types & traits
 
-1. **Who implements a trait / every body of a method → `tracedecay_implementations`**
-   (`selector: {"selector": "trait", "name": "X"}`: each implementing impl or
-   class block with its body; `selector: {"selector": "method", "name": "X"}`:
-   every function or method named X, with bodies).
-2. **Recursive hierarchy, or which traits a type implements →
-   `tracedecay_type_hierarchy`**; deepest extends-chains →
-   `tracedecay_inheritance_depth`.
-3. **"Where does this method come from?" → `tracedecay_derives`**: the
-   `#[derive(...)]` macros on a type and the methods each synthesizes. Check
-   before concluding `.clone()` / `.eq()` has no definition.
-4. **Construction sites → `tracedecay_constructors`** (every struct-literal
-   site with present and missing fields); **field usage →
-   `tracedecay_field_sites`** (`field` or `Struct::field`): every read/write
-   site with file, line, and enclosing symbol.
+1. Use `tracedecay_implementations` with `selector: {"selector": "trait", "name": "X"}`
+   to get the body of each impl or class block that implements the trait. Use
+   `selector: {"selector": "method", "name": "X"}` to get the bodies of all
+   functions and methods named X.
+2. Use `tracedecay_type_hierarchy` for the recursive hierarchy or the traits a
+   type implements. Use `tracedecay_inheritance_depth` for the deepest
+   inheritance chains.
+3. Use `tracedecay_derives` to find the `#[derive(...)]` macros on a type and
+   the methods each macro generates. Check before concluding that `.clone()`
+   or `.eq()` has no definition.
+4. Use `tracedecay_constructors` to list struct literals and the fields they
+   include or omit. Use `tracedecay_field_sites` with `field` or `Struct::field`
+   to find reads and writes, with the file, line, and enclosing symbol for each
+   site.
 
 ## Guardrails
 
-- `tracedecay_constructors` is best-effort for Rust (ignores `match` arms);
-  `tracedecay_field_sites` pattern-matches `.<field>`, so prefer the
-  `Struct::field` form to narrow.
+- `tracedecay_constructors` is best-effort for Rust and ignores `match` arms.
+- `tracedecay_field_sites` matches `.<field>`. Prefer `Struct::field` to narrow
+  the search.

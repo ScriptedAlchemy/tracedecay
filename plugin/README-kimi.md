@@ -1,4 +1,4 @@
-# TraceDecay Kimi Code Plugin
+# TraceDecay Kimi Code plugin
 
 Stage this bundle for host-native installation by running:
 
@@ -78,7 +78,7 @@ after the command replaces `$ARGUMENTS` in the command body.
 
 ## Local development
 
-For local development, stage the generated Kimi projection after edits:
+For local development, stage the generated Kimi bundle after edits:
 
 ```bash
 tracedecay install --agent kimi

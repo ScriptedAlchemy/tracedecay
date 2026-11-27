@@ -53,13 +53,12 @@ export type LoopbackHttpServer = {
 };
 
 /**
- * Streamable HTTP on a loopback address only. Every request must carry the
- * bearer `token` issued at startup: loopback still lets any
- * local process — and, without the Host check, any origin the browser visits —
- * reach the endpoint, so possession of the token is the authorization. Each
- * request gets its own stateless transport and McpServer over the shared
- * bridge; DNS-rebinding protection pins the accepted Host header to the bound
- * address.
+ * Serve Streamable HTTP only on a loopback address. Any local process can
+ * reach loopback, so every request must carry the bearer `token` issued at
+ * startup. Without the Host check, any origin the browser visits could reach
+ * the endpoint. Accept only the Host header for the bound address to prevent
+ * DNS rebinding. Each request gets its own stateless transport and McpServer
+ * over the shared bridge.
  */
 export async function serveLoopbackHttp(createServer: () => McpServer, host: string, port: number, token: string): Promise<LoopbackHttpServer> {
   if (host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {

@@ -1,13 +1,12 @@
 # TraceDecay plugin bundle
 
 This source tree builds the TraceDecay integrations for Claude Code, Codex,
-Cursor, Kimi Code, OpenCode, Pi, and ChatGPT. The Claude, Codex, Cursor, Kimi Code, and
-OpenCode bundles expose a host-specific MCP server key (`graph` for
-Claude/Codex, `tracedecay` for Cursor, Kimi Code, and OpenCode). Pi has no MCP
-route: its extension registers the catalog tools over the CLI bridge. Every
-bundle ships shared workflow skills and host-specific lifecycle hooks. Each hook is a bounded
-daemon-admission adapter; capture, sync, compaction, and advisory work stay in
-the daemon.
+Cursor, Kimi Code, OpenCode, Pi, and ChatGPT. Claude and Codex use the MCP
+server key `graph`. Cursor, Kimi Code, and OpenCode use `tracedecay`. Pi
+has no MCP route. Its extension registers the catalog tools over the CLI
+bridge. Every bundle ships shared workflow skills and host-specific lifecycle
+hooks. The hooks submit bounded admission requests to the daemon, which handles
+capture, sync, compaction, and advisory work.
 
 The plugin root also carries the portable Agent Plugins manifest pair
 (`plugin.json` + `mcp.json`) that the ChatGPT lifecycle stages into
@@ -84,9 +83,10 @@ never a doubled `tracedecay`.
   generated tool definitions the Hermes bridge uses. The extension registers
   one Pi tool per catalog entry; mutating tools need operator approval and
   refuse an explicit project selector. Pi's `session_start` and `agent_end`
-  events reach `tracedecay hook-pi-event`, record analytics under the `pi`
-  host, and land that session's `~/.pi/agent/sessions` transcript (or the
-  `PI_CODING_AGENT_DIR` one) through the Pi transcript source.
+  events reach `tracedecay hook-pi-event`. TraceDecay records analytics under
+  the `pi` host and captures the session transcript through the Pi transcript
+  source. It reads from `~/.pi/agent/sessions` or the directory set by
+  `PI_CODING_AGENT_DIR`.
 - `README-claude.md`, `README-codex.md`, `README-cursor.md`, `README-kimi.md`,
   `README-chatgpt.md`: host README files, deployed as `README.md`.
 - `README-opencode.md`: OpenCode host README. It is source documentation;
@@ -94,7 +94,7 @@ never a doubled `tracedecay`.
 - `README-host-bundles.md`: catalog/lifecycle contract and the host
   capability matrix.
 
-## Search Routing
+## Search routing
 
 Use `tracedecay_grep` for literal strings, regexes, and config keys inside
 indexed code. Use `tracedecay_search` for symbol names, `tracedecay_context`
