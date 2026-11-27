@@ -388,8 +388,12 @@ def validate_production_features(members):
     if features.get("default") != ["production"]:
         raise ValueError("tracedecay default feature must delegate only to production")
     production = set(features.get("production", []))
-    if not {"token-counting", "lite", "full"}.issubset(production):
+    if not {"token-counting", "lite", "medium"}.issubset(production):
         raise ValueError("tracedecay production feature set lost a required member")
+    if "full" in production:
+        raise ValueError(
+            "tracedecay production must not enable the opt-in full grammar tier"
+        )
     if "test-transport" in production:
         raise ValueError("tracedecay production feature directly enables test-transport")
 

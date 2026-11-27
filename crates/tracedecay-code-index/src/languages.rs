@@ -667,6 +667,32 @@ mod tests {
         );
     }
 
+    /// Every language the extras profile advertises registers a descriptor, so
+    /// selecting `full` delivers the whole opt-in tier. The production build
+    /// omits this tier; `gen_builds` refuses a `production` feature that
+    /// reaches `full`, and capture marks an extension with no descriptor
+    /// `UnsupportedLanguage` rather than indexing it as source.
+    #[test]
+    #[cfg(feature = "full")]
+    fn extras_profile_registers_and_extracts_every_advertised_grammar() {
+        let registry = StaticLanguageRegistry::new();
+        for (extension, language) in [
+            ("cob", "cobol"),
+            ("f90", "fortran"),
+            ("qnt", "quint"),
+            ("lean", "lean"),
+            ("gw", "gwbasic"),
+            ("bas", "msbasic2"),
+            ("qb", "qbasic"),
+        ] {
+            let descriptor = registry
+                .descriptor_for_extension(extension)
+                .unwrap_or_else(|| panic!("{extension} must be admitted under the extras profile"));
+            assert_eq!(descriptor.language.as_str(), language);
+            assert!(descriptor.capabilities.extraction);
+        }
+    }
+
     #[test]
     #[cfg(feature = "lang-markdown")]
     fn markdown_is_admitted_with_stable_section_spans() {

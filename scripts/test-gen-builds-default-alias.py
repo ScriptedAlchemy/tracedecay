@@ -174,9 +174,10 @@ class ProductionDeclarationTests(unittest.TestCase):
         self.gen = load_gen_builds()
         self.features = {
             "default": ["production"],
-            "production": ["token-counting", "lite", "full"],
+            "production": ["token-counting", "lite", "medium"],
             "token-counting": [],
             "lite": [],
+            "medium": [],
             "full": [],
         }
 
@@ -186,11 +187,13 @@ class ProductionDeclarationTests(unittest.TestCase):
             self.features | {"default": []},
             self.features | {"default": ["production", "test-transport"]},
             self.features | {"production": []},
-            self.features | {"production": ["token-counting", "lite", "full", "test-transport"]},
+            self.features | {"production": ["token-counting", "lite", "medium", "test-transport"]},
+            # The full grammar tier is opt-in; production must not reach it.
+            self.features | {"production": ["token-counting", "lite", "medium", "full"]},
         ]
         invalid_tables.extend(
             self.features | {"production": [f for f in self.features["production"] if f != missing]}
-            for missing in ("token-counting", "lite", "full")
+            for missing in ("token-counting", "lite", "medium")
         )
         packages = [[], [{"name": "tracedecay"}]] + [
             [{"name": "tracedecay", "features": table}] for table in invalid_tables
@@ -367,15 +370,15 @@ class DefaultAliasNormalizationTests(unittest.TestCase):
     def test_adds_default_when_implied_features_are_already_on(self) -> None:
         table = {
             "default": ["production"],
-            "production": ["lite", "full", "token-counting"],
+            "production": ["lite", "medium", "token-counting"],
             "lite": [],
-            "full": [],
+            "medium": [],
             "token-counting": [],
         }
-        feats = {"production", "lite", "full", "token-counting"}
+        feats = {"production", "lite", "medium", "token-counting"}
         self.assertEqual(
             self.gen.normalize_default_alias(feats, table),
-            {"default", "production", "lite", "full", "token-counting"},
+            {"default", "production", "lite", "medium", "token-counting"},
         )
 
     def test_leaves_lean_sets_without_default(self) -> None:

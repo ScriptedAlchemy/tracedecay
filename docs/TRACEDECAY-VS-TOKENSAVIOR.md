@@ -15,7 +15,7 @@ results from a synthetic indexer benchmark and a 96-task agent benchmark
 | | tracedecay | token-savior |
 |---|---|---|
 | **Implementation** | Rust + SQLite + tree-sitter | Python + in-memory dict |
-| **Languages indexed** | 46 via tree-sitter grammars (Rust, Python, Go, TS/JS, Java, Kotlin, Scala, C#, Swift, C/C++, Ruby, PHP, Dart, Lua, Perl, Bash, Pascal, COBOL, Fortran, …) | 7 via regex annotators (Python, TS/JS, Rust, Go, C, C#) + 8 config formats (TOML/JSON/YAML/XML/INI/HCL/env/Dockerfile) |
+| **Languages indexed** | 24 via tree-sitter grammars in the shipped binary (Rust, Python, Go, TS/JS, Java, Kotlin, Scala, C#, Swift, C/C++, Ruby, PHP, Dart, Bash, Pascal, …); 52 with the opt-in `full` tier | 7 via regex annotators (Python, TS/JS, Rust, Go, C, C#) + 8 config formats (TOML/JSON/YAML/XML/INI/HCL/env/Dockerfile) |
 | **MCP tools exposed** | 70+ | 68 (`full`), 15 (`optimized` default) |
 | **Branch-aware indexing** | yes, per-branch DB, `tracedecay branch …` | no |
 | **Index freshness** | on-demand staleness check per MCP call + catch-up sync on connect | no |
@@ -46,12 +46,14 @@ catches function/class declarations and import sites cleanly but
 won't resolve, for example, which `impl` block a Rust method
 belongs to or which interface a TS class implements.
 
-**tracedecay** parses **46 languages** through tree-sitter grammars,
-Rust, Python, Go, TypeScript / TSX / JavaScript, Java, Kotlin, Scala,
-C#, Swift, C, C++, Objective-C, Ruby, PHP, Dart, Lua, Perl, Bash,
-Pascal, COBOL, Fortran, OCaml, Haskell, Elixir, Erlang, Clojure, Julia,
-R, GLSL, Nix, Zig, F#, VB.NET, SQL, Protobuf, Dockerfile, TOML,
-GW-BASIC, MSBASIC2, QBasic, QuickBasic, Lean, Quint. The full AST is
+**tracedecay** parses **24 languages** in the shipped binary and **52**
+with the opt-in `full` tier, through tree-sitter grammars: Rust, Python,
+Go, TypeScript / TSX / JavaScript, Java, Kotlin, Scala, C#, Swift, C,
+C++, Ruby, PHP, Dart, Bash, Pascal, Nix, VB.NET, Protobuf, Markdown,
+JSON, and (under `full`) Objective-C, Lua, Perl, COBOL, Fortran, OCaml,
+Haskell, Elixir, Erlang, Clojure, Julia, R, GLSL, Zig, F#, SQL,
+Dockerfile, TOML, GW-BASIC, MSBASIC2, QBasic, QuickBasic, Lean, Quint.
+The full AST is
 available to the extractor, so edge kinds beyond "this name appears
 here" are recoverable: `implements`, `extends`, `type_of`, `annotates`,
 `returns`, `receives`, in addition to `calls` and `uses`. The trade-off

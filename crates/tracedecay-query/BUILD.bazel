@@ -57,6 +57,22 @@ rust_library(
 )
 
 rust_library(
+    name = "tracedecay-query__d0d3aebf044",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay_query",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//evals/agent_adoption:fixture", "//tests:fixtures_context_eval_project_src_auth", "//tests:fixtures_context_eval_project_src_net", "//tests:fixtures_context_eval_project_src_storage", "//tests:fixtures_search_quality", "//tests:fixtures_search_quality_corpus_cargo-slot_src", "//tests:fixtures_search_quality_corpus_crates_tracedecay-domain_src", "//tests:fixtures_search_quality_corpus_crates_tracedecay-domain_src_research", "//tests:shared_fixtures"],
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-code-index:tracedecay-code-index__-default_-full__dd8a092c7b6", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-graph-db:tracedecay-graph-db", "//crates/tracedecay-private-fs:tracedecay-private-fs", "//crates/tracedecay-runtime-core:tracedecay-runtime-core", "//crates/tracedecay-temporal-query:tracedecay-temporal-query"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
+    crate_features = [],
+)
+
+rust_library(
     name = "tracedecay-query__d2fdef99ab4",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
@@ -82,22 +98,6 @@ rust_library(
         + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//evals/agent_adoption:fixture", "//tests:fixtures_context_eval_project_src_auth", "//tests:fixtures_context_eval_project_src_net", "//tests:fixtures_context_eval_project_src_storage", "//tests:fixtures_search_quality", "//tests:fixtures_search_quality_corpus_cargo-slot_src", "//tests:fixtures_search_quality_corpus_crates_tracedecay-domain_src", "//tests:fixtures_search_quality_corpus_crates_tracedecay-domain_src_research", "//tests:shared_fixtures"],
     version = "0.1.0",
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-code-index:tracedecay-code-index__bare__d455cac0e1d", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-graph-db:tracedecay-graph-db", "//crates/tracedecay-private-fs:tracedecay-private-fs", "//crates/tracedecay-runtime-core:tracedecay-runtime-core", "//crates/tracedecay-temporal-query:tracedecay-temporal-query"],
-    proc_macro_deps = all_crate_deps(proc_macro = True),
-    aliases = aliases(normal = True),
-    rustc_flags = perf_rustc_flags(1),
-    crate_features = [],
-)
-
-rust_library(
-    name = "tracedecay-query__d773ffcfb02",
-    srcs = glob(["src/**/*.rs"]),
-    crate_root = "src/lib.rs",
-    crate_name = "tracedecay_query",
-    edition = crate_edition(),
-    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
-        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//evals/agent_adoption:fixture", "//tests:fixtures_context_eval_project_src_auth", "//tests:fixtures_context_eval_project_src_net", "//tests:fixtures_context_eval_project_src_storage", "//tests:fixtures_search_quality", "//tests:fixtures_search_quality_corpus_cargo-slot_src", "//tests:fixtures_search_quality_corpus_crates_tracedecay-domain_src", "//tests:fixtures_search_quality_corpus_crates_tracedecay-domain_src_research", "//tests:shared_fixtures"],
-    version = "0.1.0",
-    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-code-index:tracedecay-code-index__-default_-medium__d6a7dfc4236", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-graph-db:tracedecay-graph-db", "//crates/tracedecay-private-fs:tracedecay-private-fs", "//crates/tracedecay-runtime-core:tracedecay-runtime-core", "//crates/tracedecay-temporal-query:tracedecay-temporal-query"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
     rustc_flags = perf_rustc_flags(1),

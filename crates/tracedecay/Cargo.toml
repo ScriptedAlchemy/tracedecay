@@ -26,7 +26,7 @@ default = ["production"]
 production = [
     "token-counting",
     "lite",
-    "full",
+    "medium",
 ]
 
 # Exact token counting for the Savings & Cost dashboard (tiktoken BPE).
@@ -37,7 +37,10 @@ token-counting = ["tracedecay-agent-hosts/token-counting", "tracedecay-dashboard
 
 # Lite enables the core code grammars plus Markdown and JSON. Markdown uses
 # its dedicated grammar crate, so lite does not require the large bundle.
-# The production feature above also enables the full grammar tier.
+# The production feature above also enables the medium grammar tier. The
+# full tier is opt-in: it adds 86.4 MB (23.8%) to the shipped binary for
+# languages no tracker issue names, so a source build selects `full`
+# explicitly when it needs them.
 lite = ["tracedecay-code-index/lite", "tracedecay-code-index-runtime/lite"]
 
 medium = ["tracedecay-code-index/medium"]

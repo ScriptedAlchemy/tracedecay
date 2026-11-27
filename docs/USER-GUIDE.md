@@ -1444,7 +1444,7 @@ directly. Edit tools modify source files.
 
 ## Supported Languages
 
-TraceDecay supports more than 50 languages, organized into three tiers. Each tier includes all the languages from the tier below it.
+TraceDecay organizes its tree-sitter grammars into three tiers. Each tier includes all the languages from the tier below it.
 
 ### Lite (14 languages)
 
@@ -1452,24 +1452,27 @@ Always compiled. The smallest binary for the most popular languages.
 
 Rust, Go, Java, Scala, TypeScript, JavaScript, Python, C, C++, Kotlin, C#, Swift, Svelte, Astro
 
-### Medium (Lite + 9 = 23 languages)
+### Medium (Lite + 9 languages, plus Markdown and JSON)
 
-Adds scripting, config, and additional systems languages.
+Adds scripting, config, and additional systems languages. Markdown and JSON ride in every tier because documentation and `package.json`/`tsconfig` are architecture content.
 
 Dart, Pascal, PHP, Ruby, Bash, Protobuf, PowerShell, Nix, VB.NET
 
-### Full (Medium + 27+ languages)
+**The shipped release binary carries the Medium tier.** A file whose language is not in this set is reported as `unsupported_language` in the index; it is never indexed as source and never reported as an empty success.
 
-Everything, including legacy and niche languages.
+### Full (Medium + 28 languages, opt-in)
 
-Lua, Zig, Objective-C, Perl, Batch/CMD, Fortran, COBOL, MS BASIC 2.0, GW-BASIC, QBasic, QuickBASIC 4.5
+Everything, including legacy and niche languages. This tier is not in the shipped binary: it adds 86.4 MB (23.8%) to the release artifact for languages no tracker issue names, so a source build selects it explicitly.
 
-### Mixing individual languages
+Lua, Zig, Objective-C, Perl, Batch/CMD, Fortran, COBOL, MS BASIC 2.0, GW-BASIC, QBasic, QuickBASIC 4.5, Dockerfile, GLSL, WGSL, HLSL, Metal, R, SQL, Julia, Haskell, OCaml, Clojure, Erlang, Elixir, F#, Quint, TOML, Lean
 
-Source builds can cherry-pick individual languages without taking a full tier:
+### Selecting a tier in a source build
+
+The `production` feature is what the release binary builds. It carries Lite and Medium. To build with the Full tier, or to cherry-pick individual languages without taking a full tier:
 
 ```bash
-cargo build -p tracedecay-cli --release --no-default-features --features lang-nix,lang-bash
+cargo build -p tracedecay-cli --release --features full
+cargo build -p tracedecay-cli --release --no-default-features --features production,lang-nix,lang-bash
 ```
 
 ### What gets extracted
