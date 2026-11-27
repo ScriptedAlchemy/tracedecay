@@ -50,13 +50,14 @@ async fn an_overlapping_old_compiler_cannot_replace_new_records_or_status_for_th
     )
     .unwrap();
     std::fs::write(root.join("node_modules/hold-compiler"), "").unwrap();
-    // Delay delivery of the installed compiler's actual check. The wrapper
+    // Delay delivery of the installed compiler's actual check, not its
+    // configuration, file-listing or build-state queries. The wrapper
     // synthesizes no diagnostics: tsc has already read the old config before
     // the replacement is admitted, but its producer is still awaiting exit.
     write_executable_script(
         &bin.join("tsc"),
         b"#!/bin/sh\n\
-          case \" $* \" in *\" --noEmit \"*) checking=1 ;; esac\n\
+          case \" $* \" in *\" --noEmit \"*) case \" $* \" in *\" --listFilesOnly \"*) ;; *) checking=1 ;; esac ;; esac\n\
           if [ -n \"$checking\" ] && [ -f node_modules/hold-compiler ]; then\n\
             ./node_modules/.bin/real-tsc \"$@\" > node_modules/old-output 2>&1\n\
             result=$?\n\

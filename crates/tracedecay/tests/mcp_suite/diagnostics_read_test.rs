@@ -117,8 +117,8 @@ async fn diagnostics_read_names_a_missing_producer_and_rejects_a_bad_scope() {
 async fn typescript_project_publishes_diagnostics_from_its_own_compiler() {
     use crate::common::typescript_project::{
         TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TypeScriptFixtureCompiler,
-        is_typescript_fixture_configuration_query, typescript_fixture_build_info,
-        write_typescript_diagnostics_fixture,
+        is_typescript_fixture_configuration_query, is_typescript_fixture_listing_query,
+        typescript_fixture_build_info, write_typescript_diagnostics_fixture,
     };
     use crate::support::production_composition_fixture_with_sources;
 
@@ -177,7 +177,9 @@ async fn typescript_project_publishes_diagnostics_from_its_own_compiler() {
         .expect("canonical project root");
     let mut checks = 0;
     for invocation in invocations.lines() {
-        if is_typescript_fixture_configuration_query(invocation, &canonical_root, "tsconfig.json") {
+        if is_typescript_fixture_configuration_query(invocation, &canonical_root, "tsconfig.json")
+            || is_typescript_fixture_listing_query(invocation, &canonical_root, "tsconfig.json")
+        {
             continue;
         }
         let build_info =
@@ -562,8 +564,8 @@ async fn typescript_monorepo_checks_each_package_tsconfig() {
     use crate::common::typescript_project::{
         TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TYPESCRIPT_MONOREPO_APP_FILE,
         TYPESCRIPT_MONOREPO_UNOWNED_FILE, TypeScriptFixtureCompiler,
-        is_typescript_fixture_configuration_query, typescript_fixture_build_info,
-        write_typescript_monorepo_diagnostics_fixture,
+        is_typescript_fixture_configuration_query, is_typescript_fixture_listing_query,
+        typescript_fixture_build_info, write_typescript_monorepo_diagnostics_fixture,
     };
     use crate::support::production_composition_fixture_with_sources;
 
@@ -627,18 +629,16 @@ async fn typescript_monorepo_checks_each_package_tsconfig() {
         typescript_fixture_build_info(line, &root, &format!("packages/{package}/tsconfig.json"))
             .is_some()
     };
-    let resolves = |line: &str, package: &str| {
-        is_typescript_fixture_configuration_query(
-            line,
-            &root,
-            &format!("packages/{package}/tsconfig.json"),
-        )
+    let prepares = |line: &str, package: &str| {
+        let tsconfig = format!("packages/{package}/tsconfig.json");
+        is_typescript_fixture_configuration_query(line, &root, &tsconfig)
+            || is_typescript_fixture_listing_query(line, &root, &tsconfig)
     };
     assert!(
         invocations.lines().all(|line| ["app", "lib"]
             .iter()
-            .any(|package| checks(line, package) || resolves(line, package))),
-        "every run resolves or checks one package tsconfig from the workspace root: \
+            .any(|package| checks(line, package) || prepares(line, package))),
+        "every run resolves, lists or checks one package tsconfig from the workspace root: \
          {invocations}"
     );
     for package in ["app", "lib"] {

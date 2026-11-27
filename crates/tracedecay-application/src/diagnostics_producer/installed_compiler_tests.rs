@@ -288,13 +288,17 @@ impl InstalledCompilerProject {
     }
 
     /// The tsconfigs, relative to the root, the compiler checked since the
-    /// last call; configuration and build-state queries are not checks.
+    /// last call; configuration, file-listing and build-state queries are not
+    /// checks.
     pub(super) fn checked(&self) -> Vec<String> {
         let log = std::fs::read_to_string(self.compiler_log()).unwrap_or_default();
         std::fs::write(self.compiler_log(), "").unwrap();
         let mut checked = log
             .lines()
-            .filter(|run| run.split(' ').any(|arg| arg == "--noEmit"))
+            .filter(|run| {
+                let args = run.split(' ').collect::<Vec<_>>();
+                args.contains(&"--noEmit") && !args.contains(&"--listFilesOnly")
+            })
             .map(|run| {
                 let mut args = run.split(' ');
                 args.find(|arg| *arg == "-p").unwrap();
@@ -583,5 +587,172 @@ fn compiler_identity_refuses_an_oversized_directory_only_package() {
         )
         .is_none(),
         "directory entries consume the identity read budget even without payload files"
+    );
+}
+
+/// A source the compiler includes but the code index does not seal, such as
+/// one a `.gitignore` or index policy excludes.
+const UNSEALED_SOURCE: &str = "src/generated.ts";
+
+impl InstalledCompilerProject {
+    /// The identity of the sources the index seals, leaving out
+    /// [`UNSEALED_SOURCE`] the way the index leaves out an excluded file.
+    fn identity_without_unsealed(&self, generation: &str) -> CodeIndexPublicationIdentityV1 {
+        let sealed = self.identity(generation);
+        let files = sealed
+            .file_digests()
+            .filter(|(path, _)| *path != UNSEALED_SOURCE)
+            .map(|(path, digest)| {
+                (
+                    path.to_owned(),
+                    id(&format!("file.{}", path.replace('/', "."))),
+                    digest.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        CodeIndexPublicationIdentityV1::new(
+            id(generation),
+            id("repository.installed-compiler"),
+            Some(id("worktree.installed-compiler")),
+            Some(id("ref.main")),
+            None,
+            files,
+        )
+    }
+
+    async fn run_without_unsealed(
+        &self,
+        generation: &str,
+        state: &mut TypeScriptProducerStateV1,
+    ) -> CompilerProducerRunV1 {
+        run_typescript_producer_v1(
+            &self.root,
+            &typescript_projects(&self.root).expect("tsconfig discovery"),
+            &self.identity_without_unsealed(generation),
+            &DiagnosticsStore::new_runtime(&self.connection),
+            &self.build_info_dir,
+            state,
+            UtcMicros(1_700_000_000_000_000),
+        )
+        .await
+    }
+}
+
+/// A project is clean and published. A source the compiler would include is
+/// then added, but the code index does not seal it, so it is in no sealed
+/// digest and in no previous build-info. Under typescript@5 an absolute
+/// `include` keeps `--showConfig` from listing the root files, so the
+/// configuration reads the same too. The previous clean result cannot rule
+/// out that the compiler now reads the file, so the project is rechecked. The
+/// finding sits in a file the index does not hold, so it cannot be published
+/// onto a generation; the run says so rather than republishing the clean page.
+#[tokio::test]
+async fn an_added_source_the_index_does_not_seal_rechecks_a_clean_project() {
+    let project = InstalledCompilerProject::installing(
+        PinnedTypeScript::Five,
+        &[
+            ("tsconfig.json", r#"{"include":["src/**/*.ts"]}"#),
+            ("src/index.ts", "export const index: number = 1;\n"),
+        ],
+    );
+    let absolute = project.root.join("src/**/*.ts");
+    std::fs::write(
+        project.root.join("tsconfig.json"),
+        format!(r#"{{"include":["{}"]}}"#, absolute.display()),
+    )
+    .unwrap();
+    project.log_compiler_runs();
+    let mut state = producer_state();
+    assert_eq!(
+        project
+            .run_without_unsealed("generation.unsealed.1", &mut state)
+            .await,
+        published("generation.unsealed.1", 0, 1)
+    );
+    assert_eq!(project.checked(), ["tsconfig.json"]);
+    assert_eq!(
+        project.findings("generation.unsealed.1").await,
+        Vec::new(),
+        "the project is clean"
+    );
+
+    std::fs::write(
+        project.root.join(UNSEALED_SOURCE),
+        "export const generated: string = 2;\n",
+    )
+    .unwrap();
+    let second = project
+        .run_without_unsealed("generation.unsealed.2", &mut state)
+        .await;
+    assert_eq!(
+        second,
+        CompilerProducerRunV1::NoResolvableDiagnostics {
+            unresolved: vec![format!(
+                "{} is not in the current code-index generation",
+                UNSEALED_SOURCE
+            )],
+        },
+        "the clean result must not be republished for a program that now reads a file no \
+         sealed digest covers"
+    );
+    assert_eq!(
+        project.checked(),
+        ["tsconfig.json"],
+        "the compiler, not a sealed digest, established that the program changed"
+    );
+    assert_eq!(
+        project.findings("generation.unsealed.2").await,
+        Vec::new(),
+        "nothing was published for the generation, so no clean page stands either"
+    );
+}
+
+/// A project whose program the compiler cannot list is never reused, even on
+/// a generation that changed nothing: nothing then says which files it
+/// holds, so the previous result cannot stand. The check itself still runs
+/// and its findings are published; only reuse is refused.
+#[tokio::test]
+async fn a_program_the_compiler_cannot_list_is_never_reused() {
+    let project = InstalledCompilerProject::new();
+    project.log_compiler_runs();
+    // Install the refusal before the first check so the second generation
+    // changes neither the launcher fingerprint nor any sealed input.
+    let shim = std::fs::read_to_string(project.launcher()).unwrap();
+    let refusing = shim.replacen(
+        "#!/bin/sh\n",
+        "#!/bin/sh\n\
+         case \" $* \" in *\" --listFilesOnly \"*)\n\
+           if [ -f node_modules/refuse-program-listing ]; then\n\
+             echo 'error TS5055: cannot list' >&2; exit 1\n\
+           fi ;; esac\n",
+        1,
+    );
+    std::fs::remove_file(project.launcher()).unwrap();
+    write_executable_script(&project.launcher(), refusing).unwrap();
+    let mut state = producer_state();
+    assert_eq!(
+        project.run("generation.unlistable.1", &mut state).await,
+        published("generation.unlistable.1", 1, 1)
+    );
+    assert_eq!(project.checked(), ["tsconfig.json"]);
+    assert_eq!(
+        project.findings("generation.unlistable.1").await,
+        missing_property()
+    );
+
+    std::fs::write(project.root.join("node_modules/refuse-program-listing"), "").unwrap();
+    assert_eq!(
+        project.run("generation.unlistable.2", &mut state).await,
+        published("generation.unlistable.2", 1, 1),
+        "an unlistable program is rechecked rather than reused"
+    );
+    assert_eq!(
+        project.checked(),
+        ["tsconfig.json"],
+        "the check still runs and its findings are published"
+    );
+    assert_eq!(
+        project.findings("generation.unlistable.2").await,
+        missing_property()
     );
 }
