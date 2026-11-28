@@ -347,8 +347,8 @@ importers:
   plugin/cursor-native-extension:
     dependencies:
       vscode-languageclient:
-        specifier: ^11.0.0
-        version: 11.0.1
+        specifier: ^12.0.0
+        version: 12.0.0
     devDependencies:
       '@rslib/core':
         specifier: ^1.0.0
@@ -716,6 +716,9 @@ packages:
     peerDependenciesMeta:
       '@types/node':
         optional: true
+
+  '@isaacs/nonrecursive-glob-match@1.1.0':
+    resolution: {integrity: sha512-GPm/Dbvk5RLmhRnxXIa7nTpK0xtl4E0wj0MslsuNiJ1FIROU+2+9lgUC/dgF7Ey4QCWhfEsgxilMRMCdHPfDfw==}
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -2236,9 +2239,9 @@ packages:
     resolution: {integrity: sha512-Lbgzdk0h4juoQ9fCKXW4by0UJqj+nOOrI9MJ1sSj4nI8aI2eo1qmvQEie4VD1glsS250n15LsWsYtCugiStS5A==}
     engines: {node: '>=18'}
 
-  minimatch@10.2.6:
-    resolution: {integrity: sha512-vpLQEs+VLCr1nU0BXS07maYoFwlDAH0gngQuuttxIwutDFEMHq2blX+8vpgxDdK3J1PwjCJiep77OitTZ4Ll1A==}
-    engines: {node: 18 || 20 || >=22}
+  minimatch@11.0.9:
+    resolution: {integrity: sha512-KCFkfyjqerNlSstjlhIGNXIKZGA/6O4V4RlhZ+Dsr621SPPw0mzlypE9D9ZOoPiVefHID+j7/XuMMlqfD/F60Q==}
+    engines: {node: 20 || >=22}
 
   ms@2.1.3:
     resolution: {integrity: sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==}
@@ -2752,16 +2755,16 @@ packages:
       jsdom:
         optional: true
 
-  vscode-jsonrpc@10.0.1:
-    resolution: {integrity: sha512-fGdu32Sp4GeSQ2twML46WPMB6cFfIJ4Vdx1K5s/WPzUYdShVPCGKscYltn5hiNz748xKNJdBHgocAvuN48tLGw==}
+  vscode-jsonrpc@10.0.2:
+    resolution: {integrity: sha512-U6K7wa1t8jTZf7eoHJLKSNdHE0oi9r/+/4TSXWPSLQ2FSQVMYLR5TvzQHrYjwW/lLjq0eTm+pi8vWz4jSV7o4w==}
     engines: {node: '>=14.17.0'}
 
-  vscode-languageclient@11.0.1:
-    resolution: {integrity: sha512-I/1dN1AVaJfos7d7RJ0uPrK+ikUuOc7a/8uT6MdHjd/mkyXYq7Sw3csgGQpU/cZWPwcl3NsMlbKfHZV+rIRkFw==}
+  vscode-languageclient@12.0.0:
+    resolution: {integrity: sha512-lDxVFl/sr++Mf/v9oY9Kh9Ihh+241zkVijtjJ1Q9w4QSeOkjojKO3Teg5bNPWHZU1zXbaI9/OTcajYjDZUWPEA==}
     engines: {vscode: ^1.91.0}
 
-  vscode-languageserver-protocol@3.18.6:
-    resolution: {integrity: sha512-Ocoa4g/vyB66ZFkIKApV8/FTjQ+EYeOVDkq/nzw9SmfX+L6Ikl5KtL5AjmSAQ7nhqfud1ojiVuy+drHdvAlgUg==}
+  vscode-languageserver-protocol@3.18.7:
+    resolution: {integrity: sha512-5oItSZDTTehe0zXzwJCFUMso6RfUb2FWVTFfQxAesV3nTbkY1hjW3O6q8872M9TACEXFcALaU5xU37sGudYI8g==}
 
   vscode-languageserver-textdocument@1.0.16:
     resolution: {integrity: sha512-qeNEuOi9a3qkqRf7Gfez2WL2VwlBTLCNekHBGO9kxPVUp9XuY15yfTJ9jwvOwKI0I2MhUUfZq95NSp+LK1CLQg==}
@@ -3118,6 +3121,8 @@ snapshots:
   '@inquirer/type@4.2.0(@types/node@26.6.11)':
     optionalDependencies:
       '@types/node': 26.6.11
+
+  '@isaacs/nonrecursive-glob-match@1.1.0': {}
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
@@ -4435,8 +4440,9 @@ snapshots:
       mime-db: 1.54.0
     optional: true
 
-  minimatch@10.2.6:
+  minimatch@11.0.9:
     dependencies:
+      '@isaacs/nonrecursive-glob-match': 1.1.0
       brace-expansion: 5.0.12
 
   ms@2.1.3: {}
@@ -4919,18 +4925,18 @@ snapshots:
     transitivePeerDependencies:
       - msw
 
-  vscode-jsonrpc@10.0.1: {}
+  vscode-jsonrpc@10.0.2: {}
 
-  vscode-languageclient@11.0.1:
+  vscode-languageclient@12.0.0:
     dependencies:
-      minimatch: 10.2.6
+      minimatch: 11.0.9
       semver: 7.8.5
-      vscode-languageserver-protocol: 3.18.6
+      vscode-languageserver-protocol: 3.18.7
       vscode-languageserver-textdocument: 1.0.16
 
-  vscode-languageserver-protocol@3.18.6:
+  vscode-languageserver-protocol@3.18.7:
     dependencies:
-      vscode-jsonrpc: 10.0.1
+      vscode-jsonrpc: 10.0.2
       vscode-languageserver-types: 3.18.6
 
   vscode-languageserver-textdocument@1.0.16: {}
